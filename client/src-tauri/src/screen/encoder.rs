@@ -320,6 +320,49 @@ unsafe fn laco(
     let mut bitrate_atual = bitrate_inicial;
 
     while !stop.load(Ordering::Relaxed) {
+        // Pedido de bitrate e de quadro-chave valem para os dois modos.
+        if let Some(pedido) = source.take_rate_control_request() {
+            let alvo = pedido.target_bitrate_bps.max(200_000);
+            if alvo.abs_diff(bitrate_atual) * 20 > bitrate_atual {
+                bitrate_atual = alvo;
+                unsafe { mft.definir_bitrate(alvo) };
+            }
+        }
+        if source.take_keyframe_request() || chave.swap(false, Ordering::Relaxed) {
+            forcar_chave = true;
+        }
+
+        // Codificador sincrono nao anuncia nada: recebe quadro, entrega, puxa
+        // a saida. E o caminho de boa parte das placas em Windows 10.
+        if !mft.assincrono {
+            match rx.recv_timeout(Duration::from_millis(15)) {
+                Ok(job) => {
+                    if job.largura != mft.largura || job.altura != mft.altura {
+                        if let Err(erro) = unsafe {
+                            mft.reabrir(job.largura, job.altura, fps, bitrate_atual)
+                        } {
+                            eprintln!("[encoder] nao foi possivel mudar de tamanho: {erro}");
+                            return;
+                        }
+                        forcar_chave = true;
+                        continue;
+                    }
+                    if forcar_chave {
+                        unsafe { mft.forcar_chave() };
+                        forcar_chave = false;
+                    }
+                    if let Err(erro) = unsafe { mft.entregar(&job) } {
+                        eprintln!("[encoder] quadro recusado: {erro}");
+                        return;
+                    }
+                    unsafe { mft.drenar_tudo(source) };
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            continue;
+        }
+
         // 1. Eventos do codificador primeiro: sair de `HaveOutput` pendente
         //    libera o buffer interno da placa.
         let mut houve_evento = false;
@@ -332,23 +375,7 @@ unsafe fn laco(
             }
         }
 
-        // 2. O que o controle de congestionamento do WebRTC pediu. Sem isto o
-        //    codificador ignoraria a rede: o passthrough nao tem como apertar
-        //    o bitrate sozinho, ele so empacota o que a gente entrega.
-        if let Some(pedido) = source.take_rate_control_request() {
-            let alvo = pedido.target_bitrate_bps.max(200_000);
-            // Mexer no codificador a cada quadro custa mais do que a precisao
-            // vale; 5% de diferenca ja e uma mudanca real de rede.
-            if alvo.abs_diff(bitrate_atual) * 20 > bitrate_atual {
-                bitrate_atual = alvo;
-                unsafe { mft.definir_bitrate(alvo) };
-            }
-        }
-        if source.take_keyframe_request() || chave.swap(false, Ordering::Relaxed) {
-            forcar_chave = true;
-        }
-
-        // 3. Um quadro por pedido de entrada.
+        // 2. Um quadro por pedido de entrada.
         if precisa_entrada > 0 {
             match rx.recv_timeout(Duration::from_millis(15)) {
                 Ok(job) => {
@@ -392,7 +419,7 @@ unsafe fn laco(
 /// O codificador em si, com o que precisa ser lembrado entre quadros.
 struct Mft {
     transform: IMFTransform,
-    eventos: IMFMediaEventGenerator,
+    eventos: Option<IMFMediaEventGenerator>,
     codec_api: Option<ICodecAPI>,
     codec: HwCodec,
     nome: String,
@@ -401,6 +428,12 @@ struct Mft {
     /// O MFT de hardware entrega as amostras de saida dele. Guardado porque um
     /// MFT que nao entrega exige buffer nosso a cada `ProcessOutput`.
     entrega_amostras: bool,
+    /// MFT assincrono avisa por evento quando quer quadro e quando tem saida.
+    /// O sincrono nao avisa nada: e chamar `ProcessInput` e depois puxar a
+    /// saida ate ela acabar. Os dois existem em hardware, e tratar so o
+    /// primeiro fazia a placa do outro tipo ser descartada como se nao
+    /// funcionasse.
+    assincrono: bool,
 }
 
 impl Mft {
@@ -519,8 +552,10 @@ impl Mft {
 
         // MFT de hardware nasce trancado: sem o destravamento assincrono, toda
         // chamada devolve MF_E_TRANSFORM_ASYNC_LOCKED.
+        let mut assincrono = false;
         if let Ok(atributos) = unsafe { transform.GetAttributes() } {
-            if unsafe { atributos.GetUINT32(&MF_TRANSFORM_ASYNC) }.unwrap_or(0) == 1 {
+            assincrono = unsafe { atributos.GetUINT32(&MF_TRANSFORM_ASYNC) }.unwrap_or(0) == 1;
+            if assincrono {
                 unsafe { atributos.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1) }
                     .map_err(|e| format!("nao destravou ({nome}): {e}"))?;
             }
@@ -530,9 +565,9 @@ impl Mft {
         }
 
         let mut mft = Self {
-            eventos: transform
-                .cast::<IMFMediaEventGenerator>()
-                .map_err(|e| format!("sem fila de eventos ({nome}): {e}"))?,
+            // Só o assincrono tem fila de eventos; exigir dela do sincrono
+            // recusava um codificador que funciona.
+            eventos: transform.cast::<IMFMediaEventGenerator>().ok(),
             codec_api: transform.cast::<ICodecAPI>().ok(),
             transform,
             codec,
@@ -540,6 +575,7 @@ impl Mft {
             largura,
             altura,
             entrega_amostras: true,
+            assincrono,
         };
         unsafe { mft.configurar(largura, altura, fps, bitrate) }?;
         Ok(mft)
@@ -659,8 +695,22 @@ impl Mft {
 
     /// Proximo evento do MFT, sem esperar. `None` quando a fila esta vazia.
     unsafe fn proximo_evento(&self) -> Option<u32> {
-        let evento = unsafe { self.eventos.GetEvent(MF_EVENT_FLAG_NO_WAIT) }.ok()?;
+        let eventos = self.eventos.as_ref()?;
+        let evento = unsafe { eventos.GetEvent(MF_EVENT_FLAG_NO_WAIT) }.ok()?;
         unsafe { evento.GetType() }.ok()
+    }
+
+    /// Puxa tudo o que houver de saida. E assim que se trabalha com o MFT
+    /// sincrono: entregou um quadro, tira o que sair ate faltar entrada.
+    unsafe fn drenar_tudo(&self, source: &NativeVideoSource) {
+        // Teto para nao girar para sempre se o MFT devolver saida sem parar.
+        for _ in 0..8 {
+            let antes = unsafe { self.puxar_saida() };
+            match antes {
+                Some(amostra) => unsafe { self.entregar_amostra(source, amostra) },
+                None => return,
+            }
+        }
     }
 
     unsafe fn definir_bitrate(&self, bps: u64) {
@@ -713,6 +763,21 @@ impl Mft {
 
         let limite = std::time::Instant::now() + Duration::from_secs(3);
         let mut entregue = false;
+
+        // O sincrono nao avisa nada: entrega e puxa.
+        if !self.assincrono {
+            unsafe { self.entregar(&teste) }?;
+            while std::time::Instant::now() < limite {
+                if unsafe { self.puxar_saida() }.is_some() {
+                    unsafe { self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0) }
+                        .map_err(|e| e.to_string())?;
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            return Err("nenhuma saida em 3s (codificador sincrono)".into());
+        }
+
         while std::time::Instant::now() < limite {
             while let Some(tipo) = unsafe { self.proximo_evento() } {
                 if tipo == METransformNeedInput.0 as u32 && !entregue {
@@ -778,7 +843,11 @@ impl Mft {
     /// Tira uma unidade comprimida do codificador e entrega ao LiveKit.
     unsafe fn drenar_saida(&self, source: &NativeVideoSource) {
         let Some(amostra) = (unsafe { self.puxar_saida() }) else { return };
+        unsafe { self.entregar_amostra(source, amostra) };
+    }
 
+    /// Manda uma amostra ja comprimida para a faixa publicada.
+    unsafe fn entregar_amostra(&self, source: &NativeVideoSource, amostra: IMFSample) {
         let chave = unsafe { amostra.GetUINT32(&MFSampleExtension_CleanPoint) }.unwrap_or(0) == 1;
         let timestamp_us = unsafe { amostra.GetSampleTime() }.unwrap_or(0) / 10;
 

@@ -2102,8 +2102,12 @@ screenButton.onclick = async () => {
     // a primeira maquina de fora nao conseguiu compartilhar: sem console num
     // build de release, se ninguem disser, ninguem descobre.
     console.info("[tela]", ondeComprimiu);
-    if (ondeComprimiu.includes("compressão software:")) {
-      showToast("A placa de vídeo não assumiu a compressão; usando o processador.");
+    // O motivo vai junto no aviso, e nao so no console. Quem esta do outro lado
+    // do país não tem como abrir o console, e sem o motivo o relato chega como
+    // "não funciona" — que foi exatamente o que aconteceu duas vezes.
+    const queda = ondeComprimiu.split("compressão software:")[1];
+    if (queda !== undefined) {
+      showToast("A placa não assumiu a compressão:" + queda + ". Usando o processador.");
     }
     vigiarJanelaTransmitida();
     screenEnabled = true;
