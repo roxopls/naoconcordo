@@ -661,8 +661,7 @@ function announceVoice(roomId: string) {
 /// da chamada deixava a tela sendo publicada na sala antiga com o botao ja
 /// apagado, e a interface passava a mentir sobre o que estava no ar.
 async function sairDaChamada() {
-  pararMedidorDoPortao?.();
-  pararMedidorDoPortao = null;
+  pararPortao();
   portaoAberto = true;
   // O aviso de saida e o som ficam aqui porque o `Disconnected` da sala nao
   // vale mais para ela: `room` ja aponta para outro lugar quando o evento
@@ -1835,7 +1834,7 @@ async function connectVoice() {
     audioEnabled = true; audioButton.classList.remove("active"); setIcon(audioButton, "audio");
     await unlockAudio(next);
     await applySavedDevices(next);
-    reiniciarPortao();
+    void reiniciarPortao();
     applyAllVolumes();
     renderPeople(); renderNavigation();
   } catch (error) {
@@ -1849,26 +1848,83 @@ async function connectVoice() {
 // O botao de mudo diz se a pessoa **quer** falar; o portao diz se ela **esta**
 // falando agora. Os dois precisam concordar antes de a faixa ir ao ar, senao a
 // ativacao por voz reabriria um microfone que foi mudado de proposito.
+// Fluxo de microfone usado **so para medir**, separado do que vai ao ar.
+//
+// O portao silencia a faixa publicada, e `mute()` do LiveKit faz
+// `mediaStreamTrack.enabled = false` — faixa desligada entrega silencio. Medir
+// a propria faixa publicada era um laco fechado: o portao fechava uma vez, o
+// medidor passava a ler silencio, o nivel nunca mais subia e o microfone nunca
+// mais abria. Este fluxo nunca e silenciado, entao continua ouvindo a pessoa
+// mesmo com o portao fechado.
+//
+// E um so, compartilhado entre o portao e o medidor das configuracoes: abrir o
+// microfone duas vezes em paralelo funciona, mas gasta a toa.
+let fluxoDeMedicao: MediaStream | null = null;
+let usuariosDaMedicao = 0;
+
+async function pegarFaixaDeMedicao(): Promise<MediaStreamTrack | null> {
+  usuariosDaMedicao += 1;
+  if (!fluxoDeMedicao) {
+    try {
+      fluxoDeMedicao = await navigator.mediaDevices.getUserMedia({
+        audio: voz.opcoesDeCaptura(readDevices().mic),
+      });
+    } catch {
+      usuariosDaMedicao -= 1;
+      return null;
+    }
+  }
+  const faixa = fluxoDeMedicao.getAudioTracks()[0] || null;
+  // Fluxo sem faixa de audio nao serve para nada, e quem pediu nao vai chamar
+  // `soltar` — devolver a contagem aqui evita segurar o microfone para sempre.
+  if (!faixa) soltarFaixaDeMedicao();
+  return faixa;
+}
+
+function soltarFaixaDeMedicao() {
+  usuariosDaMedicao = Math.max(0, usuariosDaMedicao - 1);
+  if (usuariosDaMedicao > 0) return;
+  // Soltar o microfone de verdade: sem isso o Windows mantem o aviso de "em
+  // uso" depois de a chamada acabar.
+  fluxoDeMedicao?.getTracks().forEach(faixa => faixa.stop());
+  fluxoDeMedicao = null;
+}
+
 let pararMedidorDoPortao: (() => void) | null = null;
 let portaoAberto = true;
 let fecharPortaoEm = 0;
 let pttPressionado = false;
 
-/// Aplica ao vivo o que o portao decidiu. Silenciar a faixa e diferente de
-/// despublicar: o sid nao muda, entao ninguem precisa reassinar nada.
+/// Aplica ao vivo o que o portao decidiu, **sem contar para a sala**.
+///
+/// Liga e desliga a faixa crua em vez de chamar `mute()` do LiveKit. Os dois
+/// deixam de enviar som, mas o `mute()` anuncia o estado para todo mundo: cada
+/// silencio entre duas frases acendia o icone de microfone desligado no painel
+/// dos outros, e quem estava conversando parecia estar mutando e desmutando
+/// sem parar.
+///
+/// O mudo de verdade — o botao — continua passando pelo LiveKit, porque ali o
+/// aviso e justamente o que se quer: os outros precisam saber que voce se
+/// calou de proposito.
 function aplicarPortao() {
-  const faixa = room?.localParticipant.audioTrackPublications.values().next().value?.track;
-  if (!faixa) return;
-  const deveEnviar = micEnabled && portaoAberto;
-  if (deveEnviar && faixa.isMuted) void faixa.unmute();
-  if (!deveEnviar && !faixa.isMuted) void faixa.mute();
+  const bruta = room?.localParticipant.audioTrackPublications.values().next().value
+    ?.track?.mediaStreamTrack;
+  if (!bruta) return;
+  bruta.enabled = micEnabled && portaoAberto;
+}
+
+/// Desliga o portao e devolve o microfone de medicao.
+function pararPortao() {
+  if (!pararMedidorDoPortao) return;
+  pararMedidorDoPortao();
+  pararMedidorDoPortao = null;
+  soltarFaixaDeMedicao();
 }
 
 /// Liga o portao conforme o modo escolhido. Chamado ao entrar na chamada e
 /// sempre que a configuracao muda.
-function reiniciarPortao() {
-  pararMedidorDoPortao?.();
-  pararMedidorDoPortao = null;
+async function reiniciarPortao() {
+  pararPortao();
   const modo = voz.lerModo();
   if (!room || modo === "sempre") {
     portaoAberto = true;
@@ -1880,13 +1936,24 @@ function reiniciarPortao() {
     aplicarPortao();
     return;
   }
-  // Ativacao por voz: o medidor le a propria faixa que esta sendo enviada.
-  const faixa = room.localParticipant.audioTrackPublications.values().next().value?.track;
-  const bruta = faixa?.mediaStreamTrack;
-  if (!bruta) { portaoAberto = true; aplicarPortao(); return; }
+
+  // Ativacao por voz: mede o fluxo proprio, que nunca e silenciado.
+  const bruta = await pegarFaixaDeMedicao();
+  if (!bruta) {
+    // Sem medicao nao da para decidir nada; deixar aberto e melhor do que
+    // deixar a pessoa muda sem entender por que.
+    portaoAberto = true;
+    aplicarPortao();
+    showToast("Sem acesso ao microfone para detectar a voz; ele ficará aberto.");
+    return;
+  }
+  // A pessoa pode ter saido da chamada ou trocado de modo enquanto o Windows
+  // liberava o microfone.
+  if (!room || voz.lerModo() !== "voz") { soltarFaixaDeMedicao(); return; }
+
   portaoAberto = false;
   aplicarPortao();
-  pararMedidorDoPortao = voz.medir(bruta, nivel => {
+  const parar = voz.medir(bruta, nivel => {
     const limiar = voz.lerLimiar();
     const agora = Date.now();
     if (nivel >= limiar) {
@@ -1897,6 +1964,7 @@ function reiniciarPortao() {
       aplicarPortao();
     }
   });
+  pararMedidorDoPortao = parar;
 }
 
 /// Destrava a reproducao de som. Se o WebView recusar, tenta de novo no primeiro
@@ -1928,7 +1996,7 @@ async function definirMicrofone(ligado: boolean) {
     micEnabled = ligado;
     await room.localParticipant.setMicrophoneEnabled(ligado, voz.opcoesDeCaptura());
     // A faixa nasce aberta; o portao decide se ela continua assim.
-    reiniciarPortao();
+    void reiniciarPortao();
     micButton.classList.toggle("active", micEnabled);
     setIcon(micButton, micEnabled ? "mic" : "mic-off");
     renderPeople(); renderNavigation();
@@ -3657,15 +3725,12 @@ for (const aba of document.querySelectorAll<HTMLButtonElement>(".config-tab")) {
 // precisa funcionar fora da chamada, que e justamente quando a pessoa vai
 // conferir se o microfone escolhido funciona.
 let pararMedidorLocal: (() => void) | null = null;
-let fluxoDoMedidor: MediaStream | null = null;
 
 function pararMedidorDoDialogo() {
-  pararMedidorLocal?.();
+  if (!pararMedidorLocal) return;
+  pararMedidorLocal();
   pararMedidorLocal = null;
-  // Soltar o microfone: sem isto o Windows mantem o aviso de "em uso" e a luz
-  // da webcam vizinha de alguns notebooks fica acesa.
-  fluxoDoMedidor?.getTracks().forEach(faixa => faixa.stop());
-  fluxoDoMedidor = null;
+  soltarFaixaDeMedicao();
   byId("mic-meter-fill").style.width = "0%";
 }
 
@@ -3675,22 +3740,14 @@ async function ligarMedidorDoDialogo() {
   const preenchimento = byId("mic-meter-fill");
   const nota = byId("mic-meter-nota");
 
-  // Em chamada, mede a propria faixa publicada — e o que os outros ouvem, e
-  // nao um segundo microfone aberto em paralelo.
-  let faixa = room?.localParticipant.audioTrackPublications.values().next().value
-    ?.track?.mediaStreamTrack;
+  // Mesmo fluxo do portao, e nao a faixa publicada: em "ao falar" a publicada
+  // fica silenciada enquanto ninguem fala, e a barra viveria zerada justamente
+  // quando a pessoa esta ali para ajustar o limiar.
+  const faixa = await pegarFaixaDeMedicao();
   if (!faixa) {
-    try {
-      fluxoDoMedidor = await navigator.mediaDevices.getUserMedia({
-        audio: voz.opcoesDeCaptura(readDevices().mic),
-      });
-      faixa = fluxoDoMedidor.getAudioTracks()[0];
-    } catch {
-      nota.textContent = "O Windows não liberou o microfone para o teste.";
-      return;
-    }
+    nota.textContent = "O Windows não liberou o microfone para o teste.";
+    return;
   }
-  if (!faixa) return;
   nota.textContent = "Fale para ver o nível. A marca clara é o ponto em que o microfone abre.";
   pararMedidorLocal = voz.medir(faixa, nivel => {
     preenchimento.style.width = nivel + "%";
@@ -3712,8 +3769,11 @@ function pintarLimiar() {
 byId<HTMLSelectElement>("voz-modo").addEventListener("change", event => {
   voz.guardarModo((event.currentTarget as HTMLSelectElement).value as voz.ModoVoz);
   pintarLimiar();
-  reiniciarPortao();
+  void reiniciarPortao();
   void registrarAtalhos();
+  // O medidor do dialogo acompanha a troca de modo: em "ao falar" ele passa a
+  // mostrar onde o microfone abre.
+  void ligarMedidorDoDialogo();
 });
 byId<HTMLInputElement>("voz-limiar").addEventListener("input", event => {
   voz.guardarLimiar(Number((event.currentTarget as HTMLInputElement).value));
@@ -4351,11 +4411,90 @@ document.addEventListener("drop", async event => {
   if (!event.dataTransfer?.files.length) return;
   await queueFiles(event.dataTransfer.files);
 });
-for (const campo of [messageInput, dmInput]) {
-  campo.addEventListener("paste", async event => {
-    const arquivos = Array.from(event.clipboardData?.files || []);
-    if (arquivos.length) { event.preventDefault(); await queueFiles(arquivos); }
-  });
+// Colar arquivo vale em qualquer lugar do aplicativo, e nao so com o cursor
+// dentro da caixa de mensagem: quem acabou de recortar a tela aperta Ctrl+V sem
+// pensar onde esta o foco, e antes o atalho simplesmente nao fazia nada.
+//
+// Texto continua seguindo o caminho normal — so intercepta quando ha arquivo.
+document.addEventListener("paste", async event => {
+  const dados = event.clipboardData;
+  if (!dados) return;
+  let arquivos = Array.from(dados.files);
+  // Nem todo programa preenche `files`. A Ferramenta de Captura do Windows e o
+  // caso comum: ela entrega a imagem so em `items`, e o colar parecia falhar
+  // "as vezes" porque dependia de qual programa tinha copiado.
+  if (!arquivos.length) {
+    arquivos = Array.from(dados.items)
+      .filter(item => item.kind === "file")
+      .map(item => item.getAsFile())
+      .filter((arquivo): arquivo is File => arquivo !== null);
+  }
+  if (!arquivos.length) return;
+  event.preventDefault();
+  await queueFiles(arquivos);
+});
+
+/// Menu do anexo, no lugar do menu nativo do WebView2.
+///
+/// O nativo oferece "copiar link da imagem" e entrega `blob:http://tauri.
+/// localhost/<uuid>` — o endereco interno daquela janela, que nao serve para
+/// nada nem para quem copiou. Ele existe porque a rota de arquivo pede sessao,
+/// e `<img src>` nao manda cabecalho de autorizacao: o arquivo e baixado
+/// autenticado e vira um blob local.
+///
+/// Aqui as duas acoes fazem o que a pessoa queria: a imagem em si, ou um
+/// endereco que outra pessoa do grupo consegue abrir.
+function menuDoAnexo(file: StoredFile, event: MouseEvent) {
+  event.preventDefault();
+  closeUserMenu();
+  const menu = document.createElement("div");
+  menu.className = "user-menu";
+
+  const titulo = document.createElement("strong");
+  titulo.className = "user-menu-title";
+  titulo.textContent = file.name;
+  menu.append(titulo);
+
+  if (file.mime.startsWith("image/")) {
+    menu.append(menuAcao("Copiar imagem", "copy", () => void copiarImagem(file)));
+  }
+  menu.append(menuAcao("Copiar link", "link", () => {
+    const endereco = API + "/api/files/" + encodeURIComponent(file.id);
+    void navigator.clipboard.writeText(endereco)
+      .then(() => showToast("Link copiado. Abre para quem está no naoconcordo."))
+      .catch(() => showToast(endereco));
+  }));
+  menu.append(menuAcao("Abrir", "spark", () => {
+    void fileUrl(file.id).then(url => abrirImagem(url, file.name));
+  }));
+
+  const ancora = event.currentTarget as HTMLElement;
+  montarMenu(menu, ancora, { x: event.clientX, y: event.clientY });
+}
+
+/// Poe a imagem em si na area de transferencia, e nao o endereco dela.
+///
+/// O Chromium so aceita PNG em `ClipboardItem`, entao JPEG e WebP passam por um
+/// canvas antes. Sem isso, colar no Paint ou no navegador falharia calado.
+async function copiarImagem(file: StoredFile) {
+  try {
+    const url = await fileUrl(file.id);
+    const bruto = await (await fetch(url)).blob();
+    let png = bruto;
+    if (bruto.type !== "image/png") {
+      const bitmap = await createImageBitmap(bruto);
+      const tela = document.createElement("canvas");
+      tela.width = bitmap.width; tela.height = bitmap.height;
+      tela.getContext("2d")?.drawImage(bitmap, 0, 0);
+      png = await new Promise<Blob>((ok, falhou) => {
+        tela.toBlob(saida => saida ? ok(saida) : falhou(new Error("conversao falhou")), "image/png");
+      });
+    }
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+    showToast("Imagem copiada.");
+  } catch {
+    showToast("Não foi possível copiar a imagem.");
+  }
 }
 
 /// Desenha os anexos de uma mensagem: imagem e video aparecem, o resto vira link.
@@ -4363,6 +4502,8 @@ function renderAttachments(message: { attachments?: StoredFile[] }, into: HTMLEl
   for (const file of message.attachments || []) {
     const box = document.createElement("div");
     box.className = "attachment";
+    // Substitui o menu nativo, que so sabe oferecer o blob interno da janela.
+    box.oncontextmenu = event => menuDoAnexo(file, event);
     if (file.mime.startsWith("image/")) {
       const img = document.createElement("img");
       img.alt = file.name; img.loading = "lazy";
