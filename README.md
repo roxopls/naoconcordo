@@ -190,7 +190,7 @@ como legítima.
 ## Testes
 
 ~~~bash
-node test-isolated.mjs
+node tests/test-isolated.mjs
 ~~~
 
 Sobe um backend descartável, com dados próprios, e roda as suítes contra ele.

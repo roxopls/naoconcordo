@@ -6,7 +6,9 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 
-const raiz = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+const aqui = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+// As suites vivem em `tests/`; o servidor e a configuracao ficam um nivel acima.
+const raiz = path.resolve(aqui, "..");
 const binario = path.join(raiz, "server", "target", "debug", process.platform === "win32" ? "naoconcordo-server.exe" : "naoconcordo-server");
 if (!fs.existsSync(binario)) {
   console.error("binario ausente: rode `cargo build` em server/ antes.\n" + binario);
@@ -53,7 +55,7 @@ async function esperarSaude() {
 
 function rodar(suite) {
   return new Promise(resolve => {
-    const filho = spawn(process.execPath, [path.join(raiz, suite)], {
+    const filho = spawn(process.execPath, [path.join(aqui, suite)], {
       env: { ...process.env, TEST_ENV: envFile, TEST_API: api, TEST_DATA_DIR: dataDir, TEST_ADMIN: ambiente.ADMIN_USERNAME },
       stdio: ["ignore", "pipe", "pipe"],
     });

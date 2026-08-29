@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 
-const envFile = process.env.TEST_ENV || new URL("./infra/.env", import.meta.url);
+const envFile = process.env.TEST_ENV || new URL("../infra/.env", import.meta.url);
 export const env = Object.fromEntries(
   fs.readFileSync(envFile, "utf8").trim().split(/\r?\n/)
     .filter(line => line && !line.startsWith("#"))
