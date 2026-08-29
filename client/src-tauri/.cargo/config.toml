@@ -1,0 +1,4 @@
+# O webrtc.lib que vem com o livekit e compilado com a CRT estatica (pede
+# libcmt/libcpmt). Sem casar isso, o link morre com LNK2038 MT x MD.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

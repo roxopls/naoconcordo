@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="logo.png" /><link rel="stylesheet" href="extra.css" /><link rel="stylesheet" href="server.css" />
+    <title>naoconcordo</title>
+  </head>
+  <body>
+    <!-- Sprite de ícones. Traço único, herdando currentColor. -->
+    <svg id="icon-sprite" aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
+      <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v4M8 22h8"/></symbol>
+      <symbol id="i-mic-off" viewBox="0 0 24 24"><path d="M9 9v2a3 3 0 0 0 5.1 2.1"/><path d="M15 10V5a3 3 0 0 0-5.7-1.3"/><path d="M19 10v1a7 7 0 0 1-1.6 4.4M5 10v1a7 7 0 0 0 10.6 6"/><path d="M12 18v4M8 22h8"/><path d="M3 3l18 18"/></symbol>
+      <symbol id="i-cam" viewBox="0 0 24 24"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></symbol>
+      <symbol id="i-screen" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+      <symbol id="i-audio" viewBox="0 0 24 24"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></symbol>
+      <symbol id="i-audio-off" viewBox="0 0 24 24"><path d="M3 18v-6a9 9 0 0 1 13.5-7.8"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z"/><path d="M3 3l18 18"/></symbol>
+      <symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 4h6l-1 6 4 3v2H6v-2l4-3-1-6z"/><path d="M12 15v6"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></symbol>
+      <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></symbol>
+      <symbol id="i-hangup" viewBox="0 0 24 24"><path d="M2.5 14.5c4-4.7 15-4.7 19 0"/><path d="M6.2 12.4l-1.6 2.6-2.1-.8"/><path d="M17.8 12.4l1.6 2.6 2.1-.8"/><path d="M4 20L20 4"/></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></symbol>
+      <symbol id="i-reply" viewBox="0 0 24 24"><path d="M9 17l-6-5 6-5"/><path d="M3 12h9a8 8 0 0 1 8 8v1"/></symbol>
+      <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v6M14 11v6"/></symbol>
+      <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></symbol>
+      <symbol id="i-window" viewBox="0 0 24 24"><rect x="3" y="4" width="13" height="11" rx="2"/><path d="M8 20h11a2 2 0 0 0 2-2V9"/></symbol>
+      <symbol id="i-detach" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 9h-6v6"/></symbol>
+      <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-hash" viewBox="0 0 24 24"><path d="M4 9h16M4 15h16M10 3L8 21M16 3l-2 18"/></symbol>
+      <!-- Alto-falante cortado: "eu silenciei esta pessoa". Diferente do
+           i-audio-off, que quer dizer "ela desligou o audio dela". -->
+      <symbol id="i-silenced" viewBox="0 0 24 24"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M16 9l5 6M21 9l-5 6"/></symbol>
+      <symbol id="i-speaker" viewBox="0 0 24 24"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></symbol>
+      <symbol id="i-at" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></symbol>
+      <symbol id="i-theater" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/></symbol>
+      <symbol id="i-full" viewBox="0 0 24 24"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+      <symbol id="i-clip" viewBox="0 0 24 24"><path d="M21.4 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.3 3.3 0 0 1 4.68 4.68l-9.2 9.19a1.7 1.7 0 0 1-2.4-2.4l8.49-8.48"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></symbol>
+      <symbol id="i-user-plus" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></symbol>
+      <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
+      <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></symbol>
+    </svg>
+
+    <div id="login-view" class="login-shell">
+      <img class="brand-mark logo-art" src="logo.png" alt="" />
+      <section class="login-card">
+        <img class="login-logo" src="logo.png" alt="Logo naoconcordo" />
+        
+        <h1>naoconcordo</h1>
+        
+        <form id="login-form">
+          <label>Usuario<input id="username" maxlength="24" autocomplete="username" placeholder="Seu usuario" required /></label>
+          <label>Senha<input id="password" type="password" minlength="8" autocomplete="current-password" placeholder="No minimo 8 caracteres" required /></label>
+          <label id="invite-row" class="hidden">Convite<input id="invite" type="password" autocomplete="one-time-code" placeholder="Codigo do grupo" /></label>
+          <button id="auth-submit" class="primary" type="submit">Entrar</button>
+          <button id="auth-mode-toggle" class="auth-switch" type="button">Primeiro acesso? Criar conta</button>
+          <button id="forgot-password" class="auth-switch" type="button">Esqueci minha senha</button>
+          <p id="login-error" class="error" role="alert"></p>
+        </form>
+      </section>
+    </div>
+
+    <div id="app-view" class="app-shell hidden">
+      <aside class="rail">
+        <button id="home-button" class="rail-button home" title="Amigos e mensagens">
+          <img class="rail-logo" src="logo.png" alt="naoconcordo" />
+        </button>
+        <div class="rail-divider"></div>
+        <div id="server-rail" class="rail-servers"></div>
+        <button id="server-invites-button" class="rail-button hidden" title="Convites de servidor"><svg class="ic"><use href="#i-inbox"/></svg><span id="server-invites-count" class="rail-badge">0</span></button>
+        <button id="add-server" class="rail-button add" title="Criar servidor"><svg class="ic"><use href="#i-plus"/></svg></button>
+      </aside>
+
+      <aside class="sidebar">
+        <header class="brand">
+          <div><strong id="sidebar-title">Mensagens</strong><small id="sidebar-subtitle">amigos</small></div>
+          <button id="server-members" class="icon-button hidden" title="Configurações do servidor"><svg class="ic"><use href="#i-gear"/></svg></button>
+        </header>
+        <div id="server-banner" class="server-banner hidden"></div>
+        <nav>
+          <div id="channels-pane" class="hidden">
+            <div class="section-title"><p class="section-label">CANAIS DE TEXTO</p><button id="add-room" class="add-room" title="Criar canal de texto"><svg class="ic"><use href="#i-plus"/></svg></button></div>
+            <div id="room-list"></div>
+            <div class="section-title"><p class="section-label">CANAIS DE VOZ</p><button id="add-voice-room" class="add-room" title="Criar canal de voz"><svg class="ic"><use href="#i-plus"/></svg></button></div>
+            <div id="voice-list"></div>
+          </div>
+          <div id="friends-pane">
+            <div class="section-title"><p class="section-label">AMIGOS</p><button id="add-friend" class="add-room" title="Procurar amigos"><svg class="ic"><use href="#i-user-plus"/></svg></button></div>
+            <div id="friend-list"></div>
+          </div>
+          <div id="voice-users" class="voice-users hidden"></div>
+        </nav>
+        <footer class="profile">
+          <button id="avatar-button" class="avatar-button" title="Abrir meu perfil" aria-expanded="false"><span id="avatar" class="avatar"></span></button>
+          <input id="avatar-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+          <div class="profile-copy"><strong id="profile-name"></strong><small id="connection-state">fora da chamada</small></div>
+          <small id="app-version" class="app-version"></small>
+          <section id="mini-profile" class="mini-profile hidden" role="dialog" aria-label="Meu perfil">
+            <div id="mini-profile-banner" class="mini-profile-banner"></div>
+            <header class="mini-profile-head">
+              <span id="mini-profile-avatar" class="avatar mini-profile-avatar"></span>
+              <div><strong id="mini-profile-name"></strong><small id="mini-profile-status">fora da chamada</small></div>
+            </header>
+            <p id="mini-profile-bio" class="mini-profile-bio"></p>
+            <div class="mini-profile-actions">
+              <button id="profile-change-avatar" type="button"><svg class="ic ic-sm"><use href="#i-pencil"/></svg><span>Alterar foto</span></button>
+              <button id="profile-edit" type="button"><svg class="ic ic-sm"><use href="#i-pencil"/></svg><span>Editar perfil</span></button>
+              <button id="profile-edit-server-btn" class="hidden" type="button"><svg class="ic ic-sm"><use href="#i-pencil"/></svg><span>Perfil no servidor</span></button>
+              <button id="profile-open-settings" type="button"><svg class="ic ic-sm"><use href="#i-gear"/></svg><span>Áudio, vídeo e notificações</span></button>
+              <button id="admin-button" class="hidden" type="button"><svg class="ic ic-sm"><use href="#i-lock"/></svg><span>Convites</span></button>
+              <button id="logout" class="profile-logout" type="button"><svg class="ic ic-sm"><use href="#i-logout"/></svg><span>Sair da conta</span></button>
+            </div>
+          </section>
+        </footer>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar">
+          <div><strong id="room-title"># geral</strong><span id="room-subtitle">Sala de texto e voz</span></div>
+          <button id="update-pill" class="ghost-button update-pill hidden" type="button" title="Novidades desta versão"><svg class="ic ic-sm"><use href="#i-spark"/></svg> <span id="update-pill-text">Atualizado</span></button>
+          <button id="fixadas-abrir" class="ghost-button" type="button" title="Mensagens fixadas neste canal"><svg class="ic ic-sm"><use href="#i-pin"/></svg></button>
+          <button id="busca-abrir" class="ghost-button" type="button" title="Buscar nas mensagens (Ctrl+F)"><svg class="ic ic-sm"><use href="#i-search"/></svg></button>
+          <button id="fingerprint-button" class="ghost-button hidden" title="Conferir identidade"><svg class="ic ic-sm"><use href="#i-lock"/></svg> Identidade</button>
+          <div id="status-pill" class="status-pill">offline</div>
+        </header>
+        <section id="stage" class="stage hidden"></section>
+        <div id="stage-resizer" class="stage-resizer hidden" role="separator" aria-orientation="horizontal" title="Arraste para mudar a altura"><span></span></div>
+        <div id="camera-mini" class="camera-mini hidden"></div>
+        <section id="messages" class="messages" aria-live="polite"></section>
+        <section id="dm-messages" class="messages hidden" aria-live="polite"></section>
+        <p id="typing-note" class="typing-note hidden"></p>
+        <form id="message-form" class="composer">
+          <button id="attach-button" class="composer-icon" type="button" title="Anexar arquivo"><svg class="ic ic-sm"><use href="#i-clip"/></svg></button>
+          <input id="attach-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,audio/mpeg,audio/ogg" multiple />
+          <div class="composer-main">
+            <div id="mention-box" class="mention-box hidden"></div>
+            <div id="reply-bar" class="reply-bar hidden"></div>
+            <div id="attach-preview" class="attach-preview hidden"></div>
+            <textarea id="message-input" rows="1" maxlength="2000" placeholder="Conversar em #geral"></textarea>
+          </div>
+          <button type="submit" title="Enviar"><svg class="ic ic-sm"><use href="#i-send"/></svg></button>
+        </form>
+        <form id="dm-form" class="composer hidden">
+          <button id="dm-attach-button" class="composer-icon" type="button" title="Anexar arquivo"><svg class="ic ic-sm"><use href="#i-clip"/></svg></button>
+          <div class="composer-main">
+            <div id="dm-reply-bar" class="reply-bar hidden"></div>
+            <div id="dm-attach-preview" class="attach-preview hidden"></div>
+            <textarea id="dm-input" rows="1" maxlength="1500" placeholder="Mensagem privada"></textarea>
+          </div>
+          <button type="submit" title="Enviar"><svg class="ic ic-sm"><use href="#i-send"/></svg></button>
+        </form>
+      </main>
+
+      <aside class="people-panel">
+        <p class="section-label" id="people-title">ONLINE — <span id="people-count">0</span></p>
+        <div id="people-list"></div>
+        <p class="section-label offline-label" id="offline-title">OFFLINE — <span id="offline-count">0</span></p>
+        <div id="offline-list"></div>
+      </aside>
+      <pre id="diag-box" class="diag-box hidden"></pre>
+      <div id="call-controls" class="call-controls hidden">
+        <button id="mic-button" class="control" title="Ativar microfone"><svg class="ic"><use href="#i-mic"/></svg><small>Microfone</small></button>
+        <button id="cam-button" class="control" title="Ligar câmera"><svg class="ic"><use href="#i-cam"/></svg><small>Câmera</small></button>
+        <button id="screen-button" class="control" title="Compartilhar tela"><svg class="ic"><use href="#i-screen"/></svg><small>Compartilhar</small></button>
+        <button id="screen-window" class="control" title="Abrir as transmissões numa janela redimensionável"><svg class="ic"><use href="#i-window"/></svg><small>Janela</small></button>
+        <button id="audio-button" class="control" title="Silenciar áudio"><svg class="ic"><use href="#i-audio"/></svg><small>Áudio</small></button>
+        <button id="devices-button" class="control" title="Escolher microfone, câmera e saída de áudio"><svg class="ic"><use href="#i-gear"/></svg><small>Dispositivos</small></button>
+        <button id="leave-button" class="control danger" title="Sair da chamada"><svg class="ic"><use href="#i-hangup"/></svg><small>Desconectar</small></button>
+      </div>
+      <div id="toast" class="toast hidden"></div>
+    </div>
+
+    <dialog id="message-edit-dialog" class="wide-dialog">
+      <form id="message-edit-form">
+        <h2>Editar mensagem</h2>
+        <p class="muted">A alteração ficará identificada no canal.</p>
+        <label>Mensagem<textarea id="message-edit-text" rows="5" maxlength="2000"></textarea></label>
+        <p id="message-edit-error" class="error" role="alert"></p>
+        <div class="dialog-actions"><button id="message-edit-cancel" type="button">Cancelar</button><button class="primary" type="submit">Salvar</button></div>
+      </form>
+    </dialog>
+    <dialog id="room-dialog">
+      <form id="room-form" method="dialog">
+        <h2>Criar uma sala</h2>
+        <p class="muted">&nbsp;</p>
+        <label>Nome<input id="room-name" maxlength="24" placeholder="Ex.: Filmes" required /></label>
+        <div class="dialog-actions"><button id="cancel-room" type="button">Cancelar</button><button class="primary" type="submit">Criar sala</button></div>
+        <p id="room-error" class="error"></p>
+      </form>
+    </dialog>
+    <dialog id="input-dialog" class="wide-dialog">
+      <form id="input-dialog-form">
+        <h2 id="input-dialog-title">Continuar</h2>
+        <p id="input-dialog-hint" class="muted"></p>
+        <label><span id="input-dialog-label">Valor</span><input id="input-dialog-value" maxlength="48" autocomplete="off" required /></label>
+        <p id="input-dialog-error" class="error" role="alert"></p>
+        <div class="dialog-actions"><button id="input-dialog-cancel" type="button">Cancelar</button><button id="input-dialog-submit" class="primary" type="submit">Continuar</button></div>
+      </form>
+    </dialog>
+    <dialog id="confirm-dialog" class="wide-dialog">
+      <h2 id="confirm-dialog-title">Confirmar</h2>
+      <p id="confirm-dialog-message" class="muted"></p>
+      <p id="confirm-dialog-warning" class="dialog-warning hidden"></p>
+      <div class="dialog-actions"><button id="confirm-dialog-cancel" type="button">Cancelar</button><button id="confirm-dialog-submit" class="danger-button" type="button">Confirmar</button></div>
+    </dialog>
+    <dialog id="recovery-dialog" class="wide-dialog">
+      <form id="recovery-form">
+        <h2>Recuperar conta</h2>
+        <p class="muted">Use o arquivo baixado quando a conta foi criada ou recuperada.</p>
+        <label>Usuario<input id="recovery-username" maxlength="24" autocomplete="username" required /></label>
+        <label>Codigo de recuperacao<textarea id="recovery-code" rows="3" placeholder="Cole o codigo ou importe o arquivo" required></textarea></label>
+        <input id="recovery-file" class="hidden" type="file" accept="text/plain,.txt" />
+        <button id="recovery-import" class="secondary-action" type="button">Importar arquivo de recuperacao</button>
+        <label>Nova senha<input id="recovery-password" type="password" minlength="8" autocomplete="new-password" required /></label>
+        <label>Confirmar nova senha<input id="recovery-confirm" type="password" minlength="8" autocomplete="new-password" required /></label>
+        <p id="recovery-error" class="error" role="alert"></p>
+        <div class="dialog-actions"><button id="recovery-cancel" type="button">Cancelar</button><button id="recovery-submit" class="primary" type="submit">Redefinir senha</button></div>
+      </form>
+    </dialog>
+    <dialog id="notice-dialog" class="wide-dialog">
+      <h2 id="notice-title">Pronto</h2>
+      <p id="notice-message" class="muted"></p>
+      <div class="dialog-actions"><button id="notice-close" class="primary" type="button">Entendi</button></div>
+    </dialog>
+
+    <dialog id="friends-dialog" class="wide-dialog">
+      <h2>Amigos</h2>
+      <p class="muted">Você só conversa com quem for seu amigo.</p>
+      <form id="friend-search-form">
+        <label>Procurar<input id="friend-search" maxlength="24" placeholder="Nome do usuário" autocomplete="off" /></label>
+      </form>
+      <div id="friend-search-results" class="friend-rows"></div>
+      <p class="section-label">SEUS AMIGOS</p>
+      <div id="friend-current" class="friend-rows"></div>
+      <p class="section-label">PEDIDOS RECEBIDOS</p>
+      <div id="friend-incoming" class="friend-rows"></div>
+      <p class="section-label">PEDIDOS ENVIADOS</p>
+      <div id="friend-outgoing" class="friend-rows"></div>
+      <p id="friends-error" class="error"></p>
+      <div class="dialog-actions"><button id="close-friends" type="button">Fechar</button></div>
+    </dialog>
+
+    <dialog id="members-dialog" class="wide-dialog">
+      <h2 id="members-title">Configurações do servidor</h2>
+      <p class="muted">Só quem está aqui vê este servidor.</p>
+      <p class="section-label">MEMBROS</p>
+      <div id="member-list" class="friend-rows"></div>
+      <p class="section-label">CONVIDAR UM AMIGO</p>
+      <div id="member-candidates" class="friend-rows"></div>
+      <p id="members-error" class="error"></p>
+      <div class="dialog-actions">
+        <button id="customize-server-btn" class="hidden" type="button">Personalizar</button>
+        <button id="leave-server" type="button">Sair do servidor</button>
+        <button id="delete-server" class="danger-button hidden" type="button">Apagar servidor</button>
+        <button id="close-members" class="primary" type="button">Fechar</button>
+      </div>
+    </dialog>
+
+    <dialog id="server-invites-dialog" class="wide-dialog">
+      <h2>Convites de servidor</h2>
+      <p class="muted">Você só entra se aceitar.</p>
+      <div id="server-invite-list" class="friend-rows"></div>
+      <p id="server-invites-error" class="error" role="alert"></p>
+      <div class="dialog-actions">
+        <button id="close-server-invites" class="primary" type="button">Fechar</button>
+      </div>
+    </dialog>
+
+    <dialog id="admin-dialog" class="wide-dialog">
+      <h2>Convites</h2>
+      <p class="muted">Cada código cria uma conta só. Quem usou fica registrado aqui.</p>
+      <form id="admin-invite-form" class="admin-invite-form">
+        <input id="admin-invite-label" type="text" maxlength="24" placeholder="Para quem é (opcional)" />
+        <button class="primary" type="submit">Gerar convite</button>
+      </form>
+      <p id="admin-error" class="error" role="alert"></p>
+      <p class="section-label">DISPONÍVEIS</p>
+      <div id="admin-open-list" class="friend-rows"></div>
+      <p class="section-label">USADOS</p>
+      <div id="admin-used-list" class="friend-rows"></div>
+      <div class="dialog-actions">
+        <button id="close-admin" class="primary" type="button">Fechar</button>
+      </div>
+    </dialog>
+
+    <dialog id="source-dialog" class="wide-dialog">
+      <h2>Compartilhar tela</h2>
+      <p class="muted">Escolha o que enviar.</p>
+      <div id="source-grid" class="source-grid"></div>
+      <h3 class="dialog-subtitle">Qualidade</h3>
+      <div id="source-quality" class="quality-options"></div>
+      <p class="muted small">Se travar em vez de borrar, desça um nível.</p>
+      <label class="switch-row"><input id="source-audio" type="checkbox" checked /> Compartilhar áudio do aplicativo?</label>
+      <label class="switch-row"><input id="source-motion" type="checkbox" checked /> Priorizar movimento (jogo)</label>
+      <label id="source-barra-linha" class="switch-row"><input id="source-barra" type="checkbox" checked /> Ocultar a barra de título da janela</label>
+      <div class="dialog-actions">
+        <button id="source-cancel" type="button">Cancelar</button>
+        <button id="source-start" class="primary" type="button" disabled>Compartilhar</button>
+      </div>
+    </dialog>
+
+    <dialog id="fixadas-dialog" class="wide-dialog">
+      <h2>Fixadas neste canal</h2>
+      <p id="fixadas-vazio" class="muted small hidden">Nada fixado aqui ainda. O alfinete aparece ao passar o mouse na mensagem.</p>
+      <div id="fixadas-lista" class="busca-resultados"></div>
+      <div class="dialog-actions"><button id="fixadas-fechar" class="primary" type="button">Fechar</button></div>
+    </dialog>
+
+    <dialog id="busca-dialog" class="wide-dialog">
+      <h2>Buscar nas mensagens</h2>
+      <input id="busca-campo" type="text" placeholder="O que você procura?" autocomplete="off" />
+      <label class="switch-row"><input id="busca-so-canal" type="checkbox" /> Somente neste canal</label>
+      <p id="busca-resumo" class="muted small">—</p>
+      <div id="busca-resultados" class="busca-resultados"></div>
+      <div class="dialog-actions"><button id="busca-fechar" class="primary" type="button">Fechar</button></div>
+    </dialog>
+
+    <dialog id="devices-dialog" class="wide-dialog config-dialog">
+      <h2>Configurações</h2>
+      <div class="config-layout">
+        <nav id="config-nav" class="config-nav">
+          <button type="button" class="config-tab ativo" data-pane="voz">Voz e vídeo</button>
+          <button type="button" class="config-tab" data-pane="atalhos">Atalhos</button>
+          <button type="button" class="config-tab" data-pane="notificacoes">Notificações</button>
+          <button type="button" class="config-tab" data-pane="tela">Compartilhar tela</button>
+          <button type="button" class="config-tab" data-pane="atualizacoes">Atualizações</button>
+          <button type="button" class="config-tab" data-pane="avancado">Avançado</button>
+        </nav>
+
+        <div class="config-panes">
+          <section class="config-pane ativo" data-pane="voz">
+            <p class="muted">Fica salvo para as próximas chamadas.</p>
+            <label>Microfone<select id="device-mic"></select></label>
+            <label>Câmera<select id="device-cam"></select></label>
+            <label>Saída de áudio<select id="device-out"></select></label>
+
+            <p class="section-label">TESTE DO MICROFONE</p>
+            <div class="mic-meter"><span id="mic-meter-fill"></span><span id="mic-meter-limiar"></span></div>
+            <p id="mic-meter-nota" class="muted small">Fale para ver o nível. A marca clara é o ponto em que o microfone abre.</p>
+
+            <p class="section-label">QUANDO O MICROFONE ABRE</p>
+            <label>Modo<select id="voz-modo">
+              <option value="sempre">Sempre aberto</option>
+              <option value="voz">Ao falar (ativação por voz)</option>
+              <option value="ptt">Apertando uma tecla</option>
+            </select></label>
+            <label id="voz-limiar-linha">Sensibilidade<input id="voz-limiar" type="range" min="1" max="60" step="1" /></label>
+            <p class="muted small">Sensibilidade alta demais abre com o ventilador; baixa demais corta o começo das frases.</p>
+
+            <p class="section-label">FILTROS</p>
+            <label class="switch-row"><input id="filtro-ruido" type="checkbox" checked /> Reduzir ruído de fundo</label>
+            <label class="switch-row"><input id="filtro-eco" type="checkbox" checked /> Cancelar eco da caixa de som</label>
+            <label class="switch-row"><input id="filtro-ganho" type="checkbox" checked /> Equilibrar o volume da voz automaticamente</label>
+            <p class="muted small">Valem no próximo microfone aberto. Com fone, o cancelamento de eco pode ser desligado sem prejuízo.</p>
+          </section>
+
+          <section class="config-pane" data-pane="atalhos">
+            <p class="muted">Funcionam com o aplicativo em segundo plano, para servirem durante o jogo.</p>
+            <div class="atalho-linha"><span>Apertar para falar</span><button id="atalho-ptt" type="button" class="ghost-button" data-atalho="ptt">—</button></div>
+            <div class="atalho-linha"><span>Mudo</span><button id="atalho-mudo" type="button" class="ghost-button" data-atalho="mudo">—</button></div>
+            <div class="atalho-linha"><span>Ensurdecer</span><button id="atalho-surdo" type="button" class="ghost-button" data-atalho="surdo">—</button></div>
+            <p id="atalhos-nota" class="muted small">Clique num atalho e aperte a combinação desejada. Esc cancela, Delete limpa.</p>
+          </section>
+
+          <section class="config-pane" data-pane="notificacoes">
+            <label class="switch-row"><input id="notify-sound" type="checkbox" checked /> Tocar som ao receber mensagem</label>
+            <label class="switch-row"><input id="notify-desktop" type="checkbox" /> Mostrar notificações do Windows</label>
+            <label class="switch-row"><input id="notify-preview" type="checkbox" /> Mostrar o texto da mensagem</label>
+            <label class="switch-row"><input id="notify-in-call" type="checkbox" /> Notificar também durante chamadas</label>
+            <div class="dialog-row"><button id="notify-test" type="button" class="ghost-button">Testar notificação</button></div>
+          </section>
+
+          <section class="config-pane" data-pane="tela">
+            <p id="border-diag" class="muted small">—</p>
+            <label id="codec-tela-linha">Compressão da tela<select id="codec-tela">
+              <option value="auto">Automática (usa a placa de vídeo)</option>
+              <option value="h264">H.264 (mais compatível)</option>
+              <option value="software">Software (processador)</option>
+            </select></label>
+            <p id="codec-suporte" class="muted small">—</p>
+          </section>
+
+          <section class="config-pane" data-pane="atualizacoes">
+            <div id="secao-atualizacoes">
+              <label class="switch-row"><input id="canal-unstable" type="checkbox" /> Receber versões de teste (unstable)</label>
+              <p class="muted small">O canal estável só recebe entrega fechada. O de teste recebe as versões intermediárias, mais cedo e com mais risco.</p>
+              <div class="dialog-row"><button id="check-update" type="button" class="ghost-button">Verificar atualização</button><span id="check-update-status" class="muted small"></span></div>
+            </div>
+          </section>
+
+          <section class="config-pane" data-pane="avancado">
+            <label class="switch-row"><input id="modo-dev" type="checkbox" /> Modo desenvolvedor</label>
+            <p class="muted small">Liga o painel de diagnóstico da transmissão por cima da chamada e os ajustes de teste abaixo.</p>
+            <label id="forcar-dxgi-linha" class="switch-row hidden"><input id="forcar-dxgi" type="checkbox" /> Forçar duplicação de tela (teste)</label>
+            <div id="secao-consumo">
+              <p class="section-label">CONSUMO</p>
+              <p id="uso-total" class="uso-total">—</p>
+              <div class="uso-grupos" id="uso-grupos"></div>
+              <p class="muted small">O WebView2 desenha a interface e sempre roda em processos separados, por ser Chromium. Aqui eles ja entram na conta.</p>
+            </div>
+          </section>
+        </div>
+      </div>
+      <p id="devices-note" class="muted small"></p>
+      <div class="dialog-actions"><button id="devices-refresh" type="button">Atualizar lista</button><button id="close-devices" class="primary" type="button">Fechar</button></div>
+    </dialog>
+
+    <dialog id="perfil-dialog" class="perfil-dialog">
+      <div id="perfil-banner" class="perfil-banner"></div>
+      <div class="perfil-corpo">
+        <span id="perfil-avatar" class="avatar perfil-avatar"></span>
+        <strong id="perfil-nome"></strong>
+        <small id="perfil-usuario" class="muted"></small>
+        <p id="perfil-bio" class="perfil-bio"></p>
+        <p id="perfil-erro" class="error" role="alert"></p>
+        <div id="perfil-acoes" class="perfil-acoes"></div>
+      </div>
+    </dialog>
+
+    <dialog id="identity-dialog" class="wide-dialog">
+      <h2>Conferir identidade</h2>
+      <p class="muted">Compare os códigos por fora do app. Se baterem, ninguém está no meio.</p>
+      <p class="section-label">SUA IMPRESSÃO DIGITAL</p>
+      <code id="my-fingerprint" class="fingerprint"></code>
+      <p class="section-label"><span id="friend-fingerprint-label">AMIGO</span></p>
+      <code id="friend-fingerprint" class="fingerprint"></code>
+      <p class="muted small">Perder este aparelho significa perder o histórico das conversas privadas.</p>
+      <div class="dialog-actions"><button id="close-identity" type="button">Fechar</button></div>
+    </dialog>
+
+    <dialog id="key-change-dialog" class="wide-dialog">
+      <h2>⚠ A chave deste amigo mudou</h2>
+      <p class="muted">A identidade de <strong id="key-change-name"></strong> mudou. Acontece quando a pessoa troca de aparelho — e também num ataque.</p>
+      <p class="section-label">CHAVE FIXADA ANTES</p>
+      <code id="key-change-old" class="fingerprint"></code>
+      <p class="section-label">CHAVE NOVA</p>
+      <code id="key-change-new" class="fingerprint"></code>
+      <p class="muted small">Confirme com ela por fora antes de aceitar.</p>
+      <div class="dialog-actions"><button id="key-change-reject" type="button">Manter bloqueado</button><button id="key-change-accept" class="primary" type="button">Confirmei, aceitar</button></div>
+    </dialog>
+
+    <dialog id="profile-edit-dialog" class="wide-dialog">
+      <h2>Editar perfil</h2>
+      <p class="muted">Personalize como os outros te veem.</p>
+      <div id="profile-edit-banner-preview" class="banner-preview"></div>
+      <div class="dialog-row">
+        <button id="profile-edit-banner-btn" type="button" class="ghost-button">Alterar banner</button>
+        <button id="profile-edit-banner-remove" type="button" class="ghost-button danger hidden">Remover banner</button>
+      </div>
+      <input id="profile-edit-banner-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+      <label>Sobre mim<textarea id="profile-edit-bio" maxlength="190" rows="3" placeholder="Conte algo sobre você…"></textarea></label>
+      <small id="profile-edit-bio-count" class="muted">0 / 190</small>
+      <div class="dialog-actions">
+        <button id="profile-edit-cancel" type="button">Cancelar</button>
+        <button id="profile-edit-save" class="primary" type="button">Salvar</button>
+      </div>
+    </dialog>
+
+    <dialog id="server-settings-dialog" class="wide-dialog">
+      <h2>Configurar servidor</h2>
+      <p class="muted">Só o dono pode alterar.</p>
+      <div id="server-settings-banner-preview" class="banner-preview"></div>
+      <div class="dialog-row">
+        <button id="server-settings-banner-btn" type="button" class="ghost-button">Alterar banner</button>
+        <button id="server-settings-banner-remove" type="button" class="ghost-button danger hidden">Remover</button>
+      </div>
+      <input id="server-settings-banner-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+      <div class="dialog-row">
+        <div id="server-settings-icon-preview" class="server-icon-preview"></div>
+        <button id="server-settings-icon-btn" type="button" class="ghost-button">Alterar ícone</button>
+        <button id="server-settings-icon-remove" type="button" class="ghost-button danger hidden">Remover</button>
+      </div>
+      <input id="server-settings-icon-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+      <label>Nome do servidor<input id="server-settings-name" type="text" maxlength="50" /></label>
+      <label>Descrição<textarea id="server-settings-description" maxlength="300" rows="2" placeholder="Do que se trata este servidor…"></textarea></label>
+      <small id="server-settings-desc-count" class="muted">0 / 300</small>
+      <div class="dialog-actions">
+        <button id="server-settings-cancel" type="button">Cancelar</button>
+        <button id="server-settings-save" class="primary" type="button">Salvar</button>
+      </div>
+    </dialog>
+
+    <dialog id="server-profile-dialog" class="wide-dialog">
+      <h2>Perfil no servidor</h2>
+      <p class="muted">Personalize seu apelido e foto apenas neste servidor.</p>
+      <div class="dialog-row">
+        <div id="server-profile-avatar-preview" class="server-avatar-preview"></div>
+        <button id="server-profile-avatar-btn" type="button" class="ghost-button">Alterar foto</button>
+        <button id="server-profile-avatar-remove" type="button" class="ghost-button danger hidden">Remover</button>
+      </div>
+      <input id="server-profile-avatar-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+      <label>Apelido no servidor<input id="server-profile-nickname" type="text" maxlength="32" placeholder="Deixe vazio para usar seu nome padrão" /></label>
+      <p id="server-profile-error" class="error"></p>
+      <div class="dialog-actions">
+        <button id="server-profile-cancel" type="button">Cancelar</button>
+        <button id="server-profile-save" class="primary" type="button">Salvar</button>
+      </div>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

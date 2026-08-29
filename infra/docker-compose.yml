@@ -1,0 +1,54 @@
+services:
+  livekit:
+    image: livekit/livekit-server:v1.9.7
+    container_name: naoconcordo-livekit
+    restart: unless-stopped
+    network_mode: host
+    command: ["--config", "/etc/livekit.yaml"]
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+
+  app:
+    build: ../server
+    container_name: naoconcordo-app
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      ACCESS_PASSWORD: ${ACCESS_PASSWORD}
+      OWNER_PASSWORD: ${OWNER_PASSWORD}
+      # Quem emite convites e ve quem usou cada um.
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      AUTH_SALT: ${AUTH_SALT}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL}
+      DATA_DIR: /app/data
+      UPLOAD_DIR: /app/uploads
+      UPLOAD_FALLBACK_DIR: /app/uploads-fallback
+    volumes:
+      - naoconcordo-data:/app/data
+      # Disco de 457G para anexos, e o de 1,4T como reserva quando encher.
+      - /mnt/uploads/naoconcordo:/app/uploads
+      - /mnt/storage/naoconcordo-uploads:/app/uploads-fallback
+    depends_on: [livekit]
+
+  caddy:
+    image: ghcr.io/caddybuilds/caddy-cloudflare:latest
+    container_name: naoconcordo-caddy
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      CF_API_TOKEN: ${CF_API_TOKEN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./updates:/srv/updates:ro
+      # Versao que roda no navegador.
+      - ./app:/srv/app:ro
+      - naoconcordo-caddy-data:/data
+      - naoconcordo-caddy-config:/config
+    depends_on: [app]
+
+volumes:
+  naoconcordo-data:
+  naoconcordo-caddy-data:
+  naoconcordo-caddy-config:

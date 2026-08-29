@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Telas — naoconcordo</title>
+  </head>
+  <body class="telas-body">
+    <div id="telas-bar" class="telas-bar">
+      <button id="telas-share" class="primary" type="button">Compartilhar tela</button>
+      <button id="telas-switch" type="button" disabled>Trocar tela</button>
+      <button id="telas-stop" class="danger-button" type="button" disabled>Parar</button>
+      <span id="telas-current" class="telas-current"></span>
+    </div>
+    <div id="telas-status" class="cameras-status">Conectando…</div>
+    <div id="telas-grid" class="telas-grid"></div>
+
+    <dialog id="source-dialog" class="wide-dialog">
+      <h2>Compartilhar tela</h2>
+      <p class="muted">Escolha o que enviar.</p>
+      <div id="source-grid" class="source-grid"></div>
+      <h3 class="dialog-subtitle">Qualidade</h3>
+      <div id="source-quality" class="quality-options"></div>
+      <p class="muted small">Se travar em vez de borrar, desça um nível.</p>
+      <label class="switch-row"><input id="source-audio" type="checkbox" checked /> Compartilhar áudio do aplicativo?</label>
+      <div class="dialog-actions">
+        <button id="source-cancel" type="button">Cancelar</button>
+        <button id="source-start" class="primary" type="button" disabled>Compartilhar</button>
+      </div>
+    </dialog>
+
+    <script type="module" src="/src/telas.ts"></script>
+  </body>
+</html>

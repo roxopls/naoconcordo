@@ -1,0 +1,18 @@
+port: 7880
+log_level: info
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+  # Candidatos host saem com o IP da LAN. Quem esta fora nao alcanca esse IP e
+  # cai no TURN abaixo, cujo endereco e um nome que resolve certo dos dois lados.
+  use_external_ip: false
+  stun_servers:
+    - stun.l.google.com:19302
+    - stun1.l.google.com:19302
+turn:
+  enabled: true
+  domain: seu-dominio.exemplo
+  udp_port: 3478
+keys:
+  SUA_API_KEY: SEU_API_SECRET

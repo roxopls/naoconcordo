@@ -1,0 +1,59 @@
+{
+	email voce@exemplo.com
+}
+
+seu-dominio.exemplo:8443 {
+	# Sem esta diretiva o Caddy 2 nao registra acesso nenhum, e log vazio vira
+	# diagnostico errado.
+	log {
+		output file /data/access.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+	}
+
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+
+	# Sinalizacao LiveKit (WebSocket /rtc e API twirp)
+	handle /rtc* {
+		reverse_proxy 127.0.0.1:7880
+	}
+	handle /twirp/* {
+		reverse_proxy 127.0.0.1:7880
+	}
+
+	# Artefatos assinados do updater do Tauri.
+	#
+	# Dois canais no mesmo endpoint: o app manda `X-Canal: unstable` quando a
+	# pessoa liga as versoes de teste, e ai o manifesto servido e o unstable.
+	# O casamento inclui o caminho de proposito: sem isso o download do .exe,
+	# que carrega o mesmo cabecalho, tambem seria reescrito para o JSON.
+	handle /updates/* {
+		root * /srv
+		@unstable {
+			header X-Canal unstable
+			path /updates/latest.json
+		}
+		rewrite @unstable /updates/unstable.json
+		file_server
+	}
+
+	# Versao que roda no navegador, servida do mesmo dominio.
+	#
+	# Mesma origem do backend de proposito: assim o `fetch` e o WebSocket nao
+	# precisam de CORS, e o cookie de sessao — se um dia existir — nao atravessa
+	# origem nenhuma. As paginas auxiliares (cameras, telas) sao arquivos de
+	# verdade, entao nao ha rota unica para reescrever.
+	handle /app/* {
+		root * /srv/app
+		uri strip_prefix /app
+		file_server
+	}
+
+	# Backend naoconcordo: /api/*, /ws, /health
+	handle {
+		reverse_proxy 127.0.0.1:3040
+	}
+}

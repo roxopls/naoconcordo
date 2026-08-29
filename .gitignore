@@ -1,0 +1,33 @@
+# ------------------------------------------------------------------ segredos
+# A chave privada do updater assina as atualizacoes: quem a tiver consegue
+# empurrar uma versao falsa que todo cliente instalado aceita como legitima.
+updater.key
+updater.key.*
+*.pem
+
+# Endereco do servidor, senhas, sal de autenticacao, token de DNS.
+.env
+.env.local
+.env.*.local
+client/.env.local
+
+# Valores reais de producao usados so no build desta maquina.
+client/src-tauri/tauri.local.conf.json
+
+# ------------------------------------------------------------------- infra
+# Os exemplos e o compose entram: descrevem o produto e servem para qualquer
+# um hospedar. O que fica de fora e o que so vale para uma casa especifica —
+# IP interno, IP publico, rota estatica do roteador — e os arquivos reais,
+# preenchidos com segredo.
+infra/*.sh
+infra/livekit.yaml
+infra/*.bak-*
+
+# ------------------------------------------------------------------- build
+node_modules/
+target/
+dist/
+dist-web/
+*.exe
+*.sig
+*.msi

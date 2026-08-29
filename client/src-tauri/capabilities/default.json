@@ -1,0 +1,27 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissões mínimas da janela principal do naoconcordo",
+  "windows": [
+    "main",
+    "cameras"
+  ],
+  "permissions": [
+    "core:default",
+    "updater:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://*" }, { "url": "http://*" }]
+    },
+    "process:allow-restart",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-set-focus",
+    "core:window:allow-close",
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:webview:allow-get-all-webviews",
+    "core:window:allow-get-all-windows",
+    "core:window:allow-destroy",
+    "global-shortcut:default"
+  ]
+}

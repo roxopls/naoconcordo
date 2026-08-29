@@ -1,0 +1,625 @@
+
+:root {
+  font-family: Inter, "Segoe UI Variable", "Segoe UI", sans-serif;
+  color: #f4f4f5;
+  background: #09090b;
+  font-synthesis: none;
+  --panel: #111114;
+  --panel-2: #17171b;
+  --line: rgba(255,255,255,.07);
+  --muted: #9696a3;
+  --accent: #ff7a45;
+  --accent-2: #ffb15e;
+  --green: #54d18b;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 900px; min-height: 620px; overflow: hidden; }
+button, input, textarea { font: inherit; }
+button { color: inherit; }
+.hidden { display: none !important; }
+
+.login-shell { min-height: 100vh; display: grid; place-items: center; position: relative; overflow: hidden; background: radial-gradient(circle at 25% 20%, #2b1813 0, transparent 38%), radial-gradient(circle at 80% 80%, #241416 0, transparent 40%), #09090b; }
+.login-shell::before { content: ""; position: absolute; inset: 0; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 52px 52px; mask-image: linear-gradient(to bottom, black, transparent 85%); }
+.brand-mark { position: absolute; width: 180px; height: 180px; border-radius: 42px; display: grid; place-items: center; font: 800 112px/1 Georgia, serif; color: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.04); transform: rotate(-12deg); }
+.login-card { z-index: 1; width: min(420px, calc(100vw - 40px)); padding: 42px; border-radius: 24px; background: rgba(17,17,20,.88); border: 1px solid rgba(255,255,255,.1); box-shadow: 0 30px 80px rgba(0,0,0,.45); backdrop-filter: blur(24px); }
+.eyebrow { margin: 0 0 8px; color: var(--accent-2); letter-spacing: .18em; font-size: 11px; font-weight: 800; }
+h1 { margin: 0; font: 700 46px/1.1 Georgia, serif; letter-spacing: -.04em; }
+.muted { color: var(--muted); line-height: 1.5; margin: 12px 0 30px; }
+label { display: grid; gap: 8px; margin-top: 18px; color: #c7c7ce; font-size: 12px; font-weight: 700; }
+input { width: 100%; color: white; background: #0c0c0f; border: 1px solid var(--line); border-radius: 11px; padding: 13px 14px; outline: none; }
+input:focus, textarea:focus { border-color: rgba(255,122,69,.7); box-shadow: 0 0 0 3px rgba(255,122,69,.12); }
+.primary { border: 0; border-radius: 11px; padding: 13px; background: linear-gradient(135deg, var(--accent), #e9513e); font-weight: 800; cursor: pointer; box-shadow: 0 8px 24px rgba(239,86,53,.24); }
+#auth-submit { width: 100%; margin-top: 24px; }
+.primary:disabled { opacity: .55; cursor: wait; }
+.error { min-height: 18px; margin: 12px 0 0; color: #ff8b8b; font-size: 12px; text-align: center; }
+
+.app-shell { height: 100vh; display: grid; grid-template-columns: 68px 238px minmax(420px, 1fr) 210px; background: #0d0d10; }
+.sidebar { display: flex; flex-direction: column; min-width: 0; background: #101013; border-right: 1px solid var(--line); }
+.brand { height: 64px; display: flex; align-items: center; gap: 11px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+.brand-small { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: linear-gradient(135deg, var(--accent), #d64442); font: 700 21px Georgia, serif; }
+.brand div { display: grid; }
+.brand small, .profile small { color: var(--muted); font-size: 11px; }
+nav { flex: 1; padding: 16px 10px; overflow-y: auto; }
+.section-label { color: #747480; font-weight: 800; font-size: 10px; letter-spacing: .11em; margin: 5px 8px 8px; }
+.voice-label { margin-top: 25px; }
+.channel { width: 100%; display: flex; align-items: center; gap: 10px; border: 0; padding: 9px 10px; border-radius: 7px; color: #aaaab5; background: transparent; cursor: pointer; text-align: left; }
+.channel span { color: #777783; }
+.channel:hover, .channel.active { color: white; background: #1c1c21; }
+.voice-users { margin: 6px 0 0 18px; display: grid; gap: 5px; }
+.voice-user { color: #a8a8b2; font-size: 12px; padding: 4px; overflow: hidden; text-overflow: ellipsis; }
+.voice-user::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+.profile { position: relative; height: 62px; display: flex; align-items: center; gap: 9px; padding: 9px 10px; background: #0b0b0d; border-top: 1px solid var(--line); }
+.mini-profile { position: absolute; z-index: 20; left: 8px; bottom: calc(100% + 8px); width: 222px; padding: 10px; border: 1px solid rgba(255,255,255,.11); border-radius: 14px; background: #19191e; box-shadow: 0 18px 46px rgba(0,0,0,.55); }
+.mini-profile-head { display: flex; align-items: center; gap: 11px; padding: 7px 7px 12px; border-bottom: 1px solid var(--line); }
+.mini-profile-head > div { min-width: 0; display: grid; gap: 2px; }
+.mini-profile-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.mini-profile-head small { color: var(--muted); font-size: 11px; }
+.mini-profile-avatar { width: 42px; height: 42px; font-size: 14px; }
+.mini-profile-actions { display: grid; gap: 3px; padding-top: 8px; }
+.mini-profile-actions button { width: 100%; display: flex; align-items: center; gap: 9px; padding: 9px 10px; border: 0; border-radius: 8px; background: transparent; color: #d7d7dd; cursor: pointer; text-align: left; font-size: 12px; }
+.mini-profile-actions button:hover { background: #29292f; color: white; }
+.mini-profile-actions button.profile-logout { color: #ff9b9e; }
+.avatar-button[aria-expanded="true"] .avatar { box-shadow: 0 0 0 2px var(--accent); }
+.avatar { flex: 0 0 auto; width: 34px; height: 34px; display: grid; place-items: center; border-radius: 50%; background: #34343d; font-weight: 800; }
+.profile-copy { min-width: 0; flex: 1; display: grid; }
+.profile-copy strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; }
+.icon-button { border: 0; background: transparent; color: #878793; cursor: pointer; font-size: 18px; }
+
+/* Flex em vez de grid com linhas fixas: os filhos ocultos usam display:none e
+   saem do fluxo, entao posicao de linha nao e confiavel — era isso que fazia o
+   1fr cair no compositor e o chat crescer sem rolagem. */
+.main-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #141417; position: relative; padding-bottom: 82px; }
+.main-panel > .topbar { flex: 0 0 64px; }
+.main-panel > .stage { flex: 0 0 auto; }
+.main-panel > .messages { flex: 1 1 auto; }
+.main-panel > .composer { flex: 0 0 auto; }
+.topbar { display: flex; justify-content: space-between; align-items: center; padding: 0 20px; border-bottom: 1px solid var(--line); box-shadow: 0 4px 20px rgba(0,0,0,.12); }
+.topbar div:first-child { display: flex; gap: 12px; align-items: baseline; }
+.topbar span { color: var(--muted); font-size: 12px; }
+.status-pill { color: #aaaab4; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; border: 1px solid var(--line); border-radius: 999px; padding: 5px 9px; }
+.status-pill.online { color: var(--green); border-color: rgba(84,209,139,.28); background: rgba(84,209,139,.07); }
+.stage { height: 47vh; min-height: 140px; padding: 14px 18px 4px; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; overflow: auto; }
+.track-tile { min-height: 180px; border-radius: 14px; overflow: hidden; position: relative; background: #09090b; border: 1px solid var(--line); }
+.track-tile video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.track-tile label { position: absolute; left: 9px; bottom: 9px; margin: 0; padding: 4px 8px; background: rgba(0,0,0,.65); border-radius: 6px; font-size: 11px; }
+/* Convite para assistir: ocupa o lugar da transmissao ate alguem pedir. */
+.track-tile.oferta { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: #121216; border-style: dashed; }
+.oferta-nome { font-size: 12px; color: #b9b9c2; text-align: center; padding: 0 12px; }
+/* Selo de quem esta transmitindo. E botao: clicar leva direto para a tela. */
+.live-badge { padding: 1px 5px; border: 0; border-radius: 4px; background: var(--danger, #e0564f); color: #fff; font-size: 8px; font-weight: 800; letter-spacing: .06em; cursor: pointer; }
+.live-badge:hover { background: #f0685f; }
+/* Transmissao pausada: o botao segue ativo, mas sem a cor de "no ar". */
+.control.pausada { background: #3a3a2a; color: var(--accent-2); }
+.messages { min-height: 0; overflow-y: auto; padding: 18px 22px 8px; scrollbar-color: #29292f transparent; }
+.welcome { padding: 28px 0 22px; }
+.welcome .hash { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 50%; background: #26262c; font-size: 30px; }
+.welcome h2 { margin: 14px 0 5px; font-size: 25px; }
+.welcome p { margin: 0; color: var(--muted); font-size: 13px; }
+.message { position: relative; display: grid; grid-template-columns: 38px 1fr; gap: 10px; padding: 8px 0; }
+.message:hover { background: rgba(255,255,255,.015); }
+.message-body { min-width: 0; }
+.edited-label { color: #676772; font-size: 9px; }
+.message-actions { position: absolute; right: 6px; top: 3px; display: flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: #1d1d22; box-shadow: 0 7px 18px rgba(0,0,0,.3); opacity: 0; pointer-events: none; transition: opacity .12s; }
+.message:hover .message-actions, .message-actions:focus-within { opacity: 1; pointer-events: auto; }
+.message-actions button { width: 27px; height: 27px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: #9d9da8; cursor: pointer; }
+.message-actions button:hover { background: #303037; color: white; }
+.message-actions button:last-child:hover { color: #ff9b9e; }
+#message-edit-text { width: 100%; min-height: 110px; resize: vertical; margin-top: 7px; }
+.message-avatar { width: 36px; height: 36px; border-radius: 50%; background: #292930; display: grid; place-items: center; font-size: 12px; font-weight: 800; color: var(--accent-2); }
+.message-head { display: flex; gap: 8px; align-items: baseline; }
+.message-head strong { font-size: 13px; }
+.message-head time { color: #676772; font-size: 10px; }
+.message p { margin: 3px 0 0; color: #d1d1d6; font-size: 13px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.composer { margin: 0 18px 16px; min-height: 48px; display: flex; align-items: end; gap: 8px; background: #202025; border: 1px solid var(--line); border-radius: 12px; padding: 7px 8px 7px 14px; }
+.composer textarea { resize: none; max-height: 110px; flex: 1; color: white; background: transparent; border: 0; outline: 0; padding: 7px 0; line-height: 1.35; }
+.composer button { width: 34px; height: 34px; border: 0; border-radius: 9px; background: var(--accent); cursor: pointer; }
+
+.people-panel { background: #101013; border-left: 1px solid var(--line); padding: 18px 10px; }
+.person { display: flex; align-items: center; gap: 9px; padding: 7px 8px; color: #b9b9c2; font-size: 12px; }
+.person .avatar { width: 30px; height: 30px; font-size: 11px; position: relative; }
+.person .avatar::after { content: ""; position: absolute; width: 8px; height: 8px; right: -1px; bottom: -1px; border: 2px solid #101013; border-radius: 50%; background: #5a5a66; }
+.person-box:not(.offline) .avatar::after { background: var(--green); }
+.person.in-call .avatar::after { background: var(--accent); }
+.call-controls { position: fixed; z-index: 4; left: calc(306px + (100vw - 516px)/2); bottom: 14px; transform: translateX(-50%); display: flex; gap: 8px; padding: 8px; border: 1px solid rgba(255,255,255,.1); border-radius: 17px; background: rgba(22,22,26,.92); backdrop-filter: blur(18px); box-shadow: 0 15px 35px rgba(0,0,0,.38); }
+.control { min-width: 76px; height: 48px; display: grid; place-items: center; gap: 0; border: 0; border-radius: 11px; background: #29292f; cursor: pointer; font-size: 18px; }
+.control small { font-size: 8px; color: #aaaab4; }
+.control:hover { background: #34343b; }
+.control.active { color: #0d0d10; background: #f3f3f4; }
+.control.active small { color: #33333a; }
+.control.danger { background: #752e32; }
+.toast { position: fixed; z-index: 8; right: 22px; bottom: 22px; max-width: 340px; padding: 11px 14px; background: #29292f; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 30px rgba(0,0,0,.35); font-size: 12px; }
+
+@media (max-width: 1080px) {
+  .app-shell { grid-template-columns: 68px 220px 1fr; }
+  .people-panel { display: none; }
+  .call-controls { left: calc(288px + (100vw - 288px)/2); }
+}
+
+
+/* amigos e conversa privada */
+.unread-dot { width: 7px; height: 7px; margin-left: auto; border-radius: 50%; background: var(--green, #3ba55d); }
+.add-room.has-pending { background: #752e32; color: #fff; }
+.ghost-button { margin-left: auto; margin-right: 12px; padding: 6px 11px; border: 1px solid var(--line); border-radius: 9px; background: transparent; color: #b9b9c2; cursor: pointer; font-size: 11px; }
+.ghost-button:hover { background: #29292f; color: #f3f3f4; }
+.wide-dialog { width: min(520px, 92vw); border: 1px solid var(--line); border-radius: 14px; background: #17171b; color: #e6e6ea; padding: 22px; }
+.wide-dialog::backdrop { background: rgba(0,0,0,.55); }
+.admin-invite-form { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.admin-invite-form input { flex: 1; min-width: 0; }
+.admin-invite-form .primary { flex: 0 0 auto; padding: 11px 16px; font-size: 12px; white-space: nowrap; }
+.friend-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.friend-row { display: flex; align-items: center; gap: 10px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 10px; background: #1d1d22; }
+.friend-row .avatar { width: 30px; height: 30px; font-size: 11px; }
+.friend-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.friend-row button { flex: 0 0 auto; white-space: nowrap; }
+button.small { padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; background: #29292f; color: #d6d6dd; cursor: pointer; font-size: 11px; }
+button.small:hover { background: #34343b; }
+button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; border-color: transparent; }
+.fingerprint { display: block; margin: 4px 0 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: #101013; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px; letter-spacing: .06em; word-break: break-all; }
+.muted.small { font-size: 11px; line-height: 1.5; }
+.dm-note { padding: 18px; font-size: 12px; }
+
+/* canais de voz separados dos de texto */
+.channel.voice { color: #b9b9c2; }
+.channel.voice.active { color: #f3f3f4; background: #34343b; }
+.voice-members { display: flex; flex-direction: column; gap: 3px; margin: 2px 0 6px 22px; }
+.voice-member { display: flex; align-items: center; gap: 7px; padding: 3px 6px; color: #9a9aa4; font-size: 11px; }
+.voice-member .avatar { width: 22px; height: 22px; font-size: 9px; }
+
+/* camera e modos de exibicao do compartilhamento */
+.camera-dock { position: absolute; right: 16px; bottom: 96px; z-index: 5; width: 292px; border: 1px solid var(--line); border-radius: 13px; background: rgba(22,22,26,.95); backdrop-filter: blur(18px); box-shadow: 0 16px 38px rgba(0,0,0,.42); overflow: hidden; }
+.camera-dock.collapsed .camera-grid { display: none; }
+.camera-dock-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.camera-dock-head strong { flex: 1; font-size: 12px; }
+.camera-count { min-width: 18px; padding: 1px 6px; border-radius: 999px; background: #29292f; color: #b9b9c2; font-size: 10px; text-align: center; }
+.camera-dock-head .ghost-button { margin: 0; padding: 3px 7px; font-size: 10px; }
+/* As colunas e linhas sao calculadas no JS (`gridlayout.ts`), que escolhe a
+   divisao que deixa a imagem maior no espaco disponivel. */
+.camera-grid { display: grid; gap: 6px; padding: 8px; max-height: 320px; overflow-y: auto; }
+.camera-dock-actions { display: flex; align-items: center; gap: 4px; }
+.dock-action { width: 24px; height: 24px; display: grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #9a9aa4; cursor: pointer; }
+.dock-action:hover { background: #2a2a31; color: #f3f3f4; }
+.dock-action.ativo { background: rgba(255,122,69,.16); border-color: rgba(255,122,69,.35); color: var(--accent-2); }
+/* Faixa para trazer de volta quem foi escondido: sem ela a camera sumiria sem
+   caminho de volta a nao ser reentrando na chamada. */
+.camera-hidden-note { grid-column: 1 / -1; padding: 5px; border: 1px dashed var(--line); border-radius: 8px; background: transparent; color: #9a9aa4; font-size: 10px; cursor: pointer; }
+.camera-hidden-note:hover { color: #f3f3f4; border-color: rgba(255,255,255,.2); }
+/* Sem `aspect-ratio`: a altura vem da linha da grade, senao a tile ignoraria o
+   espaco calculado e sobraria area morta embaixo. */
+.camera-tile { position: relative; min-width: 0; min-height: 74px; border-radius: 9px; overflow: hidden; background: #09090b; border: 1px solid var(--line); }
+.camera-tile .tile-action { top: 5px; width: 22px; height: 22px; border-radius: 6px; font-size: 11px; }
+.camera-tile .tile-action:nth-of-type(1) { right: 31px; }
+.camera-tile .tile-action:nth-of-type(2) { right: 5px; }
+.camera-tile:hover .tile-action { opacity: 1; }
+/* Tela cheia acontece na grade, com a camera escolhida ocupando tudo. */
+.camera-grid:fullscreen { max-height: none; height: 100%; padding: 0; background: #000; }
+.camera-grid:fullscreen .camera-tile:not(.cheia) { display: none; }
+.camera-grid:fullscreen .camera-tile.cheia { grid-area: 1 / 1 / -1 / -1; border: 0; border-radius: 0; }
+.camera-grid:fullscreen .camera-tile video { object-fit: contain; }
+.camera-grid:fullscreen .tile-action { opacity: 1; }
+.camera-tile video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.camera-tile label { position: absolute; left: 5px; bottom: 5px; margin: 0; padding: 2px 6px; background: rgba(0,0,0,.66); border-radius: 5px; font-size: 10px; }
+
+/* painel destacado: flutua sobre o app, arrastavel e redimensionavel */
+.camera-dock.detached { position: fixed; z-index: 30; right: auto; bottom: auto; left: 60px; top: 90px; resize: both; overflow: auto; min-width: 240px; min-height: 180px; box-shadow: 0 22px 60px rgba(0,0,0,.6); }
+.camera-dock.detached .camera-dock-head { cursor: move; user-select: none; }
+.camera-dock.detached .camera-grid { max-height: none; height: calc(100% - 39px); }
+
+/* botoes de tamanho no compartilhamento */
+.tile-action { position: absolute; top: 8px; width: 28px; height: 28px; border: 0; border-radius: 7px; background: rgba(0,0,0,.6); color: #f3f3f4; cursor: pointer; font-size: 13px; opacity: 0; transition: opacity .15s; }
+.tile-action:nth-of-type(1) { right: 42px; }
+.tile-action:nth-of-type(2) { right: 8px; }
+.track-tile:hover .tile-action { opacity: 1; }
+.tile-action:hover { background: rgba(0,0,0,.85); }
+
+/* modo grande: um compartilhamento domina o painel e o chat vira faixa embaixo */
+.stage.has-theater { grid-template-columns: 1fr; }
+.stage.has-theater .track-tile:not(.theater) { display: none; }
+.main-panel.theater-mode > .stage { flex: 1 1 auto; height: auto; max-height: none; min-height: 0; resize: none; }
+.main-panel.theater-mode > .messages { flex: 0 0 148px; }
+.main-panel.theater-mode .welcome { display: none; }
+.main-panel.theater-mode .message { padding: 4px 0; }
+.track-tile.theater { min-height: 0; height: 100%; }
+/* Tela cheia acontece no proprio `stage`, com a tile escolhida ocupando tudo.
+   O `stage` sobrevive as trocas de transmissao, e por isso a barra de chamada
+   pode morar dentro dele sem ser apagada junto com as tiles. */
+.stage:fullscreen { height: 100%; max-height: none; padding: 0; grid-template-columns: 1fr; resize: none; background: #000; }
+.stage:fullscreen .track-tile:not(.cheia) { display: none; }
+.stage:fullscreen .track-tile.cheia { min-height: 0; height: 100%; border: 0; border-radius: 0; }
+.stage:fullscreen .track-tile video { object-fit: contain; background: #000; }
+/* O deslocamento normal da barra supoe as duas colunas da esquerda, que em
+   tela cheia nao existem: aqui ela e centralizada de verdade. */
+.stage:fullscreen .call-controls { left: 50%; bottom: 24px; }
+/* Sem hover: em tela cheia os botoes de tamanho ficam sempre visiveis, senao
+   nao ha como sair a nao ser pelo teclado. */
+.stage:fullscreen .tile-action { opacity: 1; }
+
+/* Em tela cheia, mouse parado esconde a interface — e o que todo player faz, e
+   sem isso a barra de chamada, a caixa de diagnostico e os botoes da tile ficam
+   por cima do video para sempre. Volta em qualquer movimento. */
+.stage:fullscreen .call-controls,
+.stage:fullscreen #diag-box,
+.stage:fullscreen .tile-action { transition: opacity .25s ease; }
+.stage:fullscreen.ocioso { cursor: none; }
+.stage:fullscreen.ocioso .call-controls,
+.stage:fullscreen.ocioso #diag-box,
+.stage:fullscreen.ocioso .tile-action { opacity: 0; pointer-events: none; }
+/* anel vermelho de quem esta falando */
+.camera-tile.speaking { border-color: #e5484d; box-shadow: 0 0 0 2px #e5484d, 0 0 14px rgba(229,72,77,.45); }
+.person.speaking .avatar, .voice-member.speaking .avatar { box-shadow: 0 0 0 2px #e5484d, 0 0 10px rgba(229,72,77,.5); }
+.person.speaking span, .voice-member.speaking span { color: #f3f3f4; }
+.camera-tile, .person .avatar, .voice-member .avatar { transition: box-shadow .12s ease, border-color .12s ease; }
+
+/* janela nativa de cameras */
+/* O `min-width: 900px` do `body` existe para a janela principal. Esta janela
+   abre com 640 de largura e a pessoa a encolhe mais: sem zerar o piso, o corpo
+   continua com 900px dentro de uma janela menor e o conteudo e cortado. */
+.cameras-body { margin: 0; min-width: 0; min-height: 0; height: 100vh; background: #0d0d10; color: #e6e6ea; overflow: hidden; }
+.cameras-status { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; color: var(--muted); font-size: 13px; text-align: center; }
+/* Grade calculada no JS, igual a do painel. `height: 100vh` sem rolagem: as
+   tiles encolhem para caber, em vez de escorrer para fora da janela. */
+.cameras-window-grid { height: 100vh; padding: 8px; display: grid; gap: 8px; overflow: hidden; }
+/* `min-width` junto com `min-height`: item de grade nasce com `min-width: auto`,
+   que para um <video> resolve na largura natural do quadro. Sem zerar, a faixa
+   nao encolhe abaixo disso, a grade estoura e o `overflow: hidden` corta as
+   bordas — encolher a janela comia a imagem, aumentar funcionava. */
+.cameras-window-grid .camera-tile { min-width: 0; min-height: 0; }
+/* `contain`, nao `cover`: na janela separada a pessoa quer ver a camera
+   inteira. Com `cover` o video e ampliado ate encher a tile e as bordas somem —
+   e o que fazia a imagem parecer grande demais para a janela. */
+.cameras-window-grid .camera-tile video { object-fit: contain; }
+.cameras-window-grid:fullscreen { padding: 0; background: #000; }
+.cameras-window-grid:fullscreen .camera-tile:not(.cheia) { display: none; }
+.cameras-window-grid:fullscreen .camera-tile.cheia { grid-area: 1 / 1 / -1 / -1; border: 0; border-radius: 0; }
+.cameras-window-grid:fullscreen .camera-tile video { object-fit: contain; }
+
+/* icones em SVG: um traco so, herdando a cor do contexto */
+.ic { width: 20px; height: 20px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.ic-sm { width: 15px; height: 15px; }
+.control .ic { width: 21px; height: 21px; }
+.control { display: grid; place-items: center; gap: 3px; }
+.channel .ic.room-dot { width: 17px; height: 17px; color: #777783; }
+.channel:hover .ic.room-dot, .channel.active .ic.room-dot { color: #c9c9d2; }
+.add-room .ic { width: 15px; height: 15px; }
+.ghost-button { display: inline-flex; align-items: center; gap: 5px; }
+.composer button { display: grid; place-items: center; color: #17171b; }
+.avatar-edit { display: grid; place-items: center; }
+.tile-action { display: grid; place-items: center; }
+.icon-button { display: grid; place-items: center; }
+.app-version { color: #5c5c66; font-size: 9px; letter-spacing: .04em; }
+
+/* controles de volume por pessoa */
+.person-box { padding: 2px 0 6px; border-bottom: 1px solid rgba(255,255,255,.04); }
+.person-box:last-child { border-bottom: 0; }
+.volume-row { display: flex; align-items: center; gap: 7px; padding: 2px 8px 2px 47px; }
+.volume-label { width: 22px; color: #6f6f7a; font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
+.volume-value { width: 32px; color: #6f6f7a; font-size: 9px; text-align: right; }
+.volume-row input[type="range"] { flex: 1; height: 3px; appearance: none; border-radius: 999px; background: #2f2f37; cursor: pointer; }
+.volume-row input[type="range"]::-webkit-slider-thumb { appearance: none; width: 11px; height: 11px; border-radius: 50%; background: var(--accent); border: 0; }
+
+/* papeis dentro do servidor */
+.role-tag { padding: 2px 7px; border-radius: 999px; font-size: 9px; text-transform: uppercase; letter-spacing: .06em; background: #29292f; color: #9a9aa4; }
+.role-tag.role-owner { background: rgba(255,122,69,.16); color: var(--accent-2); }
+.role-tag.role-mod { background: rgba(84,209,139,.14); color: var(--green); }
+.danger-button { padding: 5px 10px; border: 1px solid rgba(229,72,77,.4); border-radius: 8px; background: rgba(229,72,77,.12); color: #ff9b9e; cursor: pointer; font-size: 11px; }
+
+/* escolha de qualidade da transmissao */
+.quality-options { margin: 12px 0 14px; }
+.quality-range { width: 100%; height: 3px; appearance: none; border-radius: 999px; background: #2f2f37; cursor: pointer; }
+.quality-range::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); border: 0; }
+.quality-ticks { display: flex; justify-content: space-between; margin-top: 8px; }
+/* Os rotulos das pontas encostariam na borda do dialogo alinhados ao centro. */
+.quality-ticks span { flex: 1; text-align: center; font-size: 11px; color: var(--muted); cursor: pointer; }
+.quality-ticks span:first-child { text-align: left; }
+.quality-ticks span:last-child { text-align: right; }
+.quality-ticks span.active { color: #ededf2; font-weight: 600; }
+.quality-readout { margin: 6px 0 0; font-size: 11px; color: var(--muted); }
+
+/* rail de servidores */
+.rail { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px 0; background: #0a0a0c; border-right: 1px solid var(--line); overflow: hidden; }
+.rail-servers { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 8px; overflow-y: auto; scrollbar-width: none; padding: 2px 0; }
+.rail-servers::-webkit-scrollbar { width: 0; height: 0; }
+.rail-button { position: relative; width: 46px; height: 46px; flex: 0 0 auto; display: grid; place-items: center; border: 0; border-radius: 16px; background: #1c1c21; color: #b9b9c2; cursor: pointer; font-weight: 800; font-size: 13px; transition: border-radius .15s, background .15s; }
+.rail-button:hover { border-radius: 13px; background: #2a2a31; color: #f3f3f4; }
+.rail-button.active { border-radius: 13px; background: #2a2a31; color: #f3f3f4; }
+.rail-servers .rail-button.active { background: #2a2a31; color: #f3f3f4; }
+.rail-servers .rail-button.has-image { background: transparent; }
+.rail-button.active::before { content: ""; position: absolute; left: -11px; width: 4px; height: 26px; border-radius: 0 4px 4px 0; background: #f3f3f4; }
+.rail-button.home { background: transparent; }
+.rail-button.home.active { background: rgba(255,122,69,.16); }
+.rail-logo { width: 34px; height: 34px; border-radius: 11px; object-fit: cover; }
+.rail-badge { position: absolute; top: -3px; right: -3px; min-width: 18px; height: 18px; padding: 0 5px; display: grid; place-items: center; border-radius: 9px; background: var(--danger, #e0564f); color: #fff; font-size: 11px; font-weight: 800; }
+.update-pill { border-color: rgba(84,209,139,.45); color: var(--green, #54d18b); }
+.update-pill.baixando { border-color: rgba(255,122,69,.45); color: var(--accent, #ff7a45); }
+.rail-button.add { background: transparent; border: 1px dashed rgba(255,255,255,.14); color: #7c7c88; }
+.rail-button.add:hover { color: var(--green); border-color: rgba(84,209,139,.4); }
+.rail-divider { width: 26px; height: 1px; background: var(--line); flex: 0 0 auto; }
+.brand { justify-content: space-between; }
+
+/* presenca no painel da direita */
+.offline-label { margin-top: 18px; }
+.person-box.offline { opacity: .45; }
+.person-box.offline .person span { color: #8b8b95; }
+.person.in-call span { color: #f3f3f4; }
+
+/* canais com mensagem nova */
+.channel.unread { color: #f3f3f4; font-weight: 600; }
+.unread-badge { margin-left: auto; min-width: 18px; padding: 1px 6px; border-radius: 999px; background: var(--accent); color: #17171b; font-size: 10px; font-weight: 800; text-align: center; }
+.switch-row { flex-direction: row; align-items: center; gap: 9px; display: flex; font-weight: 400; color: #b9b9c2; }
+.switch-row input { width: auto; }
+/* central de amigos */
+.friends-home h2 { margin-bottom: 6px; }
+.friend-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 9px; margin-top: 20px; }
+.friend-card { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: #1a1a1f; color: inherit; cursor: pointer; text-align: left; }
+.friend-card:hover { background: #22222a; border-color: rgba(255,255,255,.14); }
+.friend-card span { display: grid; min-width: 0; }
+.friend-card strong { font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.friend-card small { color: #6f6f7a; font-size: 10px; }
+.friend-card.online small { color: var(--green); }
+
+/* anexos */
+.composer-main { position: relative; flex: 1; display: grid; gap: 6px; min-width: 0; }
+.composer-icon { width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 8px; background: transparent; color: #8b8b95; cursor: pointer; }
+.composer-icon:hover { background: #2a2a31; color: #f3f3f4; }
+.attach-preview { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 4px; }
+.attach-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; background: #16161a; font-size: 11px; color: #c7c7ce; }
+.attach-chip button { border: 0; background: transparent; color: #8b8b95; cursor: pointer; font-size: 14px; line-height: 1; }
+.attach-chip button:hover { color: #ff8b8b; }
+.attachment { margin-top: 6px; }
+.attachment img { max-width: min(420px, 100%); max-height: 320px; border-radius: 10px; border: 1px solid var(--line); cursor: zoom-in; display: block; }
+.attachment video { max-width: min(480px, 100%); max-height: 360px; border-radius: 10px; border: 1px solid var(--line); display: block; background: #000; }
+.attachment audio { width: min(360px, 100%); }
+.attach-file { display: inline-flex; align-items: center; gap: 7px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 9px; background: #1a1a1f; color: #d1d1d6; cursor: pointer; font-size: 12px; }
+.attach-file:hover { background: #23232a; }
+
+.chat-link { color: var(--accent-2); text-decoration: none; word-break: break-all; }
+.chat-link:hover { text-decoration: underline; }
+
+/* seletor proprio de fonte de compartilhamento */
+.dialog-subtitle { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; max-height: 320px; overflow-y: auto; padding: 2px; }
+.source-card { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: #1d1d22; color: inherit; cursor: pointer; }
+.source-card:hover { background: #24242b; }
+.source-card.active { border-color: rgba(255,122,69,.55); background: rgba(255,122,69,.08); }
+.source-thumb { width: 100%; height: 96px; border-radius: 6px; background: #111114; overflow: hidden; display: flex; align-items: center; justify-content: center; border: 1px solid rgba(255,255,255,.05); margin-bottom: 2px; }
+.source-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.source-card strong { font-size: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-card small { color: var(--muted); font-size: 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-kind { font-size: 9px; text-transform: uppercase; letter-spacing: .5px; color: var(--accent); }
+
+/* marcas de estado na linha da pessoa: mudo e/ou sem audio */
+.person-marks { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding-left: 6px; color: var(--muted); flex: 0 0 auto; }
+.person-marks .ic-sm { width: 14px; height: 14px; opacity: .85; }
+.telas-body { margin: 0; min-width: 0; min-height: 0; height: 100vh; display: flex; flex-direction: column; background: #101014; color: #f3f3f4; }
+.telas-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: #0a0a0c; flex: 0 0 auto; }
+.telas-current { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A moldura ocupa o resto da janela: redimensionar a janela redimensiona a
+   transmissao, que e o ponto de ter uma janela propria. */
+.telas-grid { flex: 1 1 auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 6px; padding: 6px; overflow: auto; align-content: start; }
+.tela-tile { position: relative; min-height: 160px; background: #000; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.tela-tile video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.tela-tile label { position: absolute; left: 6px; bottom: 6px; padding: 2px 7px; border-radius: 6px; background: rgba(0,0,0,.6); font-size: 11px; }
+
+/* menu de cada pessoa: volume e silenciamento saem da lista e vem para ca */
+.person.clickable, .voice-member.clickable { cursor: pointer; }
+.person.clickable:hover, .voice-member.clickable:hover { background: #24242b; border-radius: 8px; }
+.user-menu { position: fixed; z-index: 60; min-width: 220px; padding: 8px; display: flex; flex-direction: column; gap: 6px; background: #1d1d22; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 30px rgba(0,0,0,.5); }
+.user-menu-title { font-size: 13px; padding: 2px 4px 4px; border-bottom: 1px solid var(--line); }
+.user-menu-item { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 0; border-radius: 8px; background: transparent; color: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.user-menu-item:hover { background: #2a2a31; }
+.user-menu-item.active { color: var(--accent); }
+.user-menu .volume-row { padding: 2px 4px; }
+/* silenciado por voce: cor propria, para nao ler como "ele esta mudo" */
+.silenced-mark { color: var(--accent); }
+
+/* banner e bio no mini-profile */
+.mini-profile-banner { height: 80px; border-radius: 10px 10px 0 0; background: linear-gradient(135deg, #2a2a35 0%, #1a1a22 100%); background-size: cover; background-position: center; }
+.mini-profile-banner.has-image { background-size: cover; background-position: center; }
+.mini-profile-bio { font-size: 12px; color: var(--muted); padding: 0 12px 4px; margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 60px; overflow: hidden; }
+.mini-profile-bio:empty { display: none; }
+
+/* banner do servidor no sidebar */
+.server-banner { height: 100px; background: linear-gradient(135deg, #2a2a35 0%, #1a1a22 100%); background-size: cover; background-position: center; flex: 0 0 auto; }
+
+/* icone do servidor no rail: respeita o formato quadrado arredondado do botao */
+.rail-servers .rail-button { overflow: hidden; }
+.rail-servers .rail-button img { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
+
+/* preview de banner e icone nos dialogs de edicao */
+.banner-preview { height: 100px; border-radius: 10px; background: #1d1d22; background-size: cover; background-position: center; border: 1px dashed var(--line); margin-bottom: 8px; }
+.banner-preview.has-image { border-style: solid; }
+.server-icon-preview { width: 48px; height: 48px; border-radius: 50%; background: #1d1d22; background-size: cover; background-position: center; border: 1px dashed var(--line); flex: 0 0 auto; }
+.server-icon-preview.has-image { border-style: solid; }
+.dialog-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.dialog-row .ghost-button { margin-left: 0; margin-right: 0; }
+.dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 20px; }
+.dialog-actions button { min-height: 36px; padding: 9px 15px; border: 1px solid var(--line); border-radius: 10px; background: #24242a; color: #d6d6dd; font-size: 12px; font-weight: 700; line-height: 1; cursor: pointer; }
+.dialog-actions button:hover { background: #2f2f36; color: #f3f3f4; }
+.dialog-actions .primary { border: 0; color: #fff; box-shadow: none; }
+.dialog-actions .danger-button { border-color: rgba(238,85,85,.45); background: rgba(238,85,85,.12); color: #ff8b8b; }
+.dialog-actions .danger-button:hover { background: rgba(238,85,85,.2); color: #ffb0b0; }
+.ghost-button.danger { color: #e55; }
+.ghost-button.danger:hover { background: rgba(238,85,85,.1); }
+.server-avatar-preview { width: 56px; height: 56px; border-radius: 50%; background: #1d1d22; background-size: cover; background-position: center; border: 1px dashed var(--line); flex: 0 0 auto; display: grid; place-items: center; font-weight: 800; font-size: 18px; color: var(--muted); }
+.server-avatar-preview.has-image { border-style: solid; }
+.mini-profile-server-badge { font-size: 11px; color: var(--accent); margin-top: -2px; padding: 0 12px 4px; }
+
+/* Player de link (YouTube, Twitch): o iframe nao tem proporcao propria, entao
+   a caixa e quem segura o 16:9. */
+.attachment.embed-player { width: min(420px, 100%); }
+.attachment.embed-player iframe { width: 100%; aspect-ratio: 16 / 9; border: 0; border-radius: 10px; display: block; }
+
+/* Visualizador de imagem. `position: fixed` basta fora de tela cheia; dentro
+   dela o elemento e filho do que esta em tela cheia e o fixed vale igual. */
+.lightbox { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 32px; background: rgba(0,0,0,.82); cursor: zoom-out; }
+.lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; cursor: default; }
+.lightbox-close { position: absolute; top: 16px; right: 20px; width: 34px; height: 34px; border: 0; border-radius: 50%; background: rgba(255,255,255,.12); color: #fff; font-size: 20px; line-height: 1; cursor: pointer; }
+.lightbox-close:hover { background: rgba(255,255,255,.22); }
+
+/* Responder: barra no redator e bloco de citacao na mensagem. */
+.reply-bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; margin-bottom: 6px; border-left: 2px solid var(--accent); border-radius: 0 8px 8px 0; background: rgba(255,255,255,.04); }
+.reply-bar-text { display: grid; gap: 1px; min-width: 0; flex: 1; }
+.reply-bar-text strong { font-size: 11px; color: var(--accent); }
+/* O trecho citado pode ser longo: corta em vez de esticar o redator. */
+.reply-bar-text small { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.reply-bar-close { border: 0; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.reply-bar-close:hover { color: #ededf2; }
+
+.reply-quote { display: flex; align-items: center; gap: 6px; width: 100%; margin: 0 0 3px; padding: 2px 0 2px 8px; border: 0; border-left: 2px solid var(--line); background: none; color: var(--muted); font-size: 12px; text-align: left; cursor: pointer; }
+.reply-quote:hover { color: #ededf2; border-left-color: var(--accent); }
+.reply-quote strong { color: var(--accent-2); font-size: 12px; flex: none; }
+.reply-quote span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Pisca a mensagem original quando alguem clica na citacao. */
+.message.realcada { animation: realce 1.4s ease-out; }
+@keyframes realce {
+  0%, 40% { background: rgba(255,122,69,.16); }
+  100% { background: transparent; }
+}
+.embed-fora { display: block; margin-top: 4px; padding: 0; border: 0; background: none; color: var(--muted); font-size: 11px; text-decoration: underline; cursor: pointer; }
+.embed-fora:hover { color: var(--accent); }
+
+/* Consumo somado do aplicativo, nas configuracoes. */
+.uso-total { margin: 6px 0 8px; font-size: 15px; font-weight: 600; }
+.uso-grupos { display: grid; gap: 4px; margin-bottom: 8px; }
+.uso-linha { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--muted); }
+.uso-linha strong { color: #ededf2; font-weight: 600; }
+
+/* Diagnostico da transmissao (modo desenvolvedor). Fonte monoespacada para as
+   colunas nao dancarem a cada atualizacao. */
+.diag-box { position: absolute; top: 12px; left: 12px; z-index: 60; margin: 0; padding: 8px 10px; border-radius: 8px; background: rgba(0,0,0,.72); color: #9ff5c0; font-family: Consolas, "Courier New", monospace; font-size: 11px; line-height: 1.5; white-space: pre; pointer-events: none; max-width: calc(100% - 24px); overflow: hidden; }
+
+/* Camera no palco: mesma tile das transmissoes, mas a imagem cabe inteira em
+   vez de ser cortada — rosto cortado no meio e pior que faixa preta. */
+.stage .track-tile video { object-fit: contain; background: #09090b; }
+.camera-hidden-note { align-self: center; }
+
+/* Barra de arrasto do palco: ocupa a largura toda, entao pega em qualquer
+   ponto. Substitui a alca nativa do `resize: vertical`, um triangulo de 12px
+   no canto direito que exigia mira. */
+.stage-resizer { height: 11px; display: grid; place-items: center; cursor: ns-resize; touch-action: none; flex: 0 0 auto; }
+.stage-resizer span { width: 46px; height: 3px; border-radius: 999px; background: #3a3a44; transition: background .15s, width .15s; }
+.stage-resizer:hover span, .stage-resizer.arrastando span { background: var(--accent); width: 74px; }
+
+/* Cameras fora da tela do servidor: uma so, no canto, seguindo quem fala.
+   Fica acima do redator e longe da navegacao — o painel flutuante antigo
+   nascia por cima da lista de canais e engolia os cliques dela. */
+.camera-mini { position: absolute; right: 18px; bottom: 150px; z-index: 25; width: 232px; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden; background: #09090b; border: 1px solid var(--line); box-shadow: 0 14px 34px rgba(0,0,0,.5); }
+.camera-mini video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.camera-mini label { position: absolute; left: 6px; bottom: 6px; margin: 0; padding: 2px 7px; background: rgba(0,0,0,.7); border-radius: 5px; font-size: 10px; }
+.camera-mini-voltar { position: absolute; top: 6px; right: 6px; width: 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 7px; background: rgba(0,0,0,.6); color: #f3f3f4; cursor: pointer; opacity: 0; transition: opacity .15s; }
+.camera-mini:hover .camera-mini-voltar { opacity: 1; }
+.camera-mini-voltar:hover { background: rgba(0,0,0,.85); }
+/* Risco entre os volumes e as acoes do contexto. */
+.user-menu-sep { height: 1px; margin: 5px 0; background: var(--line); }
+
+/* ---- texto rico do chat ---- */
+.chat-codigo { padding: 1px 5px; border-radius: 5px; background: #26262e; font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+/* Spoiler cobre o texto ate alguem clicar. `color: transparent` sozinho ainda
+   deixaria selecionar e copiar, entao a selecao tambem sai. */
+.spoiler { padding: 0 3px; border-radius: 4px; background: #33333c; color: transparent; cursor: pointer; user-select: none; }
+.spoiler.revelado { background: rgba(255,255,255,.06); color: inherit; cursor: auto; user-select: auto; }
+.mencao { padding: 0 3px; border-radius: 4px; background: rgba(255,122,69,.14); color: var(--accent-2); font-weight: 600; }
+.mencao-eu { background: rgba(255,122,69,.3); color: #ffd9c4; }
+.unread-badge.mencionado { background: var(--accent); color: #1a1a1f; }
+
+/* ---- reacoes ---- */
+.reacoes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.reacao { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border: 1px solid var(--line); border-radius: 999px; background: #1d1d22; font-size: 12px; line-height: 1.5; cursor: pointer; }
+.reacao span { font-size: 11px; color: var(--muted); }
+.reacao.minha { border-color: rgba(255,122,69,.5); background: rgba(255,122,69,.12); }
+.reacao.minha span { color: var(--accent-2); }
+/* O botao de reagir so aparece no hover: uma carinha fixa em toda mensagem
+   poluiria a conversa inteira. */
+.reacao-add { padding: 1px 7px; border: 1px solid transparent; border-radius: 999px; background: none; color: var(--muted); font-size: 12px; cursor: pointer; opacity: 0; transition: opacity .15s; }
+.message:hover .reacao-add, .reacao-add:focus { opacity: 1; }
+.reacao-add:hover { border-color: var(--line); background: #1d1d22; color: #ededf2; }
+.seletor-emoji { display: flex; flex-wrap: wrap; gap: 2px; max-width: 190px; padding: 6px; }
+.seletor-emoji button { width: 30px; height: 30px; border: 0; border-radius: 7px; background: none; font-size: 16px; cursor: pointer; }
+.seletor-emoji button:hover { background: #2a2a31; }
+
+/* ---- digitando ---- */
+.typing-note { margin: 0; padding: 0 18px 3px; height: 15px; color: var(--muted); font-size: 11px; font-style: italic; }
+
+/* ---- lista de mencao ----
+   Os seletores levam `.mention-box` na frente de proposito. A lista vive dentro
+   do redator, e `.composer button` (0,1,1) impoe 34x34, fundo laranja e
+   `place-items: center` a qualquer botao la dentro — o que empilhava avatar e
+   nome num quadradinho. Duas classes (0,2,0) ganham dessa regra. */
+.mention-box { position: absolute; bottom: 100%; left: 0; max-width: 320px; width: 100%; margin-bottom: 6px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); box-shadow: 0 14px 34px rgba(0,0,0,.5); z-index: 40; }
+.mention-box .mention-item { width: 100%; height: auto; display: flex; align-items: center; justify-content: flex-start; gap: 8px; padding: 5px 7px; border: 0; border-radius: 7px; background: none; color: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.mention-box .mention-item .avatar { width: 22px; height: 22px; font-size: 10px; }
+.mention-box .mention-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mention-box .mention-item:hover, .mention-box .mention-item.active { background: rgba(255,122,69,.16); }
+
+/* ---- cartao de perfil de outra pessoa ---- */
+.perfil-dialog { width: 300px; padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); color: inherit; overflow: hidden; }
+.perfil-dialog::backdrop { background: rgba(0,0,0,.55); }
+/* Sem banner a faixa continua ocupando o lugar: o cartao nao muda de forma
+   dependendo de quem tem foto de capa. */
+.perfil-banner { height: 84px; background: linear-gradient(135deg, #2a2a33, #1d1d24); background-size: cover; background-position: center; }
+.perfil-corpo { padding: 0 16px 16px; display: grid; gap: 3px; }
+.perfil-avatar { width: 62px; height: 62px; margin-top: -31px; font-size: 20px; border: 3px solid var(--panel-2); }
+.perfil-corpo > strong { font-size: 17px; margin-top: 6px; }
+.perfil-bio { margin: 8px 0 0; padding: 9px 11px; border-radius: 9px; background: rgba(255,255,255,.04); color: #cfcfd6; font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
+.perfil-acoes { display: grid; gap: 6px; margin-top: 14px; }
+.perfil-acoes button { width: 100%; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: #232329; color: #e6e6ea; font-size: 13px; cursor: pointer; }
+.perfil-acoes button:hover { background: #2c2c34; }
+.perfil-acoes button.primary { width: 100%; margin: 0; border-color: transparent; background: var(--accent); color: #17171b; font-weight: 600; }
+/* Avatar e nome da mensagem abrem o perfil de quem escreveu. */
+.clicavel { cursor: pointer; }
+.message-head strong.clicavel:hover { text-decoration: underline; }
+.message-avatar.clicavel:hover { filter: brightness(1.15); }
+
+/* ------------------------------------------------ configuracoes por secao
+   O dialogo era uma coluna so, com tudo empilhado: dispositivos, notificacoes,
+   tela, desenvolvedor e atualizacoes. Achar um ajuste virava rolagem. */
+.config-dialog { width: min(820px, 94vw); }
+.config-layout { display: grid; grid-template-columns: 172px 1fr; gap: 18px; align-items: start; }
+.config-nav { display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--line); padding-right: 12px; }
+.config-tab { padding: 9px 11px; border: 0; border-radius: 9px; background: transparent; color: #b9b9c4; text-align: left; font-size: 13px; cursor: pointer; }
+.config-tab:hover { background: #26262c; color: #f3f3f4; }
+.config-tab.ativo { background: #34343b; color: #fff; }
+.config-panes { min-height: 340px; }
+.config-pane { display: none; flex-direction: column; gap: 10px; }
+.config-pane.ativo { display: flex; }
+/* A primeira legenda de secao nao precisa do respiro que separa as seguintes. */
+.config-pane .section-label:first-child { margin-top: 0; }
+
+/* Medidor do microfone. A marca do limiar fica sobre a barra: e a unica forma
+   de a pessoa entender "abre a partir daqui" sem ler texto nenhum. */
+.mic-meter { position: relative; height: 10px; border-radius: 6px; background: #26262c; overflow: hidden; }
+#mic-meter-fill { display: block; height: 100%; width: 0%; border-radius: 6px; background: linear-gradient(90deg, #4ea36b, #cfcf52 72%, #d06a5a); transition: width .06s linear; }
+#mic-meter-limiar { position: absolute; top: -2px; bottom: -2px; width: 2px; background: #f3f3f4; box-shadow: 0 0 0 1px rgba(0,0,0,.45); }
+/* Fora da faixa de abertura o preenchimento fica apagado: mostra que o som
+   existe mas nao esta sendo enviado. */
+.mic-meter.fechado #mic-meter-fill { filter: saturate(.25) brightness(.7); }
+
+.atalho-linha { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.atalho-linha button { min-width: 148px; font-family: inherit; }
+.atalho-linha button.gravando { background: #752e32; color: #fff; }
+
+/* Cabecalho de perfil dentro do menu da pessoa. A capa fica no topo e a foto
+   monta sobre ela, como no cartao grande — quem clica num nome espera
+   reconhecer a pessoa, nao ler uma lista de controles de volume. */
+.user-menu-perfil { margin: -6px -6px 6px; padding: 0 10px 9px; border-bottom: 1px solid var(--line); }
+.user-menu-capa { height: 54px; margin: 0 -10px; border-radius: 10px 10px 0 0; background: #34343b center/cover no-repeat; }
+.user-menu-foto { width: 46px; height: 46px; margin-top: -23px; border: 3px solid #1c1c21; border-radius: 50%; font-size: 15px; }
+.user-menu-perfil .user-menu-title { display: block; margin-top: 5px; }
+.user-menu-perfil small { display: block; }
+.user-menu-bio { margin: 6px 0 0; font-size: 11px; color: #b9b9c4; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Resultados da busca. Cada linha e um salto: canal, quem falou, quando, e o
+   trecho com o termo destacado — sem o trecho a lista vira uma pilha de nomes
+   que nao ajuda a escolher. */
+.busca-resultados { display: flex; flex-direction: column; gap: 6px; max-height: 46vh; overflow-y: auto; }
+.busca-item { padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: #212127; text-align: left; color: inherit; cursor: pointer; font: inherit; }
+.busca-item:hover { background: #2a2a31; }
+.busca-item-topo { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: #b9b9c4; }
+.busca-item-canal { color: #f3f3f4; font-weight: 600; }
+.busca-item-texto { margin: 3px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+.busca-item-texto mark { padding: 0 2px; border-radius: 3px; background: #56561f; color: #fff; }
+/* A mensagem alcancada pela busca pisca uma vez: sem isso, chegar no canal
+   certo ainda deixa a pessoa procurando com os olhos. */
+@keyframes achada { from { background: rgba(240,208,90,.22); } to { background: transparent; } }
+.message.achada { animation: achada 2.2s ease-out; }

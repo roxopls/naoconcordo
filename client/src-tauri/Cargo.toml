@@ -1,0 +1,65 @@
+[package]
+name = "naoconcordo-app"
+version = "0.7.16-1"
+description = "naoconcordo - sala privada de voz e tela"
+authors = ["naoconcordo"]
+edition = "2024"
+
+[lib]
+name = "naoconcordo_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-notification = "2"
+# Atalho que funciona com o app em segundo plano: sem isto o push-to-talk so
+# valeria com a janela em foco, que e exatamente quando ninguem precisa dele.
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-opener = "2"
+# Exigido por generate_context! desde que tauri.conf.json passou a ter "plugins".
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["sync"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+base64 = "0.22"
+
+# Compartilhamento de tela sem getDisplayMedia: a captura e nativa e a
+# publicacao vai por uma conexao propria com o LiveKit.
+[target.'cfg(windows)'.dependencies]
+livekit = { version = "0.8", features = ["native-tls"] }
+windows-capture = "2"
+wasapi = "0.24"
+# Mesma versao que o windows-capture ja usa, para nao compilar duas.
+# `SetIsBorderRequired(false)` so vale para quem pediu o acesso Borderless.
+windows = { version = "0.62", features = [
+    "Graphics_Capture",
+    "Security_Authorization_AppCapabilityAccess",
+    "Win32_System_Registry",
+    # Duplicacao de tela: o caminho sem borda amarela.
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    # Limites reais da janela: `GetWindowRect` inclui a borda invisivel de
+    # redimensionamento, e o WGC captura os limites do DWM.
+    "Win32_Graphics_Dwm",
+    # Consumo somado: andar a arvore de processos do WebView2.
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    # Codificacao por hardware: MFTEnumEx acha o NVENC/AMF/QuickSync desta
+    # maquina, e ICodecAPI fala em VARIANT, que mora no COM/OLE.
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
+
