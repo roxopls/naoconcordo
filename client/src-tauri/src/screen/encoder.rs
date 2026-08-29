@@ -91,6 +91,9 @@ pub struct EncoderHandle {
     /// Pedido de quadro-chave vindo de fora do laco, para quando retomar uma
     /// transmissao pausada.
     chave: Arc<AtomicBool>,
+    /// Por que o codificador parou, quando parou sozinho. Sem isto a thread
+    /// morria calada e a transmissao ficava em zero quadro sem explicacao.
+    falha: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl EncoderHandle {
@@ -104,6 +107,11 @@ impl EncoderHandle {
     }
     pub fn descartados(&self) -> u64 {
         self.descartados.load(Ordering::Relaxed)
+    }
+
+    /// Por que o codificador parou, quando parou.
+    pub fn falha(&self) -> Option<String> {
+        self.falha.lock().ok().and_then(|vaga| vaga.clone())
     }
 
     /// Pede um quadro-chave no proximo quadro.
@@ -202,18 +210,20 @@ pub fn iniciar(
     let stop = Arc::new(AtomicBool::new(false));
     let descartados = Arc::new(AtomicU64::new(0));
     let chave = Arc::new(AtomicBool::new(false));
+    let falha = Arc::new(std::sync::Mutex::new(None::<String>));
     // A thread responde qual codec conseguiu abrir; ate ela responder, quem
     // chamou nao sabe se ha hardware.
     let (pronto_tx, pronto_rx) = std::sync::mpsc::channel::<Result<(HwCodec, String), String>>();
 
     let stop_thread = stop.clone();
     let chave_thread = chave.clone();
+    let falha_thread = falha.clone();
     let thread = std::thread::Builder::new()
         .name("tela-encoder".into())
         .spawn(move || {
             rodar(
-                source, rx, stop_thread, chave_thread, pronto_tx, ordem, largura, altura, fps,
-                bitrate,
+                source, rx, stop_thread, chave_thread, falha_thread, pronto_tx, ordem, largura,
+                altura, fps, bitrate,
             );
         })
         .map_err(|e| format!("Nao foi possivel criar a thread do codificador: {e}"))?;
@@ -229,6 +239,7 @@ pub fn iniciar(
             nome,
             descartados,
             chave,
+            falha,
         }),
         Ok(Err(erro)) => {
             stop.store(true, Ordering::Relaxed);
@@ -252,6 +263,7 @@ fn rodar(
     rx: Receiver<Job>,
     stop: Arc<AtomicBool>,
     chave: Arc<AtomicBool>,
+    falha: Arc<std::sync::Mutex<Option<String>>>,
     pronto: std::sync::mpsc::Sender<Result<(HwCodec, String), String>>,
     ordem: &'static [HwCodec],
     largura: u32,
@@ -294,7 +306,7 @@ fn rodar(
         }
         let _ = pronto.send(Ok((mft.codec, mft.nome.clone())));
 
-        laco(&source, &rx, &stop, &chave, &mut mft, fps, bitrate);
+        laco(&source, &rx, &stop, &chave, &falha, &mut mft, ordem, fps, bitrate);
 
         mft.encerrar();
         drop(mft);
@@ -304,20 +316,33 @@ fn rodar(
 }
 
 /// O laco de trabalho: eventos do MFT de um lado, quadros da captura do outro.
+#[allow(clippy::too_many_arguments)]
 unsafe fn laco(
     source: &NativeVideoSource,
     rx: &Receiver<Job>,
     stop: &AtomicBool,
     chave: &AtomicBool,
+    falha: &std::sync::Mutex<Option<String>>,
     mft: &mut Mft,
+    ordem: &'static [HwCodec],
     fps: f64,
     bitrate_inicial: u64,
 ) {
+    let anotar = |motivo: String| {
+        eprintln!("[encoder] {motivo}");
+        if let Ok(mut vaga) = falha.lock() {
+            *vaga = Some(motivo);
+        }
+    };
+    let _ = ordem;
     // Quantos `METransformNeedInput` chegaram sem quadro para responder. O MFT
     // enfileira esses pedidos, e responder fora de ordem trava a codificacao.
     let mut precisa_entrada = 0usize;
     let mut forcar_chave = false;
     let mut bitrate_atual = bitrate_inicial;
+    // Quadro recusado seguido. Um sozinho e soluco; muitos em sequencia sao
+    // codificador morto — e ai vale desistir e dizer por que.
+    let mut recusas = 0u32;
 
     while !stop.load(Ordering::Relaxed) {
         // Pedido de bitrate e de quadro-chave valem para os dois modos.
@@ -338,10 +363,8 @@ unsafe fn laco(
             match rx.recv_timeout(Duration::from_millis(15)) {
                 Ok(job) => {
                     if job.largura != mft.largura || job.altura != mft.altura {
-                        if let Err(erro) = unsafe {
-                            mft.reabrir(job.largura, job.altura, fps, bitrate_atual)
-                        } {
-                            eprintln!("[encoder] nao foi possivel mudar de tamanho: {erro}");
+                        if let Err(erro) = unsafe { trocar_tamanho(mft, &job, fps, bitrate_atual) } {
+                            anotar(erro);
                             return;
                         }
                         forcar_chave = true;
@@ -351,10 +374,15 @@ unsafe fn laco(
                         unsafe { mft.forcar_chave() };
                         forcar_chave = false;
                     }
-                    if let Err(erro) = unsafe { mft.entregar(&job) } {
-                        eprintln!("[encoder] quadro recusado: {erro}");
-                        return;
+                    if let Err(erro) = unsafe { entregar_com_folga(mft, source, &job) } {
+                        recusas += 1;
+                        if recusas >= 120 {
+                            anotar(format!("quadro recusado {recusas} vezes seguidas: {erro}"));
+                            return;
+                        }
+                        continue;
                     }
+                    recusas = 0;
                     unsafe { mft.drenar_tudo(source) };
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -384,10 +412,8 @@ unsafe fn laco(
                     // dele tem de ser chave, senao quem assiste fica no lixo do
                     // tamanho antigo.
                     if job.largura != mft.largura || job.altura != mft.altura {
-                        if let Err(erro) = unsafe {
-                            mft.reabrir(job.largura, job.altura, fps, bitrate_atual)
-                        } {
-                            eprintln!("[encoder] nao foi possivel mudar de tamanho: {erro}");
+                        if let Err(erro) = unsafe { trocar_tamanho(mft, &job, fps, bitrate_atual) } {
+                            anotar(erro);
                             return;
                         }
                         precisa_entrada = 0;
@@ -398,10 +424,15 @@ unsafe fn laco(
                         unsafe { mft.forcar_chave() };
                         forcar_chave = false;
                     }
-                    if let Err(erro) = unsafe { mft.entregar(&job) } {
-                        eprintln!("[encoder] quadro recusado: {erro}");
-                        return;
+                    if let Err(erro) = unsafe { entregar_com_folga(mft, source, &job) } {
+                        recusas += 1;
+                        if recusas >= 120 {
+                            anotar(format!("quadro recusado {recusas} vezes seguidas: {erro}"));
+                            return;
+                        }
+                        continue;
                     }
+                    recusas = 0;
                     precisa_entrada -= 1;
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -414,6 +445,50 @@ unsafe fn laco(
             std::thread::sleep(Duration::from_millis(1));
         }
     }
+}
+
+/// Entrega um quadro, e se o codificador recusar, tira a saida presa e tenta
+/// de novo.
+///
+/// "Nao aceita mais entrada" e o erro de quem entrega um quadro sem ter tirado
+/// o resultado do anterior. E recuperavel: drenar resolve. Antes ele matava a
+/// thread do codificador — a transmissao morria pelo resto da chamada por
+/// causa do soluco de um quadro so.
+unsafe fn entregar_com_folga(
+    mft: &Mft,
+    source: &NativeVideoSource,
+    job: &Job,
+) -> Result<(), String> {
+    match unsafe { mft.entregar(job) } {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            unsafe { mft.drenar_tudo(source) };
+            unsafe { mft.entregar(job) }
+        }
+    }
+}
+
+/// Troca o tamanho **recriando** o codificador, e nao reconfigurando o que ja
+/// existe.
+///
+/// O MFT nasce com o tamanho do grau de qualidade escolhido, mas a captura
+/// entrega o tamanho real da tela — e os dois so coincidem por acaso. Boa parte
+/// dos codificadores de hardware recusa `SetOutputType` depois que o fluxo
+/// comecou, entao reconfigurar no lugar falhava no primeiro quadro e a thread
+/// morria calada: a transmissao ficava em zero quadro para sempre, sem erro em
+/// lugar nenhum.
+///
+/// O codec e mantido de proposito: a faixa ja foi publicada com ele, e trocar
+/// aqui deixaria quem assiste com um fluxo que o decodificador dele nao
+/// entende.
+unsafe fn trocar_tamanho(mft: &mut Mft, job: &Job, fps: f64, bitrate: u64) -> Result<(), String> {
+    let codec = mft.codec;
+    let novo = unsafe { Mft::abrir_codec(codec, job.largura, job.altura, fps, bitrate) }
+        .map_err(|e| format!("nao foi possivel recriar em {}x{}: {e}", job.largura, job.altura))?;
+    let mut velho = std::mem::replace(mft, novo);
+    unsafe { velho.encerrar() };
+    drop(velho);
+    Ok(())
 }
 
 /// O codificador em si, com o que precisa ser lembrado entre quadros.
@@ -552,9 +627,13 @@ impl Mft {
 
         // MFT de hardware nasce trancado: sem o destravamento assincrono, toda
         // chamada devolve MF_E_TRANSFORM_ASYNC_LOCKED.
-        let mut assincrono = false;
+        // Na duvida, assincrono: so enumeramos MFT de hardware, e esses sao
+        // assincronos salvo excecao. Tratar um assincrono como sincrono faz
+        // `ProcessInput` ser chamado fora de hora, e o MFT devolve
+        // "nao aceita mais entrada".
+        let mut assincrono = true;
         if let Ok(atributos) = unsafe { transform.GetAttributes() } {
-            assincrono = unsafe { atributos.GetUINT32(&MF_TRANSFORM_ASYNC) }.unwrap_or(0) == 1;
+            assincrono = unsafe { atributos.GetUINT32(&MF_TRANSFORM_ASYNC) }.unwrap_or(1) == 1;
             if assincrono {
                 unsafe { atributos.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1) }
                     .map_err(|e| format!("nao destravou ({nome}): {e}"))?;
@@ -676,23 +755,6 @@ impl Mft {
         Ok(())
     }
 
-    /// Recomeca no tamanho novo. O MFT trava o tamanho na configuracao, entao
-    /// mudar exige parar o fluxo antes de reconfigurar.
-    unsafe fn reabrir(
-        &mut self,
-        largura: u32,
-        altura: u32,
-        fps: f64,
-        bitrate: u64,
-    ) -> Result<(), String> {
-        unsafe {
-            let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-            let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
-            let _ = self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
-            self.configurar(largura, altura, fps, bitrate)
-        }
-    }
-
     /// Proximo evento do MFT, sem esperar. `None` quando a fila esta vazia.
     unsafe fn proximo_evento(&self) -> Option<u32> {
         let eventos = self.eventos.as_ref()?;
@@ -752,6 +814,26 @@ impl Mft {
         Ok(())
     }
 
+    /// Limpa o que o teste deixou e **rearma o fluxo**.
+    ///
+    /// `COMMAND_FLUSH` sozinho e uma armadilha: num MFT assincrono ele faz o
+    /// codificador parar de emitir `METransformNeedInput` ate receber
+    /// `NOTIFY_START_OF_STREAM` de novo. Sem esta segunda mensagem, o teste de
+    /// vida provava que a placa funciona e no gesto seguinte a desligava — o
+    /// laco principal ficava esperando para sempre um pedido que nao vinha, e
+    /// a transmissao saia com zero quadro.
+    unsafe fn rearmar(&self) -> Result<(), String> {
+        unsafe {
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)
+                .map_err(|e| e.to_string())?;
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Codifica um quadro preto e espera a resposta. E o teste de vida do
     /// codificador, feito antes de qualquer coisa depender dele.
     unsafe fn provar(&mut self) -> Result<(), String> {
@@ -769,8 +851,7 @@ impl Mft {
             unsafe { self.entregar(&teste) }?;
             while std::time::Instant::now() < limite {
                 if unsafe { self.puxar_saida() }.is_some() {
-                    unsafe { self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0) }
-                        .map_err(|e| e.to_string())?;
+                    unsafe { self.rearmar() }?;
                     return Ok(());
                 }
                 std::thread::sleep(Duration::from_millis(5));
@@ -787,8 +868,7 @@ impl Mft {
                     // Sai amostra, existe codificador. O quadro em si nao serve
                     // para nada: a faixa ainda nem foi publicada.
                     if unsafe { self.puxar_saida() }.is_some() {
-                        unsafe { self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0) }
-                            .map_err(|e| e.to_string())?;
+                        unsafe { self.rearmar() }?;
                         return Ok(());
                     }
                 }

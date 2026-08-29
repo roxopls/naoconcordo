@@ -265,11 +265,13 @@ pub struct Estatisticas {
     /// Motivo de a captura ter parado sozinha, quando parou. Uma transmissao
     /// preta com este campo preenchido tem a resposta pronta.
     pub falha_captura: Option<String>,
+    /// Idem para o codificador de hardware, que tambem morria calado.
+    pub falha_encoder: Option<String>,
 }
 
 /// Estatisticas da transmissao em curso, ou `None` quando nao ha nenhuma.
 pub async fn estatisticas(state: &ShareState) -> Option<Estatisticas> {
-    let (track, hardware, falha_captura) = {
+    let (track, hardware, falha_captura, falha_encoder) = {
         let guarda = state.0.lock().await;
         let share = guarda.as_ref()?;
         // O nome vem daqui, e nao do WebRTC: com a GPU comprimindo, o que ele
@@ -277,7 +279,8 @@ pub async fn estatisticas(state: &ShareState) -> Option<Estatisticas> {
         let hardware = share.encoder.as_ref().map(|hw| {
             (format!("{} ({})", hw.nome(), hw.codec().nome_livekit()), hw.descartados())
         });
-        (share.video_track.clone(), hardware, share.capture.falha())
+        let falha_encoder = share.encoder.as_ref().and_then(|hw| hw.falha());
+        (share.video_track.clone(), hardware, share.capture.falha(), falha_encoder)
     };
     let (nome_hardware, descartados) = match hardware {
         Some((nome, descartados)) => (Some(nome), descartados),
@@ -311,6 +314,7 @@ pub async fn estatisticas(state: &ShareState) -> Option<Estatisticas> {
             codificador: nome_hardware.unwrap_or(fora.encoder_implementation),
             descartados,
             falha_captura,
+            falha_encoder,
             quadros: fora.frames_encoded,
             quedas_de_resolucao: fora.quality_limitation_resolution_changes,
         });

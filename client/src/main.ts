@@ -2108,6 +2108,8 @@ screenButton.onclick = async () => {
     const queda = ondeComprimiu.split("compressão software:")[1];
     if (queda !== undefined) {
       showToast("A placa não assumiu a compressão:" + queda + ". Usando o processador.");
+    } else {
+      void vigiarPrimeirosQuadros();
     }
     vigiarJanelaTransmitida();
     screenEnabled = true;
@@ -2118,6 +2120,29 @@ screenButton.onclick = async () => {
     showToast(String(erro instanceof Error ? erro.message : erro));
   }
 };
+
+/// A placa aceitou comprimir — mas esta comprimindo?
+///
+/// Codificador de hardware pode abrir, passar no teste e ainda assim nao
+/// produzir quadro nenhum. Quando isso acontece nao ha erro em lugar nenhum: a
+/// faixa e publicada, quem assiste ve preto e quem transmite acha que esta
+/// tudo certo. Foi assim que um defeito passou despercebido por tres versoes.
+///
+/// Cinco segundos depois de comecar, se nenhum quadro saiu, o aplicativo diz o
+/// que fazer em vez de deixar a pessoa descobrir pelo silencio dos outros.
+async function vigiarPrimeirosQuadros() {
+  await new Promise(resolve => window.setTimeout(resolve, 5000));
+  if (!screenEnabled) return;
+  try {
+    const envio = await invoke<EstatisticasEnvio | null>("screen_share_stats");
+    if (envio && envio.quadros === 0) {
+      showToast(
+        "A placa de vídeo não está produzindo imagem. Em Configurações → "
+        + "Compartilhar tela, escolha Software e comece de novo.",
+      );
+    }
+  } catch { /* a transmissao pode ter parado nesse meio tempo */ }
+}
 
 // Camera e compartilhamento sao independentes: dao para ficar ligados juntos.
 camButton.onclick = async () => {
@@ -3424,7 +3449,7 @@ type EstatisticasEnvio = {
   largura: number; altura: number; fps: number; bitrateAlvo: number;
   limite: string; msPorQuadro: number; codificador: string; eficiente: boolean;
   quadros: number; quedasDeResolucao: number; descartados: number;
-  falhaCaptura: string | null;
+  falhaCaptura: string | null; falhaEncoder: string | null;
 };
 
 async function atualizarDiagnostico() {
@@ -3450,6 +3475,7 @@ async function atualizarDiagnostico() {
           + (envio.descartados ? "  descartados: " + envio.descartados : ""),
         );
         if (envio.falhaCaptura) linhas.push("       CAPTURA PAROU: " + envio.falhaCaptura);
+        if (envio.falhaEncoder) linhas.push("       CODIFICADOR PAROU: " + envio.falhaEncoder);
       }
     } catch { /* a transmissao pode ter parado entre a checagem e a chamada */ }
   }
