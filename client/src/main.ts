@@ -471,10 +471,12 @@ function renderNavigation() {
         const selo = liveBadge(name);
         if (selo) marks.append(selo);
         if (marks.childNodes.length) row.append(marks);
-        if (key(name) !== key(session?.username || "")) {
-          row.classList.add("clickable");
-          row.onclick = event => { event.stopPropagation(); openUserMenu(name, row); };
-        }
+        row.classList.add("clickable");
+        // Em si mesmo nao ha volume nem silenciar para ajustar, entao o clique
+        // vai direto ao cartao de perfil em vez de abrir um menu vazio.
+        row.onclick = key(name) === key(session?.username || "")
+          ? event => { event.stopPropagation(); abrirPerfil(name); }
+          : event => { event.stopPropagation(); openUserMenu(name, row); };
         box.append(row);
       }
       nodes.push(box);
@@ -743,11 +745,20 @@ function renderFriends() {
 }
 function friendRow(name: string, actions: { label: string; primary?: boolean; run: () => void }[]) {
   const row = document.createElement("div"); row.className = "friend-row";
-  const avatar = document.createElement("div"); avatar.className = "avatar"; paintAvatar(avatar, name);
-  const label = document.createElement("span"); label.className = "friend-name";
+  const avatar = document.createElement("div"); avatar.className = "avatar clicavel"; paintAvatar(avatar, name);
+  const label = document.createElement("span"); label.className = "friend-name clicavel";
   const disp = getDisplayName(name);
   label.textContent = disp;
   if (disp !== name) label.title = "@" + name;
+  // Foto e nome abrem o perfil, em qualquer lista onde a pessoa apareca. Sem
+  // isto, so a lista de presenca respondia ao clique — no dialogo de membros e
+  // na lista de amigos, clicar numa pessoa nao fazia nada.
+  //
+  // O alvo e o cartao inteiro, e nao o menu ancorado: estas linhas moram dentro
+  // de dialogos, e um menu flutuante preso a uma linha de modal briga com o
+  // proprio modal.
+  avatar.onclick = event => { event.stopPropagation(); abrirPerfil(name); };
+  label.onclick = event => { event.stopPropagation(); abrirPerfil(name); };
   row.append(avatar, label);
   for (const action of actions) {
     const button = document.createElement("button");
@@ -5079,10 +5090,17 @@ function personRow(name: string, online: boolean, naChamada: boolean) {
     if (marks.childNodes.length) row.append(marks);
   }
   box.append(row);
-  if (naChamada && key(name) !== key(session?.username || "")) {
-    row.classList.add("clickable");
-    row.onclick = event => { event.stopPropagation(); openUserMenu(name, row); };
-  }
+  // Toda pessoa da lista responde ao clique, esteja em chamada ou nao.
+  //
+  // O menu de volumes so faz sentido para quem esta na chamada e nao e voce —
+  // fora disso ele abriria com controles que nao regulam nada. Nos outros
+  // casos o clique vai direto ao cartao de perfil, que e o que a pessoa quer
+  // quando clica num nome. Antes, quem estava so online, quem estava offline e
+  // voce mesmo eram cliques mortos.
+  row.classList.add("clickable");
+  row.onclick = naChamada && key(name) !== key(session?.username || "")
+    ? event => { event.stopPropagation(); openUserMenu(name, row); }
+    : event => { event.stopPropagation(); abrirPerfil(name); };
   return box;
 }
 function callParticipants(): string[] {

@@ -623,3 +623,8 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
    certo ainda deixa a pessoa procurando com os olhos. */
 @keyframes achada { from { background: rgba(240,208,90,.22); } to { background: transparent; } }
 .message.achada { animation: achada 2.2s ease-out; }
+
+/* Nome e foto nas listas de pessoas: o mesmo aviso visual que a mensagem ja
+   dava. Sem isso o clique existe mas ninguem descobre que existe. */
+.friend-name.clicavel:hover { text-decoration: underline; }
+.avatar.clicavel:hover { filter: brightness(1.15); }
