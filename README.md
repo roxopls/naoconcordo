@@ -42,7 +42,7 @@ virtual e passa a se enxergar como se estivesse na mesma casa. Então, essa é a
 
 O que precisa fazer:
 
-1. Todo mundo instala o mesmo programa de VPN e entra na mesma rede.
+1. Todo mundo instala o mesmo programa de VPN e entra na mesma rede. (Inclusive o servidor)
 2. Veja qual o IP do server na VPN.
 3. Usa esse IP nas configurações abaixo, no lugar de um domínio.
 
