@@ -38,18 +38,18 @@ detalhe: é a diferença se isso aqui é uma solução pra você ou não. Existe
 ### Cenário 1 — Rede virtual (RadminVPN, Hamachi, ZeroTier, Tailscale)
 
 **Comece por aqui se você nunca hospedou nada.** Todo mundo entra na mesma rede
-virtual e passa a se enxergar como se estivesse na mesma casa. Sem precisar mexer em nada na sua rede. (muito mais fácil que os outros)
+virtual e passa a se enxergar como se estivesse na mesma casa. Então, essa é a solução que você não precisar mexer em nada na sua rede. (muito mais fácil que os outros)
 
 O que precisa fazer:
 
 1. Todo mundo instala o mesmo programa de VPN e entra na mesma rede.
-2. Veja qual IP a rede virtual te deu.
+2. Veja qual o IP do server na VPN.
 3. Usa esse IP nas configurações abaixo, no lugar de um domínio.
 
 No `infra/.env`:
 
 ~~~
-LIVEKIT_PUBLIC_URL=ws://SEU-IP-DA-VPN:7880
+LIVEKIT_PUBLIC_URL=ws://IP-DO-SERVER-NA-VPN:7880
 ~~~
 
 No `infra/livekit.yaml`, desligue o TURN — ele serve para atravessar
@@ -63,7 +63,7 @@ turn:
 Quando compilar o cliente, aponte para o mesmo IP:
 
 ~~~
-VITE_SERVER_URL=http://SEU-IP-DA-VPN:3040
+VITE_SERVER_URL=http://IP-DO-SERVER-NA-VPN:3040
 ~~~
 
 Pronto. Sem HTTPS, sem domínio, sem porta encaminhada.
