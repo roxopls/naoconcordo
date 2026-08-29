@@ -1899,21 +1899,40 @@ async function connectVoice() {
 /// Amplificador vivo, ou `null` quando o microfone esta fechado.
 let ganhoAtual: voz.GanhoDoMicrofone | null = null;
 
-/// Poe o amplificador na faixa publicada.
+/// Poe ou tira o amplificador da faixa publicada, conforme o volume escolhido.
 ///
 /// Acima de 100% o ganho vem daqui, e nao do Windows: o sistema so oferece o
 /// que a placa entrega, e microfone de fone costuma parar baixo demais.
+///
+/// **Em 100% nao ha processador nenhum.** Quem nunca mexeu no controle — a
+/// maioria — segue com o caminho de audio que sempre teve, sem uma peca a mais
+/// entre o microfone e a chamada.
 async function instalarGanho() {
   const faixa = room?.localParticipant.audioTrackPublications.values().next().value?.track;
   if (!faixa) return;
+  const desejado = voz.lerGanho();
+
+  if (desejado === 100) {
+    if (ganhoAtual) {
+      ganhoAtual = null;
+      try { await faixa.stopProcessor(); } catch { /* ja saiu */ }
+    }
+    return;
+  }
+  if (ganhoAtual) { ganhoAtual.definir(desejado); return; }
+
   try {
-    ganhoAtual = new voz.GanhoDoMicrofone();
-    await faixa.setProcessor(ganhoAtual as never);
+    const amplificador = new voz.GanhoDoMicrofone();
+    await faixa.setProcessor(amplificador as never);
+    ganhoAtual = amplificador;
   } catch (erro) {
-    // Sem o amplificador a chamada continua: o microfone vai no volume do
-    // sistema, que e o que acontecia antes de existir este controle.
+    // Sem o amplificador a chamada continua no volume do sistema, que e como
+    // era antes deste controle existir. Tirar o processador pela metade e o
+    // que garante que a faixa volte a ser a crua.
     ganhoAtual = null;
+    try { await faixa.stopProcessor(); } catch { /* nem chegou a entrar */ }
     console.warn("[voz] amplificador indisponivel", erro);
+    showToast("Não foi possível amplificar o microfone; ele vai no volume do sistema.");
   }
 }
 
@@ -4078,7 +4097,8 @@ byId<HTMLInputElement>("voz-ganho").addEventListener("input", event => {
   voz.guardarGanho(valor);
   pintarGanho();
   // Ao vivo: quem esta na chamada nao ouve corte enquanto a barra e arrastada.
-  ganhoAtual?.definir(valor);
+  // `instalarGanho` tambem poe e tira o processador ao cruzar os 100%.
+  void instalarGanho();
 });
 byId<HTMLInputElement>("voz-limiar").addEventListener("input", event => {
   voz.guardarLimiar(Number((event.currentTarget as HTMLInputElement).value));

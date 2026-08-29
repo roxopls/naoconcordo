@@ -142,9 +142,20 @@ export class GanhoDoMicrofone {
   private no?: GainNode;
   private fonte?: MediaStreamAudioSourceNode;
   private destino?: MediaStreamAudioDestinationNode;
+  /// O contexto e nosso, e portanto nosso para fechar. Quando vem do LiveKit,
+  /// fecha-lo derrubaria o audio dele junto.
+  private contextoProprio = false;
 
-  async init(opcoes: { track: MediaStreamTrack; audioContext: AudioContext }) {
-    this.contexto = opcoes.audioContext;
+  async init(opcoes: { track: MediaStreamTrack; audioContext?: AudioContext }) {
+    // O tipo do LiveKit diz que `audioContext` sempre vem, mas ele so preenche
+    // quando a sala ja tem um contexto criado — e ai `createMediaStreamSource`
+    // estourava em "cannot read properties of undefined". Abrir o nosso quando
+    // faltar e o que faz o ganho existir em qualquer caso.
+    this.contextoProprio = !opcoes.audioContext;
+    this.contexto = opcoes.audioContext ?? new AudioContext();
+    // Politica de reproducao automatica: contexto novo pode nascer suspenso, e
+    // suspenso ele nao processa nada — o microfone sairia mudo.
+    if (this.contexto.state === "suspended") await this.contexto.resume();
     this.fonte = this.contexto.createMediaStreamSource(new MediaStream([opcoes.track]));
     this.no = this.contexto.createGain();
     this.no.gain.value = lerGanho() / 100;
@@ -153,7 +164,7 @@ export class GanhoDoMicrofone {
     this.processedTrack = this.destino.stream.getAudioTracks()[0];
   }
 
-  async restart(opcoes: { track: MediaStreamTrack; audioContext: AudioContext }) {
+  async restart(opcoes: { track: MediaStreamTrack; audioContext?: AudioContext }) {
     await this.destroy();
     await this.init(opcoes);
   }
@@ -162,9 +173,11 @@ export class GanhoDoMicrofone {
     this.fonte?.disconnect();
     this.no?.disconnect();
     this.destino?.disconnect();
+    if (this.contextoProprio) await this.contexto?.close().catch(() => { /* ja fechado */ });
     this.fonte = undefined;
     this.no = undefined;
     this.destino = undefined;
+    this.contexto = undefined;
     this.processedTrack = undefined;
   }
 
