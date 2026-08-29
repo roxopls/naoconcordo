@@ -102,6 +102,11 @@ struct ServerInfo {
 #[serde(rename_all = "camelCase")]
 struct Profile {
     username: String,
+    /// Cor do anel de "esta falando", escolhida pela pessoa. `#rrggbb`
+    /// validado no servidor: este valor termina dentro de um estilo no
+    /// navegador de todo mundo, entao aceitar texto livre seria deixar cada
+    /// um escrever CSS na tela dos outros.
+    #[serde(default)] color: Option<String>,
     /// Formato antigo: imagem embutida como data URI.
     avatar: Option<String>,
     /// Formato novo: id de arquivo. Preserva GIF animado, que o canvas matava.
@@ -316,6 +321,15 @@ struct AvatarInput { avatar: Option<String>, #[serde(default)] avatar_file: Opti
 struct ProfileInput {
     #[serde(default, deserialize_with = "double_option")] bio: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")] banner_file: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")] color: Option<Option<String>>,
+}
+
+/// `#rrggbb`, e nada mais. Curto de proposito: qualquer coisa alem disso vira
+/// texto arbitrario dentro de um estilo na maquina dos outros.
+fn cor_valida(texto: &str) -> bool {
+    texto.len() == 7
+        && texto.starts_with('#')
+        && texto[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 /// Distingue "campo ausente" de "campo enviado como null". Sem isso, remover
 /// icone, banner ou bio nunca funcionava: null virava None e o `is_some()` que
@@ -533,7 +547,7 @@ async fn create_session(state: &AppState, username: String) -> Response {
     state.sessions.write().await.insert(token.clone(), Session { username: username.clone(), expires_at, is_owner: false });
     let mut profiles = state.profiles.write().await;
     if !profiles.contains_key(&profile_key(&username)) {
-        profiles.insert(profile_key(&username), Profile { username: username.clone(), avatar: None, avatar_file: None, bio: None, banner_file: None });
+        profiles.insert(profile_key(&username), Profile { username: username.clone(), color: None, avatar: None, avatar_file: None, bio: None, banner_file: None });
         persist_json(&state.config.data_dir, "profiles.json", &*profiles).await;
     }
     Json(LoginOutput { token, username, expires_at }).into_response()
@@ -792,7 +806,7 @@ async fn update_avatar(State(state): State<AppState>, headers: HeaderMap, Json(b
     }
     let mut profiles = state.profiles.write().await;
     let key = profile_key(&s.username);
-    let mut profile = profiles.get(&key).cloned().unwrap_or_else(|| Profile { username: s.username.clone(), avatar: None, avatar_file: None, bio: None, banner_file: None });
+    let mut profile = profiles.get(&key).cloned().unwrap_or_else(|| Profile { username: s.username.clone(), color: None, avatar: None, avatar_file: None, bio: None, banner_file: None });
     profile.avatar = body.avatar;
     profile.avatar_file = body.avatar_file;
     profiles.insert(key, profile.clone());
@@ -808,11 +822,15 @@ async fn update_profile(State(state): State<AppState>, headers: HeaderMap, Json(
     if let Some(Some(id)) = &body.banner_file {
         if !state.files.read().await.contains_key(id) { return error(StatusCode::NOT_FOUND, "Arquivo nao encontrado."); }
     }
+    if let Some(Some(cor)) = &body.color {
+        if !cor_valida(cor) { return error(StatusCode::BAD_REQUEST, "Cor invalida."); }
+    }
     let mut profiles = state.profiles.write().await;
     let key = profile_key(&s.username);
-    let mut profile = profiles.get(&key).cloned().unwrap_or_else(|| Profile { username: s.username.clone(), avatar: None, avatar_file: None, bio: None, banner_file: None });
+    let mut profile = profiles.get(&key).cloned().unwrap_or_else(|| Profile { username: s.username.clone(), color: None, avatar: None, avatar_file: None, bio: None, banner_file: None });
     if let Some(bio) = body.bio { profile.bio = bio; }
     if let Some(banner) = body.banner_file { profile.banner_file = banner; }
+    if let Some(cor) = body.color { profile.color = cor; }
     profiles.insert(key, profile.clone());
     persist_json(&state.config.data_dir, "profiles.json", &*profiles).await;
     let _ = state.events.send(Broadcast::all(ServerEvent::ProfileUpdated { profile: profile.clone() }));

@@ -628,3 +628,37 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
    dava. Sem isso o clique existe mas ninguem descobre que existe. */
 .friend-name.clicavel:hover { text-decoration: underline; }
 .avatar.clicavel:hover { filter: brightness(1.15); }
+
+
+/* Cor do anel de quem fala. O tom vem do perfil de cada pessoa e chega por
+   `--anel`; o vermelho fica de reserva para quem nunca escolheu. */
+.camera-tile.speaking { border-color: var(--anel, #e5484d); box-shadow: 0 0 0 2px var(--anel, #e5484d), 0 0 14px color-mix(in srgb, var(--anel, #e5484d) 45%, transparent); }
+.person.speaking .avatar, .voice-member.speaking .avatar { box-shadow: 0 0 0 2px var(--anel, #e5484d), 0 0 10px color-mix(in srgb, var(--anel, #e5484d) 50%, transparent); }
+
+.cor-linha { display: flex; align-items: center; gap: 10px; }
+.cor-linha label { flex: 1; }
+.cor-linha input[type="color"] { width: 44px; height: 30px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; background: #26262c; cursor: pointer; }
+/* Mostra o anel do jeito que os outros vao ver, e nao so o quadradinho. */
+.cor-amostra { width: 26px; height: 26px; border-radius: 50%; background: #34343b; box-shadow: 0 0 0 2px var(--anel, #e5484d), 0 0 10px color-mix(in srgb, var(--anel, #e5484d) 50%, transparent); }
+
+
+/* -------------------------------------------------- barra de titulo propria
+   A moldura do Windows some (`decorations: false`) e esta barra ocupa o lugar
+   dela, com o servidor aberto a esquerda e os controles a direita. A altura e
+   a mesma que a moldura tinha, entao o ganho nao e altura: e a faixa deixar de
+   ser espaco morto e passar a dizer onde voce esta.
+
+   No navegador ela nao existe — quem desenha a janela la e o proprio
+   navegador. */
+.titlebar { display: flex; align-items: center; justify-content: space-between; height: 32px; padding-left: 10px; background: #0d0d10; border-bottom: 1px solid var(--line); user-select: none; }
+.titlebar-servidor { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; color: #b9b9c4; }
+.titlebar-servidor strong { color: #f3f3f4; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.titlebar-icone { width: 18px; height: 18px; border-radius: 5px; background: #34343b center/cover no-repeat; display: grid; place-items: center; font-size: 9px; color: #f3f3f4; flex: none; }
+.titlebar-botoes { display: flex; height: 100%; }
+/* Sem isto o clique no botao arrastaria a janela em vez de acionar. */
+.titlebar-botoes button { width: 44px; height: 100%; border: 0; background: transparent; color: #b9b9c4; cursor: pointer; display: grid; place-items: center; }
+.titlebar-botoes button:hover { background: #26262c; color: #f3f3f4; }
+.titlebar-botoes button.fechar:hover { background: #c0303a; color: #fff; }
+.titlebar-botoes svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.2; }
+/* Com a barra no ar, a aplicacao ocupa o que sobra da tela. */
+.titlebar:not(.hidden) ~ .app-shell { height: calc(100vh - 32px); }

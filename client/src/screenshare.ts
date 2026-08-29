@@ -28,6 +28,20 @@ export function listSources() {
   return invoke<Source[]>("screen_sources");
 }
 
+/// Este Windows respeita "capturar tudo menos o naoconcordo"?
+///
+/// Abaixo da build 20348 ele aceita o pedido e ignora a exclusao: compartilhar
+/// o monitor com som devolve a propria conversa como eco. Nessas maquinas a
+/// unica saida e escolher um programa, que usa o modo de inclusao.
+export async function audioSemEco(): Promise<boolean> {
+  try {
+    const diag = await invoke<{ audioSemEco: boolean }>("screen_border_diag");
+    return diag.audioSemEco;
+  } catch {
+    return true;
+  }
+}
+
 /// Quem comprime a tela. "auto" tenta a GPU (AV1, depois H.264) e cai no
 /// software se nao houver hardware; "software" e o caminho antigo, com o
 /// libwebrtc comprimindo no processador.
@@ -42,10 +56,11 @@ export function startShare(
   forceDuplication = false,
   hideTitleBar = true,
   codec: CodecPreferido = "auto",
+  audioSource = "",
 ) {
   // Devolve quem comprimiu: nome do codificador da placa, ou "software: <motivo>".
   return invoke<string>("screen_share_start", {
-    sourceId, url, token, quality, audio, forceDuplication, hideTitleBar, codec,
+    sourceId, url, token, quality, audio, forceDuplication, hideTitleBar, codec, audioSource,
   });
 }
 
@@ -88,6 +103,9 @@ export type Escolha<T> = {
   audio: boolean;
   motion: boolean;
   semBarra: boolean;
+  /// Programa de onde tirar o som. Vazio quer dizer "o mesmo alvo da imagem",
+  /// que para monitor significa tudo menos o naoconcordo.
+  audioSource: string;
 };
 
 /// Mostra a grade de fontes e devolve o que a pessoa escolheu, ou `null` se
@@ -104,12 +122,17 @@ export function pickSource<T extends Option>(
     const qualityBox = byId("source-quality");
     const startButton = byId<HTMLButtonElement>("source-start");
     const audioBox = byId<HTMLInputElement>("source-audio");
+    const audioFonte = byId<HTMLSelectElement>("source-audio-fonte");
+    const audioLinha = byId("source-audio-fonte-linha");
     const motionBox = byId<HTMLInputElement>("source-motion");
     const barraBox = byId<HTMLInputElement>("source-barra");
     const barraLinha = byId("source-barra-linha");
 
     let chosenSource = "";
     let chosenQuality = current;
+
+    const ehMonitor = () =>
+      sources.some(item => item.id === chosenSource && item.kind === "monitor");
 
     /// O que a pessoa marcou, junto. Existe para o botao e o duplo clique nao
     /// montarem o mesmo objeto de dois jeitos.
@@ -119,10 +142,13 @@ export function pickSource<T extends Option>(
       audio: audioBox.checked,
       motion: motionBox.checked,
       semBarra: barraBox.checked,
+      // So vale para monitor: numa janela o som ja e o daquele programa.
+      audioSource: ehMonitor() && audioBox.checked ? audioFonte.value : "",
     });
 
     const finish = (value: Escolha<T> | null) => {
       startButton.onclick = null;
+      audioBox.onchange = null;
       byId<HTMLButtonElement>("source-cancel").onclick = null;
       dialog.close();
       resolve(value);
@@ -132,6 +158,7 @@ export function pickSource<T extends Option>(
     dialog.showModal();
     byId<HTMLButtonElement>("source-cancel").onclick = () => finish(null);
 
+    const semEco = await audioSemEco();
     let sources: Source[];
     try {
       sources = await listSources();
@@ -142,9 +169,20 @@ export function pickSource<T extends Option>(
 
     const paint = () => {
       startButton.disabled = !chosenSource;
+      audioFonte.onchange = paint;
       // Monitor nao tem barra de titulo: oferecer a opcao ali so confundiria.
       const ehJanela = sources.some(item => item.id === chosenSource && item.kind === "window");
       barraLinha.classList.toggle("hidden", !ehJanela);
+      // Compartilhando o monitor, o padrao e tudo que a maquina toca menos o
+      // naoconcordo. Ha Windows que ignora essa exclusao e devolve a chamada
+      // como eco; escolher um programa aqui fecha essa porta.
+      const mostrarFonte = ehMonitor() && audioBox.checked;
+      audioLinha.classList.toggle("hidden", !mostrarFonte);
+      // Onde a exclusao nao funciona, "tudo" nao e uma escolha valida: avisa e
+      // segura o botao ate a pessoa escolher um programa.
+      const vaiEcoar = mostrarFonte && !semEco && !audioFonte.value;
+      byId("source-audio-aviso").classList.toggle("hidden", !vaiEcoar);
+      startButton.disabled = !chosenSource || vaiEcoar;
       for (const card of grid.querySelectorAll(".source-card")) {
         card.classList.toggle("active", (card as HTMLElement).dataset.id === chosenSource);
       }
@@ -222,6 +260,19 @@ export function pickSource<T extends Option>(
 
     qualityBox.replaceChildren(range, ticks, readout);
     mostrar();
+
+    // Por aplicativo, e nao por janela: duas janelas do mesmo programa sao a
+    // mesma arvore de processos, e o loopback pega a arvore inteira.
+    const programas = new Map<string, string>();
+    for (const item of sources) {
+      if (item.kind !== "window" || !item.app) continue;
+      if (!programas.has(item.app)) programas.set(item.app, item.id);
+    }
+    audioFonte.replaceChildren(
+      new Option("Tudo o que a máquina tocar", ""),
+      ...[...programas].map(([app, id]) => new Option("Somente " + app, id)),
+    );
+    audioBox.onchange = paint;
 
     paint();
     startButton.onclick = () => {

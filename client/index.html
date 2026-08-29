@@ -66,6 +66,17 @@
       </section>
     </div>
 
+    <header id="titlebar" class="titlebar hidden" data-tauri-drag-region>
+      <div class="titlebar-servidor" data-tauri-drag-region>
+        <span id="titlebar-icone" class="titlebar-icone"></span>
+        <strong id="titlebar-nome" data-tauri-drag-region>naoconcordo</strong>
+      </div>
+      <div class="titlebar-botoes">
+        <button id="win-min" type="button" title="Minimizar" aria-label="Minimizar"><svg viewBox="0 0 12 12"><path d="M2 6h8"/></svg></button>
+        <button id="win-max" type="button" title="Maximizar" aria-label="Maximizar"><svg viewBox="0 0 12 12"><rect x="2.5" y="2.5" width="7" height="7" rx="1"/></svg></button>
+        <button id="win-close" type="button" class="fechar" title="Fechar" aria-label="Fechar"><svg viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6"/></svg></button>
+      </div>
+    </header>
     <div id="app-view" class="app-shell hidden">
       <aside class="rail">
         <button id="home-button" class="rail-button home" title="Amigos e mensagens">
@@ -297,6 +308,10 @@
       <div id="source-quality" class="quality-options"></div>
       <p class="muted small">Se travar em vez de borrar, desça um nível.</p>
       <label class="switch-row"><input id="source-audio" type="checkbox" checked /> Compartilhar áudio do aplicativo?</label>
+      <label id="source-audio-fonte-linha" class="hidden">Áudio de<select id="source-audio-fonte"></select>
+        <span class="muted small">Programas feitos em Chromium (navegadores, Discord, Spotify) tocam som por um processo separado e podem sair mudos.</span>
+      </label>
+      <p id="source-audio-aviso" class="muted small hidden">Este Windows não sabe separar o áudio da chamada do resto do sistema — enviar &quot;tudo&quot; faria a conversa voltar como eco para todo mundo. Escolha acima o programa que deve ser transmitido, ou desmarque o áudio.</p>
       <label class="switch-row"><input id="source-motion" type="checkbox" checked /> Priorizar movimento (jogo)</label>
       <label id="source-barra-linha" class="switch-row"><input id="source-barra" type="checkbox" checked /> Ocultar a barra de título da janela</label>
       <div class="dialog-actions">
@@ -456,6 +471,13 @@
       <input id="profile-edit-banner-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
       <label>Sobre mim<textarea id="profile-edit-bio" maxlength="190" rows="3" placeholder="Conte algo sobre você…"></textarea></label>
       <small id="profile-edit-bio-count" class="muted">0 / 190</small>
+      <div class="cor-linha">
+        <label for="profile-edit-cor">Cor quando você fala</label>
+        <input id="profile-edit-cor" type="color" value="#e5484d" />
+        <button id="profile-edit-cor-limpar" type="button" class="ghost-button">Usar a padrão</button>
+        <span id="profile-edit-cor-amostra" class="cor-amostra"></span>
+      </div>
+      <small class="muted">É o anel que aparece em volta da sua foto enquanto você fala. Todo mundo vê a sua cor.</small>
       <div class="dialog-actions">
         <button id="profile-edit-cancel" type="button">Cancelar</button>
         <button id="profile-edit-save" class="primary" type="button">Salvar</button>

@@ -117,6 +117,24 @@ pub fn borderless_diagnostico() -> (bool, bool, String) {
     (suportado, permitido, versao)
 }
 
+/// Este Windows respeita "capturar tudo **menos** este programa"?
+///
+/// O loopback por processo do WASAPI exige build 20348. Abaixo disso a chamada
+/// e aceita e a exclusao e simplesmente ignorada: compartilhar o monitor com
+/// som devolve a propria conversa como eco, e nao ha ajuste que resolva. Quem
+/// esta nessa faixa precisa escolher **um programa** — o modo de inclusao, que
+/// funciona em qualquer versao.
+pub fn exclusao_de_audio_confiavel() -> bool {
+    numero_da_build() >= 20348
+}
+
+fn numero_da_build() -> u32 {
+    versao_windows()
+        .rsplit_once("build ")
+        .and_then(|(_, resto)| resto.trim_end_matches(')').parse().ok())
+        .unwrap_or(0)
+}
+
 /// Versao real do Windows. `GetVersionEx` mente para processos sem manifesto,
 /// entao o numero sai do registro, que nao aplica compatibilidade.
 fn versao_windows() -> String {

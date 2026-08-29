@@ -24,6 +24,9 @@ pub fn screen_border_diag() -> serde_json::Value {
         "suportado": suportado,
         "permitido": permitido,
         "semBorda": suportado && permitido,
+        // Abaixo da build 20348 o Windows ignora a exclusao do loopback por
+        // processo, e o audio do monitor volta como eco.
+        "audioSemEco": capture::exclusao_de_audio_confiavel(),
     })
 }
 
@@ -47,11 +50,21 @@ pub async fn screen_share_start(
     #[allow(non_snake_case)] forceDuplication: Option<bool>,
     #[allow(non_snake_case)] hideTitleBar: Option<bool>,
     codec: Option<String>,
+    #[allow(non_snake_case)] audioSource: Option<String>,
 ) -> Result<String, String> {
     let target = Target::parse(&source_id)?;
+    // De qual programa tirar o som. Compartilhando o monitor, o padrao e "tudo
+    // menos nos" — mas ha Windows que ignora essa exclusao e devolve a propria
+    // chamada como eco. Escolher um programa usa o modo de inclusao, que e
+    // bem suportado, e fecha a porta para o eco.
+    let audio_target = match audioSource.as_deref() {
+        Some(id) if !id.is_empty() => Some(Target::parse(id)?),
+        _ => None,
+    };
     publisher::start(
         &state,
         target,
+        audio_target,
         &url,
         &token,
         quality,

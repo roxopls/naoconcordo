@@ -32,7 +32,7 @@ type AuthSession = { token: string; username: string; expiresAt: number };
 type ServerInfo = { id: string; name: string; iconFile?: string | null; bannerFile?: string | null; description?: string | null };
 type RoomKind = "text" | "voice";
 type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind };
-type Profile = { username: string; avatar: string | null; avatarFile?: string | null; bio?: string | null; bannerFile?: string | null };
+type Profile = { username: string; avatar: string | null; avatarFile?: string | null; bio?: string | null; bannerFile?: string | null; color?: string | null };
 type ServerRole = "owner" | "mod" | "member";
 type Bootstrap = { servers: ServerInfo[]; rooms: RoomInfo[]; profiles: Profile[]; isOwner: boolean; isAdmin: boolean; roles: Record<string, ServerRole>; online: string[]; voice?: Record<string, string[]> };
 type LivekitAccess = { token: string; url: string; room: string };
@@ -419,6 +419,7 @@ function renderNavigation() {
       bannerEl.style.backgroundImage = "";
     }
   }
+  pintarBarraDeTitulo(emServidor ? atual : undefined);
   const titleEl = byId("sidebar-title");
   titleEl.textContent = emServidor ? (atual?.name || "servidor") : "Mensagens";
   titleEl.title = (emServidor && atual?.description) ? atual.description : "";
@@ -2097,7 +2098,7 @@ screenButton.onclick = async () => {
       // travar a imagem. O padrao do LiveKit para tela e o contrario, feito
       // para documento, e num jogo isso vira engasgo.
       preferMotion: escolha.motion,
-    }, escolha.audio, forcarDuplicacao(), escolha.semBarra, codecPreferido());
+    }, escolha.audio, forcarDuplicacao(), escolha.semBarra, codecPreferido(), escolha.audioSource);
     // Cair para o processador nao e erro, mas e a informacao que faltou quando
     // a primeira maquina de fora nao conseguiu compartilhar: sem console num
     // build de release, se ninguem disser, ninguem descobre.
@@ -2217,9 +2218,24 @@ const cameras = new Map<string, CameraTrack>();
 // Quem esta falando agora, por nome. O anel vermelho sai daqui.
 const speaking = new Set<string>();
 /// Marca sem redesenhar: recriar as tiles cortaria o video no meio da fala.
+/// `#rrggbb` e nada mais.
+///
+/// O servidor ja valida, mas quem desenha e este lado: uma cor guardada antes
+/// da validacao existir, ou vinda de outro caminho, nao pode virar texto solto
+/// dentro de um estilo.
+function corSegura(valor: string | null | undefined): string | null {
+  return valor && /^#[0-9a-f]{6}$/i.test(valor) ? valor : null;
+}
+
 function updateSpeakingStyles() {
   document.querySelectorAll<HTMLElement>("[data-who]").forEach(element => {
-    element.classList.toggle("speaking", speaking.has(key(element.dataset.who || "")));
+    const quem = element.dataset.who || "";
+    element.classList.toggle("speaking", speaking.has(key(quem)));
+    // A cor acompanha a pessoa, e nao o lugar onde ela aparece: a mesma pessoa
+    // tem o mesmo anel na lista, na camera e na miniatura.
+    const cor = corSegura(profiles.get(key(quem))?.color);
+    if (cor) element.style.setProperty("--anel", cor);
+    else element.style.removeProperty("--anel");
   });
 }
 
@@ -2840,7 +2856,32 @@ byId("profile-edit")?.addEventListener("click", () => {
     preview.style.backgroundImage = "";
     removeBtn.classList.add("hidden");
   }
+  const meuPerfil = profiles.get(key(session?.username || ""));
+  corEscolhida = corSegura(meuPerfil?.color);
+  pintarEscolhaDeCor();
   byId<HTMLDialogElement>("profile-edit-dialog").showModal();
+});
+
+/// Cor do anel escolhida no editor. `null` quer dizer "a padrao", que e
+/// diferente de uma cor igual a padrao: quem nunca escolheu segue o app se um
+/// dia o padrao mudar.
+let corEscolhida: string | null = null;
+
+function pintarEscolhaDeCor() {
+  const campo = byId<HTMLInputElement>("profile-edit-cor");
+  const amostra = byId("profile-edit-cor-amostra");
+  campo.value = corEscolhida || "#e5484d";
+  amostra.style.setProperty("--anel", corEscolhida || "#e5484d");
+  byId("profile-edit-cor-limpar").classList.toggle("hidden", !corEscolhida);
+}
+
+byId<HTMLInputElement>("profile-edit-cor")?.addEventListener("input", event => {
+  corEscolhida = corSegura((event.currentTarget as HTMLInputElement).value);
+  pintarEscolhaDeCor();
+});
+byId("profile-edit-cor-limpar")?.addEventListener("click", () => {
+  corEscolhida = null;
+  pintarEscolhaDeCor();
 });
 
 byId("profile-edit-bio")?.addEventListener("input", e => {
@@ -2884,7 +2925,10 @@ byId("profile-edit-cancel")?.addEventListener("click", () => {
 byId("profile-edit-save")?.addEventListener("click", async () => {
   const bio = byId<HTMLTextAreaElement>("profile-edit-bio").value.trim();
   try {
-    const payload: { bio?: string | null; bannerFile?: string | null } = { bio: bio || null };
+    const payload: { bio?: string | null; bannerFile?: string | null; color?: string | null } = {
+      bio: bio || null,
+      color: corEscolhida,
+    };
     if (profileEditBannerChanged) payload.bannerFile = profileEditBannerFileId;
     const updated = await api<Profile>("/api/profile", {
       method: "PUT",
@@ -2892,6 +2936,8 @@ byId("profile-edit-save")?.addEventListener("click", async () => {
     });
     profiles.set(updated.username.toLowerCase(), updated);
     paintMyAvatars(updated.username);
+    // O anel muda na hora, sem esperar a proxima vez que alguem falar.
+    updateSpeakingStyles();
     byId<HTMLDialogElement>("profile-edit-dialog").close();
     showToast("Perfil atualizado.");
   } catch (err) {
@@ -3598,6 +3644,54 @@ function abrirFixadas() {
 
 byId("fixadas-abrir").addEventListener("click", abrirFixadas);
 byId("fixadas-fechar").addEventListener("click", () => byId<HTMLDialogElement>("fixadas-dialog").close());
+
+// ------------------------------------------------------ barra de titulo
+//
+// A moldura do Windows sai e esta barra fica no lugar. O ganho nao e altura —
+// e a mesma faixa —, e sim ela deixar de ser espaco morto: passa a dizer em
+// que servidor voce esta.
+//
+// No navegador nao existe: quem desenha a janela la e o proprio navegador.
+function pintarBarraDeTitulo(servidor?: ServerInfo) {
+  const barra = byId("titlebar");
+  if (!ehTauri()) { barra.classList.add("hidden"); return; }
+  barra.classList.remove("hidden");
+
+  const nome = byId("titlebar-nome");
+  const icone = byId("titlebar-icone");
+  nome.textContent = servidor?.name || "naoconcordo";
+
+  icone.style.backgroundImage = "";
+  icone.textContent = "";
+  if (!servidor) return;
+  if (servidor.iconFile) {
+    const arquivo = servidor.iconFile;
+    const cache = blobCache.get(arquivo);
+    if (cache) icone.style.backgroundImage = 'url("' + cache + '")';
+    else void fileUrl(arquivo).then(url => { icone.style.backgroundImage = 'url("' + url + '")'; })
+      .catch(() => { icone.textContent = servidor.name.slice(0, 1).toUpperCase(); });
+  } else {
+    icone.textContent = servidor.name.slice(0, 1).toUpperCase();
+  }
+}
+
+/// Liga os tres botoes. O `data-tauri-drag-region` do HTML cuida de arrastar e
+/// do duplo clique; aqui so ficam os cliques diretos.
+async function ligarBotoesDaJanela() {
+  if (!ehTauri()) return;
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    const janela = getCurrentWindow();
+    byId("win-min").onclick = () => void janela.minimize();
+    byId("win-max").onclick = () => void janela.toggleMaximize();
+    // Fechar segue a mesma regra do X da moldura: a bandeja continua com o
+    // aplicativo vivo, entao nao ha nada a confirmar aqui.
+    byId("win-close").onclick = () => void janela.close();
+  } catch (erro) {
+    console.warn("[janela] controles indisponiveis", erro);
+  }
+}
+void ligarBotoesDaJanela();
 
 // -------------------------------------------------------- busca de mensagens
 //

@@ -52,6 +52,9 @@ pub struct ActiveShare {
     video_track: LocalVideoTrack,
     /// O que esta sendo capturado, para saber quando a janela morre.
     target: Target,
+    /// De onde vem o som, quando a pessoa pediu um programa especifico. Trocar
+    /// de tela nao pode perder essa escolha.
+    audio_target: Option<Target>,
     /// Guardado para a troca de tela: o novo capturador precisa do mesmo
     /// limite de quadros, senao trocar de janela viraria captura sem teto.
     fps: f64,
@@ -84,9 +87,11 @@ pub struct Quality {
     pub prefer_motion: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start(
     state: &ShareState,
     target: Target,
+    audio_target: Option<Target>,
     url: &str,
     token: &str,
     quality: Quality,
@@ -191,8 +196,11 @@ pub async fn start(
 
     // O som vai depois do video: se o loopback falhar, o compartilhamento
     // continua de pe, so mudo. Quem desmarcou a opcao nem chega aqui.
-    let (audio, audio_source) =
-        if with_audio { publish_audio(&room, target).await } else { (None, None) };
+    let (audio, audio_source) = if with_audio {
+        publish_audio(&room, audio_target.unwrap_or(target)).await
+    } else {
+        (None, None)
+    };
 
     *state.0.lock().await = Some(ActiveShare {
         room,
@@ -203,6 +211,7 @@ pub async fn start(
         audio_source,
         video_track: track_guardada,
         target,
+        audio_target,
         fps: quality.fps,
         forcar_duplicacao,
         sem_barra,
@@ -410,10 +419,12 @@ pub async fn switch(state: &ShareState, target: Target) -> Result<(), String> {
     )?;
     share.target = target;
 
-    // O som segue a fonte: janela nova quer dizer processo novo.
+    // O som segue a fonte: janela nova quer dizer processo novo. Mas se a
+    // pessoa escolheu de onde tirar o som, trocar a imagem nao mexe nisso.
     if let (Some(handle), Some(source)) = (share.audio.as_ref(), share.audio_source.clone()) {
+        let alvo_do_som = share.audio_target.unwrap_or(target);
         handle.stop();
-        share.audio = audio_scope(target)
+        share.audio = audio_scope(alvo_do_som)
             .map(|scope| audio::start(scope, source, tokio::runtime::Handle::current()));
     }
 

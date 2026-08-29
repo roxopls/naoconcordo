@@ -98,7 +98,7 @@ async function comecar() {
     const access = await response.json() as LivekitAccess;
     await startShare(
       escolha.sourceId, access.url, access.token, escolha.quality, escolha.audio,
-      false, true, codecPreferido(),
+      false, true, codecPreferido(), escolha.audioSource,
     );
     sharing = true;
     paintControls(escolha.sourceId);
