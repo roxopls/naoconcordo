@@ -6,6 +6,7 @@ import {
 } from "livekit-client";
 import "./styles.css";
 import * as voz from "./voz";
+import { recortarImagem } from "./recorte";
 import {
   checkPin, dropPin, fingerprint, loadIdentity, openMessage, savePin, sealMessage,
   type Identity,
@@ -116,6 +117,10 @@ function getDisplayName(username: string) {
 // Papel em cada servidor, vindo do backend. Guia o que a interface oferece.
 let roles: Record<string, ServerRole> = {};
 let micEnabled = false, screenEnabled = false, camEnabled = false, audioEnabled = true, toastTimer = 0;
+/// O palco com um quadro por pessoa esta a mostra? Entrar numa chamada liga; o
+/// clique no proprio canal alterna. Camera e tela alheias aparecem de qualquer
+/// jeito — este interruptor vale so para os quadros de quem esta so na voz.
+let palcoDaChamada = true;
 /// Quem esta no modo grande, por id de tile.
 ///
 /// O estado pertence ao palco, e nao a tile, porque tile e descartavel: as de
@@ -327,6 +332,9 @@ recoveryForm.addEventListener("submit", async event => {
 });
 async function enterApp() {
   if (!session) return;
+  // Primeira medida ja na entrada: esperar o relogio de dez segundos deixaria
+  // o estado sem numero justo quando a pessoa esta olhando para ele.
+  void medirPing();
   const data = await api<Bootstrap>("/api/bootstrap");
   servers = data.servers; rooms = data.rooms; isAdmin = Boolean(data.isAdmin); roles = data.roles || {};
   setVoicePresence(data.voice);
@@ -401,23 +409,22 @@ function renderNavigation() {
   byId("friends-pane").classList.toggle("hidden", emServidor);
   byId("server-members").classList.toggle("hidden", !emServidor);
   const atual = servers.find(item => item.id === currentServerId);
-  const bannerEl = byId("server-banner");
-  if (bannerEl) {
-    if (emServidor && atual?.bannerFile) {
-      const arquivo = atual.bannerFile;
-      const alvo = currentServerId;
-      bannerEl.classList.remove("hidden");
-      const cache = blobCache.get(arquivo);
-      // Trocar de servidor tem de apagar o banner velho na hora; senao ele fica
-      // ate a imagem nova baixar, e a resposta atrasada pinta o servidor errado.
-      bannerEl.style.backgroundImage = cache ? 'url("' + cache + '")' : "";
-      if (!cache) fileUrl(arquivo).then(url => {
-        if (alvo === currentServerId) bannerEl.style.backgroundImage = 'url("' + url + '")';
-      }).catch(() => { bannerEl.style.backgroundImage = ""; });
-    } else {
-      bannerEl.classList.add("hidden");
-      bannerEl.style.backgroundImage = "";
-    }
+  // O banner virou o fundo do proprio cartao do servidor, atras do nome, em vez
+  // de uma faixa separada embaixo dele. Ocupa o mesmo lugar e diz mais.
+  const cartao = byId("server-card");
+  cartao.classList.toggle("com-capa", Boolean(emServidor && atual?.bannerFile));
+  if (emServidor && atual?.bannerFile) {
+    const arquivo = atual.bannerFile;
+    const alvo = currentServerId;
+    const cache = blobCache.get(arquivo);
+    // Trocar de servidor tem de apagar a capa velha na hora; senao ela fica ate
+    // a imagem nova baixar, e a resposta atrasada pinta o servidor errado.
+    cartao.style.backgroundImage = cache ? 'url("' + cache + '")' : "";
+    if (!cache) fileUrl(arquivo).then(url => {
+      if (alvo === currentServerId) cartao.style.backgroundImage = 'url("' + url + '")';
+    }).catch(() => { cartao.style.backgroundImage = ""; });
+  } else {
+    cartao.style.backgroundImage = "";
   }
   pintarBarraDeTitulo(emServidor ? atual : undefined);
   const titleEl = byId("sidebar-title");
@@ -450,7 +457,18 @@ function renderNavigation() {
     const button = document.createElement("button");
     button.className = "channel voice" + (item.id === voiceRoomId ? " active" : "");
     button.append(icon("speaker", "room-dot"), document.createTextNode(item.name));
-    button.onclick = () => toggleVoice(item.id);
+    // Clicar no canal em que voce ja esta **nao** desconecta: mostra ou esconde
+    // o palco da chamada. Sair e o botao de desligar, que existe para isso e
+    // nao se aperta sem querer ao procurar quem esta na sala.
+    button.onclick = () => {
+      if (item.id === voiceRoomId && (room?.state === "connected" || room?.state === "connecting")) {
+        palcoDaChamada = !palcoDaChamada;
+        void selectServer(item.serverId);
+        renderCameras();
+        return;
+      }
+      void toggleVoice(item.id);
+    };
     const nodes: HTMLElement[] = [button];
     // Quem esta na chamada aparece embaixo do canal, como no Discord — em
     // qualquer canal, nao so no seu: dava para entrar numa sala vazia sem
@@ -478,6 +496,11 @@ function renderNavigation() {
         row.onclick = key(name) === key(session?.username || "")
           ? event => { event.stopPropagation(); abrirPerfil(name); }
           : event => { event.stopPropagation(); openUserMenu(name, row); };
+        row.oncontextmenu = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          openUserMenu(name, row, { x: event.clientX, y: event.clientY });
+        };
         box.append(row);
       }
       nodes.push(box);
@@ -662,6 +685,7 @@ function announceVoice(roomId: string) {
 /// da chamada deixava a tela sendo publicada na sala antiga com o botao ja
 /// apagado, e a interface passava a mentir sobre o que estava no ar.
 async function sairDaChamada() {
+  ganhoAtual = null;
   pararPortao();
   portaoAberto = true;
   // O aviso de saida e o som ficam aqui porque o `Disconnected` da sala nao
@@ -991,7 +1015,8 @@ function recordDirect(friend: string, message: DirectMessage) {
   if (openHere) { appendDirect(message); dmMessagesEl.scrollTop = dmMessagesEl.scrollHeight; }
   if (!fromMe && !looking) {
     unreadFriends.add(key(friend)); renderFriends(); updateUnreadTitle(); playPing();
-    void notifyMessage({ title: friend, body: message.text, privateBody: "Nova mensagem privada", inCall: inCall() });
+    const mostrou = notifyMessage({ title: friend, body: message.text, privateBody: "Nova mensagem privada", inCall: inCall() });
+    void avisarOrigem(mostrou, "Mensagem privada de " + getDisplayName(friend), () => void openDirect(friend));
   }
 }
 async function handleIncomingEnvelope(envelope: Envelope) {
@@ -1504,10 +1529,18 @@ function appendMessage(message: ChatMessage) {
   article.dataset.messageId = message.id;
   const avatar = document.createElement("div"); avatar.className = "message-avatar clicavel"; paintAvatar(avatar, message.username);
   avatar.onclick = () => abrirPerfil(message.username);
+  // Quem le a mensagem e quer o volume da pessoa nao deveria ter de procurar
+  // ela na lista da direita.
+  const menuDoAutor = (event: MouseEvent) => {
+    event.preventDefault();
+    openUserMenu(message.username, event.currentTarget as HTMLElement, { x: event.clientX, y: event.clientY });
+  };
+  avatar.oncontextmenu = menuDoAutor;
   const body = document.createElement("div"), head = document.createElement("div"); head.className = "message-head";
   const name = document.createElement("strong");
   name.className = "clicavel";
   name.onclick = () => abrirPerfil(message.username);
+  name.oncontextmenu = menuDoAutor;
   const disp = getDisplayName(message.username);
   name.textContent = disp;
   if (disp !== message.username) name.title = "@" + message.username;
@@ -1613,7 +1646,11 @@ document.addEventListener("click", event => {
 });
 document.addEventListener("keydown", event => { if (event.key === "Escape") closeMiniProfile(); });
 byId<HTMLInputElement>("avatar-input").addEventListener("change", async event => {
-  const file = (event.currentTarget as HTMLInputElement).files?.[0]; if (!file) return;
+  const escolhido = (event.currentTarget as HTMLInputElement).files?.[0]; if (!escolhido) return;
+  // O enquadramento vem antes do resto: a foto ja chega no formato certo, e o
+  // caminho do GIF continua intacto porque o recorte devolve o original.
+  const file = await recortarImagem(escolhido, { proporcao: 1, titulo: "Enquadrar sua foto", redondo: true });
+  if (!file) return;
   try {
     // GIF vai como arquivo para manter a animacao: passar pelo canvas congela
     // no primeiro quadro. O resto continua virando WebP de 256px.
@@ -1636,7 +1673,11 @@ async function resizeImage(file: File) {
   return canvas.toDataURL("image/webp", .82);
 }
 function paintMyAvatars(username: string) {
-  paintAvatar(byId("avatar"), username);
+  const meuAvatar = byId("avatar");
+  // Com a marca, `updateSpeakingStyles` alcanca o avatar do rodape e ele ganha
+  // o anel na sua cor quando voce fala — antes so os outros tinham.
+  meuAvatar.dataset.who = username;
+  paintAvatar(meuAvatar, username);
   paintAvatar(byId("mini-profile-avatar"), username);
   const p = profiles.get(username.toLowerCase());
   const bannerEl = byId("mini-profile-banner");
@@ -1725,7 +1766,14 @@ async function connectVoice() {
     let refreshAgendado = 0;
     const refresh = () => {
       window.clearTimeout(refreshAgendado);
-      refreshAgendado = window.setTimeout(() => { if (!atual()) return; renderPeople(); renderNavigation(); }, 60);
+      refreshAgendado = window.setTimeout(() => {
+        if (!atual()) return;
+        renderPeople();
+        renderNavigation();
+        // O palco mostra um quadro por pessoa na chamada, entao entrar e sair
+        // muda o que ele desenha — nao so a lista lateral.
+        renderCameras();
+      }, 60);
     };
     next.on(RoomEvent.Connected, () => { if (!atual()) return; setStatus("online", true); playJoin(); silenciarAvisos(2000); announceDeafened(); refresh(); }).on(RoomEvent.Reconnecting, () => { if (atual()) setStatus("reconectando", false); })
       .on(RoomEvent.Reconnected, () => { if (!atual()) return; setStatus("online", true); silenciarAvisos(2000); })
@@ -1826,6 +1874,7 @@ async function connectVoice() {
     // Entrar num canal de voz ja abre o microfone, como no Discord.
     try {
       await next.localParticipant.setMicrophoneEnabled(true, voz.opcoesDeCaptura());
+      await instalarGanho();
       micEnabled = true; micButton.classList.add("active"); setIcon(micButton, "mic");
     } catch {
       micEnabled = false; micButton.classList.remove("active"); setIcon(micButton, "mic-off");
@@ -1836,6 +1885,9 @@ async function connectVoice() {
     await unlockAudio(next);
     await applySavedDevices(next);
     void reiniciarPortao();
+    // Entrar na chamada mostra quem esta nela; esconder e escolha, e o padrao
+    // nao pode ser a tela vazia de quem acabou de entrar.
+    palcoDaChamada = true;
     applyAllVolumes();
     renderPeople(); renderNavigation();
   } catch (error) {
@@ -1844,6 +1896,27 @@ async function connectVoice() {
     showToast(error instanceof Error ? error.message : "Não foi possível conectar ao canal de voz.");
   }
 }
+/// Amplificador vivo, ou `null` quando o microfone esta fechado.
+let ganhoAtual: voz.GanhoDoMicrofone | null = null;
+
+/// Poe o amplificador na faixa publicada.
+///
+/// Acima de 100% o ganho vem daqui, e nao do Windows: o sistema so oferece o
+/// que a placa entrega, e microfone de fone costuma parar baixo demais.
+async function instalarGanho() {
+  const faixa = room?.localParticipant.audioTrackPublications.values().next().value?.track;
+  if (!faixa) return;
+  try {
+    ganhoAtual = new voz.GanhoDoMicrofone();
+    await faixa.setProcessor(ganhoAtual as never);
+  } catch (erro) {
+    // Sem o amplificador a chamada continua: o microfone vai no volume do
+    // sistema, que e o que acontecia antes de existir este controle.
+    ganhoAtual = null;
+    console.warn("[voz] amplificador indisponivel", erro);
+  }
+}
+
 // ------------------------------------------------------- portao do microfone
 //
 // O botao de mudo diz se a pessoa **quer** falar; o portao diz se ela **esta**
@@ -1996,6 +2069,7 @@ async function definirMicrofone(ligado: boolean) {
   try {
     micEnabled = ligado;
     await room.localParticipant.setMicrophoneEnabled(ligado, voz.opcoesDeCaptura());
+    if (ligado) await instalarGanho();
     // A faixa nasce aberta; o portao decide se ela continua assim.
     void reiniciarPortao();
     micButton.classList.toggle("active", micEnabled);
@@ -2098,7 +2172,8 @@ screenButton.onclick = async () => {
       // travar a imagem. O padrao do LiveKit para tela e o contrario, feito
       // para documento, e num jogo isso vira engasgo.
       preferMotion: escolha.motion,
-    }, escolha.audio, forcarDuplicacao(), escolha.semBarra, codecPreferido(), escolha.audioSource);
+    }, escolha.audio, forcarDuplicacao(), escolha.semBarra, codecPreferido(), escolha.audioSource,
+       escolha.audioGain);
     // Cair para o processador nao e erro, mas e a informacao que faltou quando
     // a primeira maquina de fora nao conseguiu compartilhar: sem console num
     // build de release, se ninguem disser, ninguem descobre.
@@ -2330,10 +2405,43 @@ function cameraTile(entry: CameraTrack) {
   tile.append(media, label, esconder, grande, cheia);
   return tile;
 }
+/// Quadro de quem esta na chamada sem camera: foto grande, nome embaixo, e o
+/// anel de fala em volta como qualquer outra tile.
+///
+/// Sem isto, uma chamada em que ninguem liga a camera deixava o palco vazio, e
+/// so dava para saber quem estava pela lista lateral. O quadro nao substitui a
+/// lista — ele mostra a conversa acontecendo.
+function tileDeVoz(nome: string) {
+  const tile = document.createElement("div");
+  tile.id = "voz-" + key(nome);
+  tile.className = "track-tile tile-voz";
+  tile.dataset.who = nome;
+
+  const foto = document.createElement("div");
+  foto.className = "avatar tile-voz-foto";
+  paintAvatar(foto, nome);
+
+  const label = document.createElement("label");
+  label.textContent = getDisplayName(nome);
+
+  tile.append(foto, label);
+  tile.oncontextmenu = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    openUserMenu(nome, tile, { x: event.clientX, y: event.clientY });
+  };
+  return tile;
+}
+
 function renderCameras() {
   // O palco e compartilhado com as transmissoes de tela, entao aqui so podem
-  // sair as tiles de camera: um `replaceChildren` levaria as telas junto.
-  for (const antiga of [...stage.querySelectorAll('[id^="cam-"]'), byId("camera-hidden-note")]) {
+  // sair as tiles de camera e de voz: um `replaceChildren` levaria as telas
+  // junto.
+  for (const antiga of [
+    ...stage.querySelectorAll('[id^="cam-"]'),
+    ...stage.querySelectorAll('[id^="voz-"]'),
+    byId("camera-hidden-note"),
+  ]) {
     if (antiga) antiga.remove();
   }
   const todas = [...cameras.values()];
@@ -2341,6 +2449,16 @@ function renderCameras() {
   const escondidas = todas.length - visiveis.length;
 
   for (const entry of visiveis) stage.append(cameraTile(entry));
+
+  // Quem esta na chamada e nao aparece com camera entra com a foto. Assim o
+  // palco mostra a chamada inteira, e nao so quem ligou a webcam.
+  if (chamadaNaTela() && palcoDaChamada) {
+    const comCamera = new Set(visiveis.map(entry => key(entry.who)));
+    for (const nome of callParticipants()) {
+      if (comCamera.has(key(nome))) continue;
+      stage.append(tileDeVoz(nome));
+    }
+  }
 
   // Uma faixa para trazer de volta o que foi escondido: sem isso a camera
   // sumiria sem caminho de volta a nao ser reentrar na chamada.
@@ -2894,7 +3012,9 @@ byId("profile-edit-banner-btn")?.addEventListener("click", () => {
 });
 
 byId<HTMLInputElement>("profile-edit-banner-input")?.addEventListener("change", async event => {
-  const file = (event.currentTarget as HTMLInputElement).files?.[0];
+  const escolhido = (event.currentTarget as HTMLInputElement).files?.[0];
+  if (!escolhido) return;
+  const file = await recortarImagem(escolhido, { proporcao: 16 / 6, titulo: "Enquadrar o banner do perfil" });
   if (!file) return;
   try {
     const stored = await uploadFile(file);
@@ -3006,7 +3126,9 @@ byId("server-settings-banner-btn")?.addEventListener("click", () => {
 });
 
 byId<HTMLInputElement>("server-settings-banner-input")?.addEventListener("change", async event => {
-  const file = (event.currentTarget as HTMLInputElement).files?.[0];
+  const escolhido = (event.currentTarget as HTMLInputElement).files?.[0];
+  if (!escolhido) return;
+  const file = await recortarImagem(escolhido, { proporcao: 16 / 6, titulo: "Enquadrar o banner do servidor" });
   if (!file) return;
   try {
     const stored = await uploadFile(file);
@@ -3035,7 +3157,9 @@ byId("server-settings-icon-btn")?.addEventListener("click", () => {
 });
 
 byId<HTMLInputElement>("server-settings-icon-input")?.addEventListener("change", async event => {
-  const file = (event.currentTarget as HTMLInputElement).files?.[0];
+  const escolhido = (event.currentTarget as HTMLInputElement).files?.[0];
+  if (!escolhido) return;
+  const file = await recortarImagem(escolhido, { proporcao: 1, titulo: "Enquadrar o ícone do servidor", redondo: true });
   if (!file) return;
   try {
     const stored = await uploadFile(file);
@@ -3131,7 +3255,9 @@ byId("server-profile-avatar-btn")?.addEventListener("click", () => {
 });
 
 byId<HTMLInputElement>("server-profile-avatar-input")?.addEventListener("change", async event => {
-  const file = (event.currentTarget as HTMLInputElement).files?.[0];
+  const escolhido = (event.currentTarget as HTMLInputElement).files?.[0];
+  if (!escolhido) return;
+  const file = await recortarImagem(escolhido, { proporcao: 1, titulo: "Enquadrar a foto neste servidor", redondo: true });
   if (!file) return;
   try {
     const stored = await uploadFile(file);
@@ -3547,7 +3673,9 @@ byId<HTMLInputElement>("canal-unstable").addEventListener("change", event => {
   const marcado = (event.currentTarget as HTMLInputElement).checked;
   definirCanal(marcado ? "unstable" : "stable");
   showToast(marcado ? "Canal de teste ligado. A proxima verificacao ja usa ele." : "De volta ao canal estavel.");
-  if (marcado) void checkForUpdate(showToast);
+  // `showToast` ganhou um segundo parametro de acao; o verificador chama com
+  // (texto, notas), entao vai um embrulho que ignora as notas.
+  if (marcado) void checkForUpdate(texto => showToast(texto));
 });
 /// Verificacao a pedido. A automatica so roda na abertura, entao quem acabou
 /// de publicar uma versao nao precisa fechar e abrir o app para busca-la.
@@ -3692,6 +3820,44 @@ async function ligarBotoesDaJanela() {
   }
 }
 void ligarBotoesDaJanela();
+
+// ----------------------------------------------- menu do sistema, fora
+//
+// O menu do WebView2 e do Edge, nao nosso: oferece recarregar, salvar como e o
+// endereco interno das imagens, e nada disso faz sentido aqui dentro. Onde ha
+// menu proprio ele ja aparece; o resto e silenciado.
+//
+// Campo de texto fica de fora: copiar, colar e a correcao ortografica do
+// sistema sao uteis e nao ha substituto nosso para eles.
+document.addEventListener("contextmenu", event => {
+  const alvo = event.target as HTMLElement | null;
+  if (alvo?.closest("input, textarea, [contenteditable='true']")) return;
+
+  // Link ganha menu proprio: sem isso perderiamos "copiar endereco", a unica
+  // coisa do menu do navegador que fazia falta.
+  const link = alvo?.closest<HTMLAnchorElement>("a[href]");
+  if (link) {
+    event.preventDefault();
+    closeUserMenu();
+    const menu = document.createElement("div");
+    menu.className = "user-menu";
+    const titulo = document.createElement("strong");
+    titulo.className = "user-menu-title";
+    titulo.textContent = link.href.slice(0, 60) + (link.href.length > 60 ? "…" : "");
+    const endereco = link.href;
+    menu.append(titulo);
+    menu.append(menuAcao("Copiar link", "link", () => {
+      void navigator.clipboard.writeText(endereco)
+        .then(() => showToast("Link copiado."))
+        .catch(() => showToast(endereco));
+    }));
+    menu.append(menuAcao("Abrir", "spark", () => void abrirExterno(endereco)));
+    montarMenu(menu, link, { x: event.clientX, y: event.clientY });
+    return;
+  }
+
+  event.preventDefault();
+});
 
 // -------------------------------------------------------- busca de mensagens
 //
@@ -3882,6 +4048,14 @@ async function ligarMedidorDoDialogo() {
 }
 
 /// Poe a marca do limiar sobre a barra e mostra o controle so quando ele vale.
+function pintarGanho() {
+  const valor = voz.lerGanho();
+  byId<HTMLInputElement>("voz-ganho").value = String(valor);
+  byId("voz-ganho-valor").textContent = valor === 100
+    ? "100% — como o Windows entrega"
+    : valor + "% — o aplicativo amplifica " + (valor / 100).toFixed(1) + " vezes";
+}
+
 function pintarLimiar() {
   const limiar = voz.lerLimiar();
   byId("mic-meter-limiar").style.left = limiar + "%";
@@ -3898,6 +4072,13 @@ byId<HTMLSelectElement>("voz-modo").addEventListener("change", event => {
   // O medidor do dialogo acompanha a troca de modo: em "ao falar" ele passa a
   // mostrar onde o microfone abre.
   void ligarMedidorDoDialogo();
+});
+byId<HTMLInputElement>("voz-ganho").addEventListener("input", event => {
+  const valor = Number((event.currentTarget as HTMLInputElement).value);
+  voz.guardarGanho(valor);
+  pintarGanho();
+  // Ao vivo: quem esta na chamada nao ouve corte enquanto a barra e arrastada.
+  ganhoAtual?.definir(valor);
 });
 byId<HTMLInputElement>("voz-limiar").addEventListener("input", event => {
   voz.guardarLimiar(Number((event.currentTarget as HTMLInputElement).value));
@@ -4036,6 +4217,7 @@ async function registrarAtalhos() {
 function pintarConfiguracoesDeVoz() {
   byId<HTMLSelectElement>("voz-modo").value = voz.lerModo();
   byId<HTMLInputElement>("voz-limiar").value = String(voz.lerLimiar());
+  pintarGanho();
   const filtros = voz.lerFiltros();
   byId<HTMLInputElement>("filtro-ruido").checked = filtros.ruido;
   byId<HTMLInputElement>("filtro-eco").checked = filtros.eco;
@@ -4052,6 +4234,10 @@ function attachVideo(track: { sid?: string; attach: () => HTMLMediaElement }, la
   const tile = document.createElement("div");
   tile.id = "track-" + track.sid;
   tile.className = "track-tile";
+  // De proposito sem `data-who`: o anel de "esta falando" e para rosto, e a
+  // tile de tela nao e o rosto de ninguem. Sem a marca, `updateSpeakingStyles`
+  // nao a alcanca.
+  
   const media = track.attach();
   if (media instanceof HTMLVideoElement) { media.autoplay = true; media.playsInline = true; media.muted = muted; }
   const label = document.createElement("label");
@@ -4764,10 +4950,18 @@ function noteUnread(message: ChatMessage, fromMe: boolean) {
   if (!olhando) unreadRooms.set(message.roomId, (unreadRooms.get(message.roomId) || 0) + 1);
   renderNavigation(); playPing();
   const channel = rooms.find(item => item.id === message.roomId);
+  const servidor = servers.find(item => item.id === channel?.serverId);
   const body = message.text || (message.attachments?.length ? "Enviou um anexo" : "Nova mensagem");
-  void notifyMessage({
+  const de = getDisplayName(message.username)
+    + (channel ? " em #" + channel.name : "")
+    + (servidor && servidor.id !== currentServerId ? " · " + servidor.name : "");
+  const mostrou = notifyMessage({
     title: (citado ? "@ " : "") + message.username + (channel ? " em #" + channel.name : ""),
     body, privateBody: citado ? "Citaram voce em um canal" : "Nova mensagem em um canal", inCall: inCall(),
+  });
+  void avisarOrigem(mostrou, (citado ? "Citaram você — " : "") + de, () => {
+    if (channel && channel.serverId !== currentServerId) void selectServer(channel.serverId);
+    if (channel) void selectRoom(channel.id);
   });
 }
 // Contagem separada da de nao lidas: mencao merece marca propria na lista de
@@ -5366,6 +5560,12 @@ function personRow(name: string, online: boolean, naChamada: boolean) {
   row.onclick = naChamada && key(name) !== key(session?.username || "")
     ? event => { event.stopPropagation(); openUserMenu(name, row); }
     : event => { event.stopPropagation(); abrirPerfil(name); };
+  // Botao direito abre o mesmo cartao, no lugar do menu do navegador.
+  row.oncontextmenu = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    openUserMenu(name, row, { x: event.clientX, y: event.clientY });
+  };
   return box;
 }
 function callParticipants(): string[] {
@@ -5456,9 +5656,83 @@ function updateCallControls() {
       : "Compartilhar tela";
   }
 }
+/// Ultimo tempo de ida e volta ate o servidor, em milissegundos. `null` antes
+/// da primeira medida ou quando ela falha.
+let pingMs: number | null = null;
+let estadoAtual = "offline";
+let estadoOnline = false;
+
 function setStatus(text: string, online: boolean) {
-  updateCallControls(); statusPill.textContent = text; statusPill.classList.toggle("online", online); connectionState.textContent = text; byId("mini-profile-status").textContent = text; leaveButton.querySelector("small")!.textContent = online ? "Desconectar" : "Reconectar"; }
-function showToast(text: string) { toastEl.textContent = text; toastEl.classList.remove("hidden"); window.clearTimeout(toastTimer); toastTimer = window.setTimeout(() => toastEl.classList.add("hidden"), 4000); }
+  estadoAtual = text;
+  estadoOnline = online;
+  updateCallControls();
+  pintarEstado();
+  connectionState.textContent = text;
+  byId("mini-profile-status").textContent = text;
+  leaveButton.querySelector("small")!.textContent = online ? "Desconectar" : "Reconectar";
+}
+
+/// O ping acompanha o estado, e nao substitui: "online" sem numero e melhor do
+/// que so um numero solto quando a medida ainda nao chegou.
+function pintarEstado() {
+  statusPill.textContent = estadoAtual + (pingMs !== null ? " · " + pingMs + " ms" : "");
+  statusPill.classList.toggle("online", estadoOnline);
+}
+
+/// Mede o tempo de ida e volta ate o servidor.
+///
+/// E a conversa com o backend, e nao o caminho da voz — a midia vai pelo
+/// LiveKit e pode estar melhor ou pior que isto. Serve para responder "esta
+/// lento porque a minha internet caiu ou porque o servidor engasgou?".
+async function medirPing() {
+  if (!session) { pingMs = null; pintarEstado(); return; }
+  const inicio = performance.now();
+  try {
+    const resposta = await fetch(API + "/api/session", {
+      headers: { Authorization: "Bearer " + session.token },
+      cache: "no-store",
+    });
+    pingMs = resposta.ok ? Math.round(performance.now() - inicio) : null;
+  } catch {
+    pingMs = null;
+  }
+  pintarEstado();
+}
+// A cada dez segundos: perto o bastante para acompanhar uma piora, longe o
+// bastante para nao virar transito por conta propria.
+window.setInterval(() => void medirPing(), 10_000);
+/// Aviso curto no canto. Com `aoClicar`, ele vira botao: clicar leva ao lugar
+/// de onde o aviso veio, e some.
+function showToast(text: string, aoClicar?: () => void) {
+  toastEl.textContent = text;
+  toastEl.classList.remove("hidden");
+  toastEl.classList.toggle("clicavel", Boolean(aoClicar));
+  toastEl.onclick = aoClicar
+    ? () => { toastEl.classList.add("hidden"); aoClicar(); }
+    : null;
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => toastEl.classList.add("hidden"), aoClicar ? 7000 : 4000);
+}
+
+/// Diz de onde veio a mensagem quando a notificacao do Windows nao apareceu.
+///
+/// As notificacoes do sistema vem **desligadas por padrao**, entao no caso
+/// comum so o som tocava — e som sozinho nao diz se foi um canal, qual, ou uma
+/// conversa privada. Este aviso preenche essa lacuna e leva ao lugar num
+/// clique.
+///
+/// So aparece quando a notificacao do sistema **nao** apareceu: as duas juntas
+/// seriam a mesma informacao duas vezes.
+async function avisarOrigem(
+  mostrouNoSistema: Promise<boolean>,
+  texto: string,
+  ir: () => void,
+) {
+  if (await mostrouNoSistema) return;
+  // Estando de olho na janela, o aviso e util; minimizado, quem resolve e a
+  // notificacao do sistema, e ela ja foi decidida acima.
+  showToast(texto, ir);
+}
 function initials(name: string) { return name.split(/\s+/).slice(0, 2).map(part => part[0]?.toUpperCase()).join(""); }
 async function resume() { if (!session) return; try { await api("/api/session"); await enterApp(); } catch { saveSession(null); } }
 void resume();

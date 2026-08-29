@@ -60,12 +60,13 @@ pub fn start(
     scope: Scope,
     source: NativeAudioSource,
     runtime: tokio::runtime::Handle,
+    ganho: f32,
 ) -> AudioHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
 
     std::thread::spawn(move || {
-        if let Err(err) = pump(scope, source, runtime, &flag) {
+        if let Err(err) = pump(scope, source, runtime, &flag, ganho) {
             eprintln!("audio do compartilhamento parou: {err}");
         }
     });
@@ -78,6 +79,7 @@ fn pump(
     source: NativeAudioSource,
     runtime: tokio::runtime::Handle,
     stop: &AtomicBool,
+    ganho: f32,
 ) -> Result<(), String> {
     // COM em MTA: esta thread nunca toca interface.
     initialize_mta().ok().map_err(|e| e.to_string())?;
@@ -117,7 +119,15 @@ fn pump(
             for sample in block.iter_mut() {
                 let low = queue.pop_front().unwrap_or(0);
                 let high = queue.pop_front().unwrap_or(0);
-                *sample = i16::from_le_bytes([low, high]);
+                let cru = i16::from_le_bytes([low, high]);
+                // Amplificar com teto, e nao deixar transbordar: passar de
+                // `i16::MAX` daria a volta e viraria estalo, que soa muito pior
+                // do que o volume baixo que a pessoa veio corrigir.
+                *sample = if ganho == 1.0 {
+                    cru
+                } else {
+                    (cru as f32 * ganho).clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                };
             }
             let frame = AudioFrame {
                 data: std::borrow::Cow::Borrowed(&block),

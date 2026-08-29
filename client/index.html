@@ -20,7 +20,7 @@
       <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"/></symbol>
       <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.5-1.5"/></symbol>
       <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></symbol>
-      <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></symbol>
+      <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></symbol>
       <symbol id="i-hangup" viewBox="0 0 24 24"><path d="M2.5 14.5c4-4.7 15-4.7 19 0"/><path d="M6.2 12.4l-1.6 2.6-2.1-.8"/><path d="M17.8 12.4l1.6 2.6 2.1-.8"/><path d="M4 20L20 4"/></symbol>
       <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></symbol>
       <symbol id="i-reply" viewBox="0 0 24 24"><path d="M9 17l-6-5 6-5"/><path d="M3 12h9a8 8 0 0 1 8 8v1"/></symbol>
@@ -89,11 +89,10 @@
       </aside>
 
       <aside class="sidebar">
-        <header class="brand">
+        <header id="server-card" class="brand">
           <div><strong id="sidebar-title">Mensagens</strong><small id="sidebar-subtitle">amigos</small></div>
           <button id="server-members" class="icon-button hidden" title="Configurações do servidor"><svg class="ic"><use href="#i-gear"/></svg></button>
         </header>
-        <div id="server-banner" class="server-banner hidden"></div>
         <nav>
           <div id="channels-pane" class="hidden">
             <div class="section-title"><p class="section-label">CANAIS DE TEXTO</p><button id="add-room" class="add-room" title="Criar canal de texto"><svg class="ic"><use href="#i-plus"/></svg></button></div>
@@ -311,6 +310,7 @@
       <label id="source-audio-fonte-linha" class="hidden">Áudio de<select id="source-audio-fonte"></select>
         <span class="muted small">Programas feitos em Chromium (navegadores, Discord, Spotify) tocam som por um processo separado e podem sair mudos.</span>
       </label>
+      <label id="source-ganho-linha" class="hidden">Volume do áudio da tela<input id="source-ganho" type="range" min="100" max="300" step="10" /><span id="source-ganho-valor" class="muted small">100%</span></label>
       <p id="source-audio-aviso" class="muted small hidden">Este Windows não sabe separar o áudio da chamada do resto do sistema — enviar &quot;tudo&quot; faria a conversa voltar como eco para todo mundo. Escolha acima o programa que deve ser transmitido, ou desmarque o áudio.</p>
       <label class="switch-row"><input id="source-motion" type="checkbox" checked /> Priorizar movimento (jogo)</label>
       <label id="source-barra-linha" class="switch-row"><input id="source-barra" type="checkbox" checked /> Ocultar a barra de título da janela</label>
@@ -325,6 +325,21 @@
       <p id="fixadas-vazio" class="muted small hidden">Nada fixado aqui ainda. O alfinete aparece ao passar o mouse na mensagem.</p>
       <div id="fixadas-lista" class="busca-resultados"></div>
       <div class="dialog-actions"><button id="fixadas-fechar" class="primary" type="button">Fechar</button></div>
+    </dialog>
+
+    <dialog id="recorte-dialog" class="wide-dialog">
+      <h2 id="recorte-titulo">Enquadrar imagem</h2>
+      <p class="muted">Arraste para posicionar e use a barra para aproximar.</p>
+      <div id="recorte-palco" class="recorte-palco">
+        <div id="recorte-moldura" class="recorte-moldura">
+          <img id="recorte-imagem" alt="" draggable="false" />
+        </div>
+      </div>
+      <input id="recorte-zoom" type="range" min="1" max="300" value="1" />
+      <div class="dialog-actions">
+        <button id="recorte-cancelar" type="button">Cancelar</button>
+        <button id="recorte-ok" class="primary" type="button">Usar esta parte</button>
+      </div>
     </dialog>
 
     <dialog id="busca-dialog" class="wide-dialog">
@@ -367,6 +382,9 @@
             </select></label>
             <label id="voz-limiar-linha">Sensibilidade<input id="voz-limiar" type="range" min="1" max="60" step="1" /></label>
             <p class="muted small">Sensibilidade alta demais abre com o ventilador; baixa demais corta o começo das frases.</p>
+
+            <label>Volume do microfone<input id="voz-ganho" type="range" min="100" max="300" step="10" /></label>
+            <p id="voz-ganho-valor" class="muted small">100% — como o Windows entrega</p>
 
             <p class="section-label">FILTROS</p>
             <label class="switch-row"><input id="filtro-ruido" type="checkbox" checked /> Reduzir ruído de fundo</label>

@@ -1,6 +1,6 @@
 [package]
 name = "naoconcordo-app"
-version = "0.7.20"
+version = "0.7.21"
 description = "naoconcordo - sala privada de voz e tela"
 authors = ["naoconcordo"]
 edition = "2024"

@@ -55,6 +55,8 @@ pub struct ActiveShare {
     /// De onde vem o som, quando a pessoa pediu um programa especifico. Trocar
     /// de tela nao pode perder essa escolha.
     audio_target: Option<Target>,
+    /// Quanto o som da tela e amplificado. 1.0 e o volume original.
+    ganho_audio: f32,
     /// Guardado para a troca de tela: o novo capturador precisa do mesmo
     /// limite de quadros, senao trocar de janela viraria captura sem teto.
     fps: f64,
@@ -96,6 +98,7 @@ pub async fn start(
     token: &str,
     quality: Quality,
     with_audio: bool,
+    ganho_audio: f32,
     preferencia: encoder::Preferencia,
     forcar_duplicacao: bool,
     sem_barra: bool,
@@ -197,7 +200,7 @@ pub async fn start(
     // O som vai depois do video: se o loopback falhar, o compartilhamento
     // continua de pe, so mudo. Quem desmarcou a opcao nem chega aqui.
     let (audio, audio_source) = if with_audio {
-        publish_audio(&room, audio_target.unwrap_or(target)).await
+        publish_audio(&room, audio_target.unwrap_or(target), ganho_audio).await
     } else {
         (None, None)
     };
@@ -212,6 +215,7 @@ pub async fn start(
         video_track: track_guardada,
         target,
         audio_target,
+        ganho_audio,
         fps: quality.fps,
         forcar_duplicacao,
         sem_barra,
@@ -354,6 +358,7 @@ pub async fn stop(state: &ShareState) {
 async fn publish_audio(
     room: &Room,
     target: Target,
+    ganho: f32,
 ) -> (Option<audio::AudioHandle>, Option<NativeAudioSource>) {
     let Some(scope) = audio_scope(target) else { return (None, None) };
 
@@ -371,7 +376,7 @@ async fn publish_audio(
         return (None, None);
     }
 
-    let handle = audio::start(scope, source.clone(), tokio::runtime::Handle::current());
+    let handle = audio::start(scope, source.clone(), tokio::runtime::Handle::current(), ganho);
     (Some(handle), Some(source))
 }
 
@@ -424,8 +429,9 @@ pub async fn switch(state: &ShareState, target: Target) -> Result<(), String> {
     if let (Some(handle), Some(source)) = (share.audio.as_ref(), share.audio_source.clone()) {
         let alvo_do_som = share.audio_target.unwrap_or(target);
         handle.stop();
+        let ganho = share.ganho_audio;
         share.audio = audio_scope(alvo_do_som)
-            .map(|scope| audio::start(scope, source, tokio::runtime::Handle::current()));
+            .map(|scope| audio::start(scope, source, tokio::runtime::Handle::current(), ganho));
     }
 
     Ok(())

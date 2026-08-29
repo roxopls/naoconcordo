@@ -36,7 +36,15 @@ input:focus, textarea:focus { border-color: rgba(255,122,69,.7); box-shadow: 0 0
 
 .app-shell { height: 100vh; display: grid; grid-template-columns: 68px 238px minmax(420px, 1fr) 210px; background: #0d0d10; }
 .sidebar { display: flex; flex-direction: column; min-width: 0; background: #101013; border-right: 1px solid var(--line); }
-.brand { height: 64px; display: flex; align-items: center; gap: 11px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+/* Cartao do servidor: a capa fica atras do nome, e nao numa faixa a parte.
+   Um pouco mais alto que o cabecalho antigo para a imagem ter o que mostrar,
+   e ainda assim mais baixo que cabecalho + faixa somados. */
+.brand { position: relative; height: 88px; display: flex; align-items: flex-end; gap: 11px; padding: 0 16px 12px; border-bottom: 1px solid var(--line); background-size: cover; background-position: center; }
+/* Sem o veu, nome branco sobre capa clara some. O degrade escurece so embaixo,
+   onde o texto fica, e deixa o topo da imagem a mostra. */
+.brand.com-capa::before { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(16,16,19,.15) 0%, rgba(16,16,19,.55) 55%, rgba(16,16,19,.92) 100%); }
+.brand > * { position: relative; }
+.brand.com-capa strong { text-shadow: 0 1px 3px rgba(0,0,0,.6); }
 .brand-small { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: linear-gradient(135deg, var(--accent), #d64442); font: 700 21px Georgia, serif; }
 .brand div { display: grid; }
 .brand small, .profile small { color: var(--muted); font-size: 11px; }
@@ -245,8 +253,6 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 .stage:fullscreen.ocioso #diag-box,
 .stage:fullscreen.ocioso .tile-action { opacity: 0; pointer-events: none; }
 /* anel vermelho de quem esta falando */
-.camera-tile.speaking { border-color: #e5484d; box-shadow: 0 0 0 2px #e5484d, 0 0 14px rgba(229,72,77,.45); }
-.person.speaking .avatar, .voice-member.speaking .avatar { box-shadow: 0 0 0 2px #e5484d, 0 0 10px rgba(229,72,77,.5); }
 .person.speaking span, .voice-member.speaking span { color: #f3f3f4; }
 .camera-tile, .person .avatar, .voice-member .avatar { transition: box-shadow .12s ease, border-color .12s ease; }
 
@@ -419,7 +425,7 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 .mini-profile-bio:empty { display: none; }
 
 /* banner do servidor no sidebar */
-.server-banner { height: 100px; background: linear-gradient(135deg, #2a2a35 0%, #1a1a22 100%); background-size: cover; background-position: center; flex: 0 0 auto; }
+
 
 /* icone do servidor no rail: respeita o formato quadrado arredondado do botao */
 .rail-servers .rail-button { overflow: hidden; }
@@ -632,7 +638,12 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 
 /* Cor do anel de quem fala. O tom vem do perfil de cada pessoa e chega por
    `--anel`; o vermelho fica de reserva para quem nunca escolheu. */
-.camera-tile.speaking { border-color: var(--anel, #e5484d); box-shadow: 0 0 0 2px var(--anel, #e5484d), 0 0 14px color-mix(in srgb, var(--anel, #e5484d) 45%, transparent); }
+/* `camera-tile` e da janela separada; `track-tile` e do palco da janela
+   principal, onde moram tanto a camera quanto a tela compartilhada. As duas
+   precisam da regra, e antes so a primeira tinha — por isso o anel nunca
+   aparecia em quem estava compartilhando. */
+.camera-tile.speaking,
+.track-tile.speaking { border-color: var(--anel, #e5484d); box-shadow: 0 0 0 2px var(--anel, #e5484d), 0 0 14px color-mix(in srgb, var(--anel, #e5484d) 45%, transparent); }
 .person.speaking .avatar, .voice-member.speaking .avatar { box-shadow: 0 0 0 2px var(--anel, #e5484d), 0 0 10px color-mix(in srgb, var(--anel, #e5484d) 50%, transparent); }
 
 .cor-linha { display: flex; align-items: center; gap: 10px; }
@@ -662,3 +673,29 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 .titlebar-botoes svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.2; }
 /* Com a barra no ar, a aplicacao ocupa o que sobra da tela. */
 .titlebar:not(.hidden) ~ .app-shell { height: calc(100vh - 32px); }
+
+/* Aviso que leva a origem da mensagem: sem o convite visual ninguem descobre
+   que da para clicar. */
+.toast.clicavel { cursor: pointer; border-color: #4a4a55; }
+.toast.clicavel:hover { background: #34343b; }
+
+
+/* Quadro de quem esta na chamada sem camera. Mesma moldura das outras tiles,
+   para o anel de fala e o modo grande valerem sem regra a parte. */
+.tile-voz { display: grid; place-items: center; gap: 10px; background: #16161b; min-height: 130px; }
+.tile-voz-foto { width: 72px; height: 72px; border-radius: 50%; font-size: 24px; }
+.tile-voz label { position: static; background: none; padding: 0; font-size: 12px; color: #d5d5dd; }
+
+
+/* Enquadramento da imagem. A moldura fica por cima e o veu escurece o que vai
+   ficar de fora, para a pessoa ver o recorte e nao imaginar. */
+.recorte-palco { position: relative; overflow: hidden; display: grid; place-items: center; min-height: 260px; background: #0d0d10; border: 1px solid var(--line); border-radius: 10px; touch-action: none; cursor: grab; }
+.recorte-palco:active { cursor: grabbing; }
+/* A imagem mora dentro da moldura, com origem no canto de cima: e o mesmo
+   ponto de onde o recorte e calculado, entao o que se ve e o que sai. */
+#recorte-imagem { position: absolute; top: 0; left: 0; transform-origin: 0 0; margin: 0; max-width: none; user-select: none; pointer-events: none; }
+.recorte-moldura { position: relative; overflow: hidden; border: 2px solid #f3f3f4; border-radius: 6px; box-shadow: 0 0 0 9999px rgba(13,13,16,.72); }
+.recorte-moldura.redondo { border-radius: 50%; }
+
+/* Anel de fala no avatar do rodape: mesma cor que os outros veem em voce. */
+.avatar.speaking { box-shadow: 0 0 0 2px var(--anel, #e5484d), 0 0 10px color-mix(in srgb, var(--anel, #e5484d) 50%, transparent); }

@@ -51,6 +51,7 @@ pub async fn screen_share_start(
     #[allow(non_snake_case)] hideTitleBar: Option<bool>,
     codec: Option<String>,
     #[allow(non_snake_case)] audioSource: Option<String>,
+    #[allow(non_snake_case)] audioGain: Option<f32>,
 ) -> Result<String, String> {
     let target = Target::parse(&source_id)?;
     // De qual programa tirar o som. Compartilhando o monitor, o padrao e "tudo
@@ -69,6 +70,9 @@ pub async fn screen_share_start(
         &token,
         quality,
         audio,
+        // 100% e o som como veio; o teto de 300% e o mesmo do microfone, pelo
+        // mesmo motivo: acima disso satura em vez de ficar mais alto.
+        audioGain.unwrap_or(100.0).clamp(100.0, 300.0) / 100.0,
         super::screen::encoder::Preferencia::ler(codec.as_deref()),
         forceDuplication.unwrap_or(false),
         // Sem escolha explicita, a barra sai: quem compartilha uma janela quer

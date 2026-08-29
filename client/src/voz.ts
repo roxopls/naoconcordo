@@ -112,3 +112,65 @@ export function medir(
 /// picotada do outro lado — o silencio dentro de uma frase e mais longo do que
 /// parece quando medido em milissegundos.
 export const CAUDA_MS = 450;
+
+// ------------------------------------------------------- ganho do microfone
+
+const GANHO_KEY = "naoconcordo.voz.ganho";
+
+/// Quanto o microfone e amplificado, em porcentagem. 100 e o som como o Windows
+/// entrega; acima disso o aplicativo amplifica por conta.
+///
+/// O teto e 300 porque amplificar sem limite nao resolve microfone ruim — passa
+/// a somar chiado junto com a voz, e a partir de certo ponto satura e distorce.
+export function lerGanho(): number {
+  const valor = Number(localStorage.getItem(GANHO_KEY));
+  return Number.isFinite(valor) && valor >= 100 && valor <= 300 ? valor : 100;
+}
+export function guardarGanho(valor: number) {
+  localStorage.setItem(GANHO_KEY, String(valor));
+}
+
+/// Amplificador que entra entre o microfone e o que e publicado.
+///
+/// Vai como `TrackProcessor` do LiveKit em vez de faixa propria: assim ligar,
+/// desligar e trocar de dispositivo continuam sendo trabalho dele, e nos so
+/// acrescentamos um degrau no meio do caminho.
+export class GanhoDoMicrofone {
+  name = "ganho-do-microfone";
+  processedTrack?: MediaStreamTrack;
+  private contexto?: AudioContext;
+  private no?: GainNode;
+  private fonte?: MediaStreamAudioSourceNode;
+  private destino?: MediaStreamAudioDestinationNode;
+
+  async init(opcoes: { track: MediaStreamTrack; audioContext: AudioContext }) {
+    this.contexto = opcoes.audioContext;
+    this.fonte = this.contexto.createMediaStreamSource(new MediaStream([opcoes.track]));
+    this.no = this.contexto.createGain();
+    this.no.gain.value = lerGanho() / 100;
+    this.destino = this.contexto.createMediaStreamDestination();
+    this.fonte.connect(this.no).connect(this.destino);
+    this.processedTrack = this.destino.stream.getAudioTracks()[0];
+  }
+
+  async restart(opcoes: { track: MediaStreamTrack; audioContext: AudioContext }) {
+    await this.destroy();
+    await this.init(opcoes);
+  }
+
+  async destroy() {
+    this.fonte?.disconnect();
+    this.no?.disconnect();
+    this.destino?.disconnect();
+    this.fonte = undefined;
+    this.no = undefined;
+    this.destino = undefined;
+    this.processedTrack = undefined;
+  }
+
+  /// Muda o volume ao vivo, sem refazer a faixa: quem esta na chamada nao
+  /// percebe corte enquanto a pessoa arrasta o controle.
+  definir(porcentagem: number) {
+    if (this.no) this.no.gain.value = porcentagem / 100;
+  }
+}

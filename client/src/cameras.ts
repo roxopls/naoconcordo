@@ -20,6 +20,30 @@ const grid = document.getElementById("cameras-grid") as HTMLDivElement;
 const status = document.getElementById("cameras-status") as HTMLDivElement;
 const roomId = new URLSearchParams(location.search).get("room") || "";
 const speaking = new Set<string>();
+// Cor do anel de cada pessoa. Esta janela e um WebView proprio: nao enxerga a
+// memoria do aplicativo, entao busca os perfis por conta uma vez ao abrir.
+const cores = new Map<string, string>();
+
+/// `#rrggbb` e nada mais — o valor entra num estilo, e o servidor ja valida,
+/// mas quem escreve na tela e este lado.
+function corSegura(valor: string | null | undefined): string | null {
+  return valor && /^#[0-9a-f]{6}$/i.test(valor) ? valor : null;
+}
+
+async function carregarCores(sessao: AuthSession) {
+  try {
+    const resposta = await fetch(API + "/api/bootstrap", {
+      headers: { Authorization: "Bearer " + sessao.token },
+    });
+    if (!resposta.ok) return;
+    const dados = await resposta.json() as { profiles?: { username: string; color?: string | null }[] };
+    for (const perfil of dados.profiles || []) {
+      const cor = corSegura(perfil.color);
+      if (cor) cores.set(perfil.username.toLowerCase(), cor);
+    }
+    updateSpeaking();
+  } catch { /* sem cores, fica o padrao */ }
+}
 // A grade se refaz quando a janela muda de forma: janela alta empilha, janela
 // larga enfileira. E o mesmo calculo do painel dentro do app.
 //
@@ -56,7 +80,11 @@ function setStatus(text: string) {
 }
 function updateSpeaking() {
   grid.querySelectorAll<HTMLElement>("[data-who]").forEach(tile => {
-    tile.classList.toggle("speaking", speaking.has((tile.dataset.who || "").toLowerCase()));
+    const quem = (tile.dataset.who || "").toLowerCase();
+    tile.classList.toggle("speaking", speaking.has(quem));
+    const cor = cores.get(quem);
+    if (cor) tile.style.setProperty("--anel", cor);
+    else tile.style.removeProperty("--anel");
   });
 }
 function addTile(track: RemoteTrack, who: string) {
@@ -97,6 +125,9 @@ async function start() {
   const session = readSession();
   if (!session) { setStatus("Entre pela janela principal primeiro."); return; }
   if (!roomId) { setStatus("Canal de voz não informado."); return; }
+  // Nao bloqueia a entrada na sala: sem as cores o anel sai no padrao, e a
+  // camera importa mais que o tom dele.
+  void carregarCores(session);
   try {
     const response = await fetch(API + "/api/livekit-token", {
       method: "POST",

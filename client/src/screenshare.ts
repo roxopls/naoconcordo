@@ -57,11 +57,24 @@ export function startShare(
   hideTitleBar = true,
   codec: CodecPreferido = "auto",
   audioSource = "",
+  audioGain = 100,
 ) {
   // Devolve quem comprimiu: nome do codificador da placa, ou "software: <motivo>".
   return invoke<string>("screen_share_start", {
     sourceId, url, token, quality, audio, forceDuplication, hideTitleBar, codec, audioSource,
+    audioGain,
   });
+}
+
+const GANHO_TELA_KEY = "naoconcordo.ganho-tela";
+/// Volume do audio da tela, lembrado entre transmissoes: quem precisou
+/// amplificar uma vez costuma precisar sempre, no mesmo computador.
+export function lerGanhoDaTela(): number {
+  const valor = Number(localStorage.getItem(GANHO_TELA_KEY));
+  return Number.isFinite(valor) && valor >= 100 && valor <= 300 ? valor : 100;
+}
+export function guardarGanhoDaTela(valor: number) {
+  localStorage.setItem(GANHO_TELA_KEY, String(valor));
 }
 
 const CODEC_KEY = "naoconcordo.codec-tela";
@@ -106,6 +119,8 @@ export type Escolha<T> = {
   /// Programa de onde tirar o som. Vazio quer dizer "o mesmo alvo da imagem",
   /// que para monitor significa tudo menos o naoconcordo.
   audioSource: string;
+  /// Quanto amplificar o som da tela, em porcentagem.
+  audioGain: number;
 };
 
 /// Mostra a grade de fontes e devolve o que a pessoa escolheu, ou `null` se
@@ -124,6 +139,8 @@ export function pickSource<T extends Option>(
     const audioBox = byId<HTMLInputElement>("source-audio");
     const audioFonte = byId<HTMLSelectElement>("source-audio-fonte");
     const audioLinha = byId("source-audio-fonte-linha");
+    const ganho = byId<HTMLInputElement>("source-ganho");
+    const ganhoLinha = byId("source-ganho-linha");
     const motionBox = byId<HTMLInputElement>("source-motion");
     const barraBox = byId<HTMLInputElement>("source-barra");
     const barraLinha = byId("source-barra-linha");
@@ -144,7 +161,12 @@ export function pickSource<T extends Option>(
       semBarra: barraBox.checked,
       // So vale para monitor: numa janela o som ja e o daquele programa.
       audioSource: ehMonitor() && audioBox.checked ? audioFonte.value : "",
+      audioGain: Number(ganho.value) || 100,
     });
+
+    // Guardado ao confirmar: quem precisou amplificar uma vez costuma precisar
+    // de novo na mesma maquina.
+    const guardarEscolha = () => guardarGanhoDaTela(Number(ganho.value) || 100);
 
     const finish = (value: Escolha<T> | null) => {
       startButton.onclick = null;
@@ -176,6 +198,8 @@ export function pickSource<T extends Option>(
       // Compartilhando o monitor, o padrao e tudo que a maquina toca menos o
       // naoconcordo. Ha Windows que ignora essa exclusao e devolve a chamada
       // como eco; escolher um programa aqui fecha essa porta.
+      ganhoLinha.classList.toggle("hidden", !audioBox.checked);
+      byId("source-ganho-valor").textContent = ganho.value + "%";
       const mostrarFonte = ehMonitor() && audioBox.checked;
       audioLinha.classList.toggle("hidden", !mostrarFonte);
       // Onde a exclusao nao funciona, "tudo" nao e uma escolha valida: avisa e
@@ -220,7 +244,7 @@ export function pickSource<T extends Option>(
       card.append(thumb, badge, title, detail);
       card.onclick = () => { chosenSource = source.id; paint(); };
       // Duplo clique comeca direto: escolher e confirmar num gesto so.
-      card.ondblclick = () => { chosenSource = source.id; finish(escolhido()); };
+      card.ondblclick = () => { chosenSource = source.id; guardarEscolha(); finish(escolhido()); };
       return card;
     }));
 
@@ -273,10 +297,13 @@ export function pickSource<T extends Option>(
       ...[...programas].map(([app, id]) => new Option("Somente " + app, id)),
     );
     audioBox.onchange = paint;
+    ganho.oninput = paint;
+    ganho.value = String(lerGanhoDaTela());
 
     paint();
     startButton.onclick = () => {
       if (!chosenSource) return;
+      guardarEscolha();
       finish(escolhido());
     };
   });

@@ -14,6 +14,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::{fs, sync::{RwLock, broadcast}};
+use axum::extract::DefaultBodyLimit;
 use tower_http::{cors::{Any, CorsLayer}, limit::RequestBodyLimitLayer, trace::TraceLayer};
 use uuid::Uuid;
 
@@ -496,6 +497,13 @@ async fn main() {
         .route("/api/dm", get(direct_history).post(send_direct))
         .route("/api/dm/{id}", put(edit_direct).delete(delete_direct))
         .route("/ws", get(websocket))
+        // O axum tem um teto proprio de 2 MB para o corpo, e o
+        // `RequestBodyLimitLayer` **nao** o substitui: os dois valem, e o menor
+        // ganha. Sem desligar este, o limite real era 2 MB — qualquer anexo
+        // maior levava 413, que atraves do proxy chega no navegador como
+        // "Failed to fetch". O app prometia 50 MB desde sempre e nunca
+        // entregou.
+        .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(MAX_UPLOAD + 64 * 1024)).layer(cors)
         .layer(TraceLayer::new_for_http()).with_state(state);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3040").await.expect("porta 3040 indisponivel");
