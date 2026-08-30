@@ -30,6 +30,7 @@ type Situacao = {
   servidor: boolean;
   livekit: boolean;
   versaoLivekit: string | null;
+  versaoServidor: string | null;
   config: Config;
   enderecos: Endereco[];
   pasta: string;
@@ -99,6 +100,11 @@ function pintar(situacao: Situacao) {
     vazio.textContent = "Nenhum endereço de rede encontrado nesta máquina.";
     lista.replaceChildren(vazio);
   }
+
+  // ------------------------------------------------------------ servidor
+  byId("servidor-versao").textContent = situacao.versaoServidor
+    ? "Servidor " + situacao.versaoServidor + "."
+    : "Rodando o servidor que veio com este painel.";
 
   // ------------------------------------------------------------- livekit
   const recadoLk = byId("livekit-estado");
@@ -170,6 +176,18 @@ byId("baixar-livekit").onclick = async () => {
   try {
     const versao = await invoke<string>("instalar_livekit");
     dizer("LiveKit " + versao + " instalado.", "ok");
+  } catch (erro) { dizer(String(erro), "ruim"); }
+  finally { botao.disabled = false; }
+  await atualizar();
+};
+
+byId("atualizar-servidor").onclick = async () => {
+  const botao = byId<HTMLButtonElement>("atualizar-servidor");
+  botao.disabled = true;
+  dizer("Procurando…");
+  try {
+    const versao = await invoke<string>("atualizar_servidor");
+    dizer("Servidor " + versao + ". Desligue e ligue para valer.", "ok");
   } catch (erro) { dizer(String(erro), "ruim"); }
   finally { botao.disabled = false; }
   await atualizar();

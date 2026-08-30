@@ -1,6 +1,6 @@
 [package]
 name = "naoconcordo-painel"
-version = "0.1.0"
+version = "0.1.1"
 description = "naoconcordo - painel de quem hospeda o servidor"
 authors = ["naoconcordo"]
 edition = "2024"

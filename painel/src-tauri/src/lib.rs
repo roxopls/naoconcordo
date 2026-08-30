@@ -27,6 +27,9 @@ struct Situacao {
     servidor: bool,
     livekit: bool,
     versao_livekit: Option<String>,
+    /// A versao do servidor baixado. Vazio quer dizer que roda o que veio no
+    /// instalador do painel.
+    versao_servidor: Option<String>,
     config: Config,
     enderecos: Vec<rede::Endereco>,
     pasta: String,
@@ -39,6 +42,7 @@ fn situacao(estado: tauri::State<Estado>) -> Result<Situacao, String> {
         servidor,
         livekit,
         versao_livekit: baixar::versao_instalada(),
+        versao_servidor: distribuir::versao_do_servidor(),
         config: config::carregar()?,
         enderecos: rede::enderecos(),
         pasta: config::raiz().display().to_string(),
@@ -111,6 +115,18 @@ async fn gerar_clientes(estado: tauri::State<'_, Estado>, versao: String) -> Res
         .map_err(|e| e.to_string())?
 }
 
+/// Troca o servidor pelo publicado na release mais recente.
+#[tauri::command]
+async fn atualizar_servidor(estado: tauri::State<'_, Estado>) -> Result<String, String> {
+    let registro = {
+        let supervisor = estado.supervisor.lock().map_err(|_| "painel ocupado")?;
+        supervisor.linhas.clone()
+    };
+    tauri::async_runtime::spawn_blocking(move || distribuir::atualizar_servidor(&registro))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn abrir_pasta(app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -149,7 +165,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             situacao, salvar_config, iniciar, parar, registro,
             instalar_livekit, abrir_firewall, abrir_pasta, ferramentas_de_build,
-            versao_publicada, gerar_clientes,
+            versao_publicada, gerar_clientes, atualizar_servidor,
         ])
         .on_window_event(|janela, evento| {
             // Fechar a janela derruba o servidor. Deixa-lo no ar sem nada na

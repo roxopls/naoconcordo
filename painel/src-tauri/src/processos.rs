@@ -130,6 +130,11 @@ fn vivo(alvo: &mut Option<Child>) -> bool {
 /// Em desenvolvimento ele costuma estar na pasta de build do outro projeto, e
 /// procurar nos dois lugares evita ter que copiar a mao a cada teste.
 fn caminho_do_servidor() -> Result<std::path::PathBuf, String> {
+    // O baixado vem primeiro: o que veio no instalador envelhece junto com o
+    // painel, e quem atualizou o servidor espera rodar o que baixou.
+    let baixado = crate::distribuir::pasta_servidor().join("naoconcordo-server.exe");
+    if baixado.exists() { return Ok(baixado); }
+
     // Instalado, o servidor fica em `binarios/` ao lado do painel, que e onde o
     // empacotador poe os recursos. Ao lado direto tambem serve, para quem
     // colocar o executavel na mao.

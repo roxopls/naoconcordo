@@ -11,6 +11,7 @@
 //! demora bastante. Por isso e um caminho declarado, e nao o padrao.
 
 use crate::config::{self, Config};
+use sha2::Digest;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -30,6 +31,8 @@ fn endereco_base(config: &Config) -> String {
 }
 
 pub fn pasta_fonte() -> PathBuf { config::raiz().join("fonte") }
+/// Onde fica o servidor baixado, quando ele e mais novo que o que veio junto.
+pub fn pasta_servidor() -> PathBuf { config::raiz().join("servidor") }
 pub fn pasta_updates() -> PathBuf { config::raiz().join("updates") }
 pub fn arquivo_chave() -> PathBuf { config::raiz().join("updater.key") }
 
@@ -298,4 +301,84 @@ mod testes {
         let segundo: u32 = agora[17..19].parse().expect("segundo");
         assert!(hora < 24 && minuto < 60 && segundo < 60, "{agora}");
     }
+}
+
+// ----------------------------------------------------- atualizar o servidor
+//
+// O `naoconcordo-server.exe` viaja dentro do instalador do painel, e por isso
+// envelhece com ele: quem instalou o painel uma vez ficaria com o servidor
+// daquele dia para sempre, mesmo compilando clientes novos. Baixa-lo da release
+// separa as duas vidas.
+
+/// Um asset da release mais recente, com a soma esperada.
+fn asset_da_release(nome_procurado: &str) -> Result<(String, String), String> {
+    let dados: serde_json::Value = cliente_http()?
+        .get(REPO_API).send().map_err(|e| format!("nao foi possivel falar com o GitHub: {e}"))?
+        .json().map_err(|e| format!("resposta do GitHub ilegivel: {e}"))?;
+    let versao = dados["tag_name"].as_str().unwrap_or("?").to_string();
+    let ativos = dados["assets"].as_array().ok_or("release sem arquivos")?;
+    let url = ativos.iter()
+        .find(|a| a["name"].as_str() == Some(nome_procurado))
+        .and_then(|a| a["browser_download_url"].as_str())
+        .ok_or_else(|| format!("a release {versao} nao publicou {nome_procurado}"))?;
+    Ok((versao, url.to_string()))
+}
+
+/// A soma publicada para um arquivo, lida do `SHA256SUMS.txt` da release.
+///
+/// Sem isto seria um executavel baixado da internet rodando na maquina de quem
+/// hospeda, com a unica garantia sendo o TLS do GitHub. E o mesmo cuidado que o
+/// download do LiveKit ja toma.
+fn soma_da_release(nome: &str) -> Result<String, String> {
+    let (_, url) = asset_da_release("SHA256SUMS.txt")
+        .map_err(|_| "esta release nao publicou as somas de verificacao; nada foi baixado.".to_string())?;
+    let texto = cliente_http()?.get(url).send().map_err(|e| e.to_string())?
+        .text().map_err(|e| e.to_string())?;
+    texto.lines()
+        .find_map(|linha| {
+            let mut partes = linha.split_whitespace();
+            let soma = partes.next()?;
+            let arquivo = partes.next()?.trim_start_matches('*');
+            (arquivo == nome).then(|| soma.to_lowercase())
+        })
+        .ok_or_else(|| format!("a lista de somas nao menciona {nome}"))
+}
+
+/// Baixa o servidor da release publicada. Devolve a versao instalada.
+pub fn atualizar_servidor(registro: &Registro) -> Result<String, String> {
+    const NOME: &str = "naoconcordo-server.exe";
+    let (versao, url) = asset_da_release(NOME)?;
+    if versao_do_servidor().as_deref() == Some(versao.as_str()) {
+        return Ok(format!("{versao} (ja era a mais recente)"));
+    }
+
+    anotar(registro, &format!("baixando o servidor {versao}"));
+    let esperada = soma_da_release(NOME)?;
+    let bytes = cliente_http()?.get(url).send().map_err(|e| format!("download falhou: {e}"))?
+        .bytes().map_err(|e| format!("download incompleto: {e}"))?;
+
+    let obtida = format!("{:x}", sha2::Sha256::digest(&bytes));
+    if obtida != esperada {
+        return Err(format!("o servidor baixado nao confere com a soma publicada (esperado {esperada}, obtido {obtida}). Nada foi trocado."));
+    }
+
+    let pasta = pasta_servidor();
+    std::fs::create_dir_all(&pasta).map_err(|e| e.to_string())?;
+    // Grava ao lado e so entao renomeia: uma queda no meio da escrita deixaria
+    // um executavel truncado no lugar de um que funcionava.
+    let provisorio = pasta.join("naoconcordo-server.novo");
+    std::fs::write(&provisorio, &bytes).map_err(|e| format!("nao foi possivel gravar: {e}"))?;
+    std::fs::rename(&provisorio, pasta.join(NOME)).map_err(|e| format!("nao foi possivel trocar o servidor: {e}"))?;
+    std::fs::write(pasta.join("versao.txt"), &versao).ok();
+
+    anotar(registro, &format!("servidor {versao} instalado; desligue e ligue para valer"));
+    Ok(versao)
+}
+
+/// A versao do servidor baixado, se houver um.
+pub fn versao_do_servidor() -> Option<String> {
+    let pasta = pasta_servidor();
+    pasta.join("naoconcordo-server.exe").exists()
+        .then(|| std::fs::read_to_string(pasta.join("versao.txt")).ok())
+        .flatten()
 }
