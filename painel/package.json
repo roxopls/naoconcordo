@@ -1,0 +1,17 @@
+{
+  "name": "naoconcordo-painel",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "comentario": [
+    "Sem bundler de proposito. O painel e uma tela so, sem dependencia de",
+    "runtime: `tsc` gera os modulos e o HTML os carrega direto. Isso evita",
+    "instalar esbuild, que nao consegue rodar seu proprio instalador quando o",
+    "projeto vive num compartilhamento de rede.",
+    "As ferramentas (tsc, tauri) vem do node_modules do cliente, ao lado."
+  ],
+  "scripts": {
+    "check": "node ../client/node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
+    "build": "node ../client/node_modules/typescript/bin/tsc -p tsconfig.json && node copiar-estaticos.mjs"
+  }
+}

@@ -39,7 +39,7 @@ input:focus, textarea:focus { border-color: rgba(255,122,69,.7); box-shadow: 0 0
 /* Cartao do servidor: a capa fica atras do nome, e nao numa faixa a parte.
    Um pouco mais alto que o cabecalho antigo para a imagem ter o que mostrar,
    e ainda assim mais baixo que cabecalho + faixa somados. */
-.brand { position: relative; height: 88px; display: flex; align-items: flex-end; gap: 11px; padding: 0 16px 12px; border-bottom: 1px solid var(--line); background-size: cover; background-position: center; }
+.brand { position: relative; height: 88px; display: flex; align-items: flex-end; gap: 11px; padding: 0 16px 12px; border-bottom: 1px solid var(--line); background-size: cover; background-position: center; background-clip: padding-box; }
 /* Sem o veu, nome branco sobre capa clara some. O degrade escurece so embaixo,
    onde o texto fica, e deixa o topo da imagem a mostra. */
 .brand.com-capa::before { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(16,16,19,.15) 0%, rgba(16,16,19,.55) 55%, rgba(16,16,19,.92) 100%); }
@@ -85,6 +85,17 @@ nav { flex: 1; padding: 16px 10px; overflow-y: auto; }
 .topbar { display: flex; justify-content: space-between; align-items: center; padding: 0 20px; border-bottom: 1px solid var(--line); box-shadow: 0 4px 20px rgba(0,0,0,.12); }
 .topbar div:first-child { display: flex; gap: 12px; align-items: baseline; }
 .topbar span { color: var(--muted); font-size: 12px; }
+/* Os botoes da direita como um grupo so.
+   `.ghost-button` traz `margin-left: auto`, e num flex com varios deles o
+   espaco livre e repartido entre todas as margens automaticas: em vez de
+   ficarem juntos na direita, os botoes se espalhavam pela barra. Uma unica
+   margem automatica, no grupo, empurra o conjunto inteiro e mantem o espaco
+   entre eles constante. */
+.topbar-acoes { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.topbar-acoes .ghost-button { margin: 0; }
+/* Botao so de icone fica quadrado: com padding horizontal, alfinete e lupa
+   tinham larguras diferentes e nao alinhavam entre si nem com o resto. */
+.ghost-button.so-icone { width: 30px; height: 30px; padding: 0; justify-content: center; gap: 0; }
 .status-pill { color: #aaaab4; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; border: 1px solid var(--line); border-radius: 999px; padding: 5px 9px; }
 .status-pill.online { color: var(--green); border-color: rgba(84,209,139,.28); background: rgba(84,209,139,.07); }
 .stage { height: 47vh; min-height: 140px; padding: 14px 18px 4px; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; overflow: auto; }
@@ -124,6 +135,12 @@ nav { flex: 1; padding: 16px 10px; overflow-y: auto; }
 .composer button { width: 34px; height: 34px; border: 0; border-radius: 9px; background: var(--accent); cursor: pointer; }
 
 .people-panel { background: #101013; border-left: 1px solid var(--line); padding: 18px 10px; }
+/* Na area de amigos a coluna da direita sai e a conversa fica com o espaco:
+   esconder sem tirar a faixa do grid deixaria uma coluna vazia. */
+.app-shell.sem-pessoas { grid-template-columns: 68px 238px 1fr; }
+.app-shell.sem-pessoas .people-panel { display: none; }
+/* Do tamanho do icone que ficava aqui, para a lista nao mudar de ritmo. */
+.avatar-canal { width: 21px; height: 21px; font-size: 9px; flex: 0 0 auto; }
 .person { display: flex; align-items: center; gap: 9px; padding: 7px 8px; color: #b9b9c2; font-size: 12px; }
 .person .avatar { width: 30px; height: 30px; font-size: 11px; position: relative; }
 .person .avatar::after { content: ""; position: absolute; width: 8px; height: 8px; right: -1px; bottom: -1px; border: 2px solid #101013; border-radius: 50%; background: #5a5a66; }
@@ -139,7 +156,7 @@ nav { flex: 1; padding: 16px 10px; overflow-y: auto; }
 .toast { position: fixed; z-index: 8; right: 22px; bottom: 22px; max-width: 340px; padding: 11px 14px; background: #29292f; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 30px rgba(0,0,0,.35); font-size: 12px; }
 
 @media (max-width: 1080px) {
-  .app-shell { grid-template-columns: 68px 220px 1fr; }
+  .app-shell, .app-shell.sem-pessoas { grid-template-columns: 68px 220px 1fr; }
   .people-panel { display: none; }
   .call-controls { left: calc(288px + (100vw - 288px)/2); }
 }
@@ -457,8 +474,15 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 
 /* Visualizador de imagem. `position: fixed` basta fora de tela cheia; dentro
    dela o elemento e filho do que esta em tela cheia e o fixed vale igual. */
-.lightbox { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 32px; background: rgba(0,0,0,.82); cursor: zoom-out; }
-.lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; cursor: default; }
+/* Sem `padding`: o visualizador calcula o enquadramento em pixels, e uma borda
+   interna faria a conta divergir do que aparece. Sem `place-items`, tambem: a
+   posicao vem do `transform`, e centralizar por fora brigaria com ele. */
+.lightbox { position: fixed; inset: 0; z-index: 200; overflow: hidden; background: rgba(0,0,0,.9); cursor: zoom-out; }
+/* `position: absolute` com origem no canto: e o mesmo ponto zero que o calculo
+   de arrasto e de zoom usa. */
+.lightbox-img { position: absolute; top: 0; left: 0; transform-origin: 0 0; user-select: none; -webkit-user-drag: none; }
+/* Aproximada, a imagem ocupa a tela toda e o canto arredondado so atrapalha. */
+.lightbox:not([data-perto="1"]) .lightbox-img { border-radius: 8px; }
 .lightbox-close { position: absolute; top: 16px; right: 20px; width: 34px; height: 34px; border: 0; border-radius: 50%; background: rgba(255,255,255,.12); color: #fff; font-size: 20px; line-height: 1; cursor: pointer; }
 .lightbox-close:hover { background: rgba(255,255,255,.22); }
 
@@ -699,3 +723,13 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 
 /* Anel de fala no avatar do rodape: mesma cor que os outros veem em voce. */
 .avatar.speaking { box-shadow: 0 0 0 2px var(--anel, #e5484d), 0 0 10px color-mix(in srgb, var(--anel, #e5484d) 50%, transparent); }
+
+/* Trocar de servidor na tela de entrada. Discreto por escolha: e o caminho de
+   quem hospeda o proprio, e nao o do dia a dia. */
+.servidor-troca { display: grid; gap: 8px; margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--line); text-align: left; }
+.servidor-troca input { font-size: 12px; }
+.servidor-acoes { display: flex; gap: 6px; flex-wrap: wrap; }
+.servidor-acoes .ghost-button { margin: 0; }
+.servidor-troca .small { margin: 0; min-height: 15px; }
+.servidor-troca .ok { color: var(--green, #54d18b); }
+.servidor-troca .ruim { color: #e55; }

@@ -1,15 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { abrirExterno, abrirJanela, ehTauri } from "./ambiente";
 import {
-  LocalTrackPublication, RemoteParticipant, RemoteTrack, Room, RoomEvent,
+  LocalTrackPublication, RemoteAudioTrack, RemoteParticipant, RemoteTrack, Room, RoomEvent,
   Track, VideoPresets,
 } from "livekit-client";
 import "./styles.css";
 import * as voz from "./voz";
 import { recortarImagem } from "./recorte";
+import * as servidor from "./servidor";
 import {
-  checkPin, dropPin, fingerprint, loadIdentity, openMessage, savePin, sealMessage,
-  type Identity,
+  abrirCofre, chaveDoCofre, checkPin, dropPin, fecharCofre, fingerprint, guardarIdentidadeLocal,
+  identidadeLocal, loadIdentity, openMessage, savePin, sealMessage,
+  type Embrulho, type Identity,
 } from "./private";
 import { checkForUpdate, procurarAtualizacao, instalarAtualizacao, canalAtual, definirCanal, notasSalvas, limparNotas } from "./updates";
 import {
@@ -25,8 +27,11 @@ import {
   setDesktopNotifications, setNotificationPreview, setNotificationsInCall,
 } from "./notifications";
 
-const API = import.meta.env.VITE_SERVER_URL || "http://127.0.0.1:3040";
-const WS = API.replace(/^http/, "ws");
+// Escolhido em tempo de execucao (veja `servidor.ts`), e nao mais fixado no
+// build. Lido uma vez: trocar de servidor recarrega a janela, porque sessao,
+// conta e historico sao de outro lugar.
+const API = servidor.endereco();
+const WS = servidor.paraWs(API);
 type StoredFile = { id: string; name: string; mime: string; size: number; owner: string };
 type ChatMessage = { id: string; username: string; text: string; createdAt: string; editedAt?: string | null; roomId: string; attachments?: StoredFile[]; replyTo?: string | null; reactions?: Record<string, string[]>; pinned?: boolean };
 type AuthSession = { token: string; username: string; expiresAt: number };
@@ -200,6 +205,20 @@ type AuthChallenge = {
 };
 let registerMode = false;
 
+/// O que abre o cofre desta sessao. Vive so na memoria: guardar isto no
+/// aparelho seria o mesmo que guardar a senha.
+///
+/// `senha` existe sempre que a pessoa digitou a senha agora. Sessao restaurada
+/// do disco entra sem digitar nada, e ai nao ha chave — o historico vem da
+/// copia local, que e o caso comum do dia a dia.
+///
+/// `recuperacao` so existe quando o codigo passou pelas maos do usuario: ao
+/// criar a conta e ao recuperar. Contas antigas, que migram durante um login
+/// comum, ficam sem esse embrulho ate a proxima recuperacao.
+let chaveDeSenha: CryptoKey | null = null;
+let chaveDeRecuperacao: CryptoKey | null = null;
+type Cofre = { porSenha: Embrulho; porRecuperacao?: Embrulho };
+
 async function deriveVerifier(password: string, salt: string, iterations: number) {
   const encoder = new TextEncoder();
   const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
@@ -236,6 +255,84 @@ function renderAuthMode() {
 byId("auth-mode-toggle").addEventListener("click", () => { registerMode = !registerMode; renderAuthMode(); });
 renderAuthMode();
 
+// ------------------------------------------------------- trocar de servidor
+//
+// O endereco deixou de ser fixado no build, entao quem hospeda o proprio
+// servidor usa o mesmo instalador de todo mundo e so aponta para ele aqui.
+//
+// Isto vive na tela de entrada, e nao nas configuracoes, porque e antes de
+// entrar que a escolha importa: conta, senha e historico sao de cada servidor.
+{
+  const caixa = byId("servidor-troca");
+  const campo = byId<HTMLInputElement>("servidor-endereco");
+  const recado = byId("servidor-recado");
+  const abrir = byId("servidor-abrir");
+
+  const dizer = (texto: string, estado: "" | "ok" | "ruim" = "") => {
+    recado.textContent = texto;
+    recado.className = "muted small" + (estado ? " " + estado : "");
+  };
+
+  const pintar = () => {
+    const proprio = servidor.ehProprio();
+    abrir.textContent = proprio ? "Servidor: " + servidor.endereco() : "Usar outro servidor";
+    byId("servidor-padrao").classList.toggle("hidden", !proprio);
+  };
+
+  abrir.onclick = () => {
+    const fechada = caixa.classList.toggle("hidden");
+    if (fechada) return;
+    campo.value = servidor.ehProprio() ? servidor.endereco() : "";
+    campo.placeholder = "meuservidor.com.br:8443";
+    dizer("Padrão deste aplicativo: " + servidor.PADRAO);
+    campo.focus();
+  };
+
+  byId("servidor-testar").onclick = async () => {
+    const alvo = campo.value;
+    if (!alvo.trim()) { dizer("Escreva um endereço primeiro.", "ruim"); return; }
+    dizer("Testando " + servidor.normalizar(alvo) + "…");
+    const resultado = await servidor.testar(alvo);
+    dizer(resultado.detalhe, resultado.ok ? "ok" : "ruim");
+  };
+
+  byId("servidor-usar").onclick = async () => {
+    const alvo = campo.value;
+    if (!servidor.normalizar(alvo)) { dizer("Endereço inválido.", "ruim"); return; }
+    // Testa antes de gravar: gravar um endereco morto deixa o aplicativo sem
+    // conseguir nem chegar na tela de entrada do servidor certo.
+    dizer("Testando…");
+    const resultado = await servidor.testar(alvo);
+    if (!resultado.ok) { dizer(resultado.detalhe + " Nada foi alterado.", "ruim"); return; }
+    if (!servidor.guardar(alvo)) { dizer("Não foi possível guardar o endereço.", "ruim"); return; }
+    // Sem TLS o token de sessao e as mensagens de canal vao em texto claro pela
+    // rede. As privadas continuam cifradas ponta a ponta e a senha nunca sai
+    // daqui, mas quem escolhe isto merece saber, e nao descobrir depois.
+    if (servidor.normalizar(alvo).startsWith("http://")) {
+      await showNotice("Servidor sem criptografia",
+        "Este endereço usa http, sem certificado. As mensagens de canal e o código da sua sessão trafegam em texto claro por essa rede. Dentro de uma VPN como Radmin ou Hamachi isso é aceitável, porque a própria VPN já é criptografada. Na internet aberta, não é.");
+    }
+    // Recarrega: a sessao guardada, o historico e as chaves sao de outro
+    // servidor, e reaproveitar qualquer um deles daria erro confuso.
+    trocarDeServidor();
+  };
+
+  byId("servidor-padrao").onclick = () => {
+    servidor.esquecer();
+    trocarDeServidor();
+  };
+
+  pintar();
+}
+
+/// Recarrega a janela depois de mudar de servidor, deixando para tras a sessao
+/// do anterior. A identidade de conversas fica: ela e por usuario, e voltar ao
+/// servidor de origem tem de reencontrar o historico.
+function trocarDeServidor() {
+  try { localStorage.removeItem("naoconcordo.session"); } catch { /* nada a fazer */ }
+  location.reload();
+}
+
 loginForm.addEventListener("submit", async event => {
   event.preventDefault();
   const submit = byId<HTMLButtonElement>("auth-submit");
@@ -263,11 +360,18 @@ loginForm.addEventListener("submit", async event => {
         })
       });
       saveSession(auth);
+      // Conta nova ja nasce com os dois embrulhos: e o unico momento, fora da
+      // recuperacao, em que o codigo esta a vista.
+      chaveDeSenha = await chaveDoCofre(password, challenge.passwordSalt, challenge.passwordIterations);
+      chaveDeRecuperacao = await chaveDoCofre(recoveryCode, challenge.recoverySalt, challenge.passwordIterations);
       downloadRecoveryCode(username, recoveryCode);
     } else {
       if (!challenge.accountExists) throw new Error("Usuario nao cadastrado. Use Criar conta.");
       const proof = await signProof(verifier, challenge.nonce, username);
       saveSession(await api<AuthSession>("/api/auth/login", { method: "POST", body: JSON.stringify({ username, nonce: challenge.nonce, proof }) }));
+      // Derivada aqui, enquanto a senha esta em maos; e o que abre as conversas
+      // nesta maquina pela primeira vez.
+      chaveDeSenha = await chaveDoCofre(password, challenge.passwordSalt, challenge.passwordIterations);
     }
     byId<HTMLInputElement>("password").value = "";
     byId<HTMLInputElement>("invite").value = "";
@@ -319,10 +423,17 @@ recoveryForm.addEventListener("submit", async event => {
     const verifier = await deriveVerifier(password, challenge.passwordSalt, challenge.passwordIterations);
     const nextRecoveryCode = newRecoveryCode();
     const nextRecoveryVerifier = await deriveVerifier(nextRecoveryCode, challenge.recoverySalt, challenge.passwordIterations);
+    // O codigo **antigo** e o que abre o cofre atual; os novos sao para
+    // reembrulhar depois. Derivar antes de trocar a senha evita perder o unico
+    // caminho de volta para o historico.
+    const chaveAntiga = await chaveDoCofre(recoveryCode, challenge.recoverySalt, challenge.passwordIterations);
     saveSession(await api<AuthSession>("/api/auth/recover", {
       method: "POST",
       body: JSON.stringify({ username, nonce: challenge.nonce, recoveryProof, verifier: bytesToBase64Url(verifier), recoveryVerifier: bytesToBase64Url(nextRecoveryVerifier) })
     }));
+    chaveDeSenha = await chaveDoCofre(password, challenge.passwordSalt, challenge.passwordIterations);
+    chaveDeRecuperacao = await chaveDoCofre(nextRecoveryCode, challenge.recoverySalt, challenge.passwordIterations);
+    await recuperarCofre(username, chaveAntiga);
     recoveryDialog.close();
     recoveryForm.reset();
     downloadRecoveryCode(username, nextRecoveryCode);
@@ -367,6 +478,9 @@ function leaveApp() {
   chat?.close(); chat = null; room?.disconnect(); room = null; restaurarControles(); stage.replaceChildren(); saveSession(null);
   friends = []; incoming = []; outgoing = []; friendKeys.clear(); directHistory.clear();
   blockedFriends.clear(); unreadFriends.clear(); identity = null; mode = "room"; currentFriend = "";
+  // As chaves do cofre morrem com a sessao: sem isto a proxima pessoa a entrar
+  // neste computador abriria o cofre da anterior.
+  chaveDeSenha = null; chaveDeRecuperacao = null;
   setMode(); renderFriends();
   closeMiniProfile();
   appView.classList.add("hidden"); loginView.classList.remove("hidden");
@@ -739,10 +853,96 @@ byId("add-voice-room").addEventListener("click", () => void createChannel("voice
 
 // ---------------------------------------------------------------- amizades
 
-/// Publica a chave publica deste aparelho. A privada fica so no localStorage.
+/// Busca o cofre da conta. `null` quer dizer que ainda nao existe um.
+async function lerCofre(): Promise<Cofre | null> {
+  try { return await api<Cofre>("/api/cofre"); }
+  catch { return null; }
+}
+
+/// Sobe a identidade cifrada. O embrulho pelo codigo so vai quando o codigo
+/// passou pelas maos do usuario nesta sessao.
+async function subirCofre(quem: Identity) {
+  if (!chaveDeSenha) return;
+  try {
+    const porSenha = await fecharCofre(quem, chaveDeSenha);
+    // Sem o codigo em maos, o embrulho de recuperacao repete o da senha apenas
+    // como espaco reservado? Nao: seria mentir sobre o que o codigo abre. Sem
+    // ele, o cofre sobe so com o embrulho da senha.
+    const corpo: Cofre = { porSenha };
+    if (chaveDeRecuperacao) corpo.porRecuperacao = await fecharCofre(quem, chaveDeRecuperacao);
+    await api("/api/cofre", { method: "PUT", body: JSON.stringify(corpo) });
+  } catch { showToast("Não foi possível guardar suas conversas na conta."); }
+}
+
+/// Depois de recuperar a conta: abre o cofre com o codigo antigo e o reembrulha
+/// com a senha e o codigo novos.
+async function recuperarCofre(username: string, chaveAntiga: CryptoKey) {
+  const cofre = await lerCofre();
+  if (!cofre?.porRecuperacao) {
+    // Conta que migrou durante um login comum nunca chegou a guardar o embrulho
+    // do codigo. Nao ha o que abrir, e dizer isso agora e melhor do que a pessoa
+    // descobrir sozinha que as conversas viraram texto ilegivel.
+    await showNotice("Conta recuperada", "As conversas privadas anteriores não podem ser abertas com o código de recuperação, porque esta conta é anterior a essa proteção. As novas conversas já ficam guardadas na conta.");
+    return;
+  }
+  try {
+    const recuperada = await abrirCofre(cofre.porRecuperacao, chaveAntiga);
+    guardarIdentidadeLocal(username, recuperada);
+    await subirCofre(recuperada);
+  } catch {
+    await showNotice("Conta recuperada", "A senha foi trocada, mas as conversas privadas antigas não puderam ser abertas com este código.");
+  }
+}
+
+/// Traz a identidade da conta e publica a chave publica.
+///
+/// A identidade segue a **conta**: ela vem do cofre no servidor, aberto pela
+/// chave derivada da senha. Antes disto ela nascia neste computador, e entrar de
+/// outra maquina gerava uma identidade nova — o que sobrescrevia a chave publica
+/// e deixava todo o historico como "(nao foi possivel decifrar)".
 async function ensureIdentity() {
   if (!session) return;
-  identity = await loadIdentity(session.username);
+  const username = session.username;
+  const cofre = await lerCofre();
+
+  // **So publicamos a chave quando sabemos que ela e a da conta.**
+  //
+  // Havendo cofre que nao conseguimos abrir, a identidade local pode ser outra —
+  // mais antiga, ou de antes de a conta ganhar cofre. Publicar a chave dela
+  // sobrescreveria a chave da conta no servidor, e o estrago sai daqui: os
+  // amigos veem "identidade mudou" e passam a cifrar para uma chave que o cofre
+  // nao le. A conversa quebra para os dois lados, e nenhum deles fez nada.
+  let ehDaConta = false;
+
+  if (cofre && chaveDeSenha) {
+    try {
+      const daConta = await abrirCofre(cofre.porSenha, chaveDeSenha);
+      guardarIdentidadeLocal(username, daConta);
+      identity = daConta;
+      ehDaConta = true;
+    } catch {
+      // Cofre fechado por outra senha: acontece quando a senha foi trocada em
+      // outro aparelho. A copia local ainda serve para ler o que ja estava
+      // aqui, mas ela nao fala pela conta.
+      identity = identidadeLocal(username);
+      showToast("Suas conversas antigas estão guardadas com outra senha. Entre com a senha atual para abri-las.");
+    }
+  } else if (cofre) {
+    // Sessao restaurada do disco: nao ha senha em maos para abrir o cofre. A
+    // copia local resolve o dia a dia; so a primeira entrada numa maquina nova
+    // precisa mesmo da senha. A chave da conta ja esta publicada de antes, e
+    // republicar sem conferir e justamente o risco descrito acima.
+    identity = identidadeLocal(username);
+    if (!identity) showToast("Entre com sua senha para abrir suas conversas privadas neste computador.");
+  } else {
+    // Conta sem cofre: ou e nova, ou e anterior a esta mudanca. Nos dois casos a
+    // identidade deste aparelho passa a ser a da conta.
+    identity = await loadIdentity(username);
+    await subirCofre(identity);
+    ehDaConta = true;
+  }
+
+  if (!identity || !ehDaConta) return;
   try { await api<IdentityKey>("/api/keys", { method: "PUT", body: JSON.stringify({ publicKey: identity.publicKey }) }); }
   catch { showToast("Nao foi possivel publicar sua chave."); }
 }
@@ -758,7 +958,13 @@ function renderFriends() {
   friendListEl.replaceChildren(...friends.map(name => {
     const button = document.createElement("button");
     button.className = "channel" + (mode === "dm" && key(name) === key(currentFriend) ? " active" : "");
-    button.append(icon("at", "room-dot"), document.createTextNode(name));
+    // A foto no lugar do "@": a lista de amigos e de pessoas, e um arroba
+    // igual em todas as linhas nao distingue ninguem. Reconhecer o amigo pela
+    // cara e mais rapido do que ler a lista inteira.
+    const foto = document.createElement("div");
+    foto.className = "avatar avatar-canal";
+    paintAvatar(foto, name);
+    button.append(foto, document.createTextNode(getDisplayName(name)));
     if (unreadFriends.has(key(name))) { const dot = document.createElement("span"); dot.className = "unread-dot"; button.append(dot); }
     button.onclick = () => openDirect(name);
     return button;
@@ -1038,6 +1244,10 @@ function setMode() {
   dmForm.classList.toggle("hidden", !isDm);
   byId("fingerprint-button").classList.toggle("hidden", !isDm);
   byId("stage").classList.toggle("hidden", isDm || !byId("stage").children.length);
+  // A lista da direita mostra quem esta no servidor. Na area de amigos nao ha
+  // servidor, e ela repetia a lista da esquerda; sem ela a conversa ganha a
+  // largura de volta. Dentro de um servidor continua onde estava.
+  byId("app-view").classList.toggle("sem-pessoas", view === "home");
 }
 byId("fingerprint-button").addEventListener("click", async () => {
   if (!identity || !currentFriend) return;
@@ -2258,6 +2468,8 @@ let micAntesDoSurdo = false;
 audioButton.onclick = async () => {
   audioEnabled = !audioEnabled;
   refreshAudioMuting();
+  // Quem esta reforcado sai pelo ganho, e ganho nao escuta `muted` de elemento.
+  applyAllVolumes();
   audioButton.classList.toggle("active", !audioEnabled);
   setIcon(audioButton, audioEnabled ? "audio" : "audio-off");
   announceDeafened();
@@ -4434,6 +4646,10 @@ document.addEventListener("fullscreenchange", () => {
 });
 function detachTrack(sid?: string) {
   if (!sid) return;
+  // Faixa que saiu nao esta mais reforcada. O registro precisa acompanhar: se
+  // a pessoa voltasse com um `sid` reaproveitado, `rotearReforco` acharia que o
+  // desvio ja estava montado e nao o refaria.
+  reforcadas.delete(sid);
   document.getElementById("track-" + sid)?.remove();
   document.getElementById("audio-" + sid)?.remove();
   // `syncStagePlacement` reconcilia o modo grande e a visibilidade do palco:
@@ -4583,6 +4799,16 @@ function mencionaVoce(texto: string): boolean {
 ///
 /// `window.open` mandava para uma janela do WebView2 sem controle nenhum: sem
 /// fechar com Esc e fora da janela do aplicativo.
+/// Visualizador de imagem com zoom de verdade.
+///
+/// Antes daqui a imagem so era encolhida para caber na tela (`max-width` e
+/// `max-height` a 100%). Numa foto grande isso mostra tudo e nao deixa ler
+/// nada: nao havia como chegar perto, so como ver o conjunto pequeno.
+///
+/// Abre no tamanho que cabe. Clicar alterna entre esse tamanho e o tamanho real
+/// da imagem, indo para o ponto que foi clicado — quem clica num detalhe quer
+/// ver aquele detalhe, e nao o centro da foto. A roda aproxima em volta do
+/// cursor, e com a imagem maior que a tela arrastar move.
 function abrirImagem(url: string, alt = "") {
   const fundo = document.createElement("div");
   fundo.className = "lightbox";
@@ -4590,6 +4816,113 @@ function abrirImagem(url: string, alt = "") {
   const img = document.createElement("img");
   img.src = url;
   img.alt = alt;
+  img.className = "lightbox-img";
+  img.draggable = false;
+
+  // `cabe` e a escala que faz a imagem inteira caber; nunca passa de 1, para uma
+  // foto pequena nao abrir esticada e borrada.
+  let cabe = 1, escala = 1, x = 0, y = 0;
+  let arrastando = false, moveu = false, ultimoX = 0, ultimoY = 0;
+  const MAX = 8;
+
+  const moldura = () => ({ largura: fundo.clientWidth, altura: fundo.clientHeight });
+
+  /// Mantem a imagem dentro da vista. Menor que a moldura, ela fica centrada;
+  /// maior, ela pode correr, mas nao a ponto de deixar tarja de um lado.
+  const enquadrar = () => {
+    const { largura, altura } = moldura();
+    const l = img.naturalWidth * escala, a = img.naturalHeight * escala;
+    x = l <= largura ? (largura - l) / 2 : Math.min(0, Math.max(largura - l, x));
+    y = a <= altura ? (altura - a) / 2 : Math.min(0, Math.max(altura - a, y));
+  };
+
+  const desenhar = () => {
+    enquadrar();
+    img.style.width = img.naturalWidth * escala + "px";
+    img.style.height = img.naturalHeight * escala + "px";
+    img.style.transform = "translate(" + Math.round(x) + "px," + Math.round(y) + "px)";
+    // O cursor conta o que o proximo clique faz.
+    const maior = escala > cabe + 0.001;
+    fundo.dataset.perto = maior ? "1" : "";
+    img.style.cursor = maior ? (arrastando ? "grabbing" : "grab") : "zoom-in";
+  };
+
+  /// Troca a escala mantendo parado o ponto sob o cursor. Sem isto, aproximar
+  /// joga para o canto o pedaco que a pessoa estava olhando.
+  const escalarEm = (nova: number, pontoX: number, pontoY: number) => {
+    const limitada = Math.min(MAX, Math.max(cabe, nova));
+    if (limitada === escala) return;
+    const caixa = fundo.getBoundingClientRect();
+    const alvoX = pontoX - caixa.left, alvoY = pontoY - caixa.top;
+    x = alvoX - (alvoX - x) * (limitada / escala);
+    y = alvoY - (alvoY - y) * (limitada / escala);
+    escala = limitada;
+    desenhar();
+  };
+
+  /// Primeira medida. Precisa da imagem carregada **e** do visualizador ja na
+  /// pagina: fora do documento a moldura mede zero, e a escala sairia zerada.
+  const medir = () => {
+    if (!img.naturalWidth || !fundo.isConnected) return;
+    const { largura, altura } = moldura();
+    cabe = Math.min(1, largura / img.naturalWidth, altura / img.naturalHeight);
+    escala = cabe;
+    desenhar();
+  };
+  img.onload = medir;
+
+  img.onclick = evento => {
+    evento.stopPropagation();
+    // Arrastar termina num clique; sem isto, mover a imagem mudaria o zoom.
+    if (moveu) { moveu = false; return; }
+    // Alterna entre caber e o tamanho real. Se a imagem ja cabe inteira em
+    // tamanho real, o segundo passo e aproximar de fato, senao o clique nao
+    // faria nada.
+    const perto = escala > cabe + 0.001;
+    escalarEm(perto ? cabe : Math.max(1, cabe * 2.5), evento.clientX, evento.clientY);
+  };
+
+  img.onwheel = evento => {
+    evento.preventDefault();
+    escalarEm(escala * (evento.deltaY < 0 ? 1.15 : 1 / 1.15), evento.clientX, evento.clientY);
+  };
+
+  img.onpointerdown = evento => {
+    if (escala <= cabe + 0.001) return;
+    arrastando = true; moveu = false;
+    ultimoX = evento.clientX; ultimoY = evento.clientY;
+    img.setPointerCapture(evento.pointerId);
+    desenhar();
+  };
+  img.onpointermove = evento => {
+    if (!arrastando) return;
+    const dx = evento.clientX - ultimoX, dy = evento.clientY - ultimoY;
+    // Um tremor de dois pixels ainda e um clique, e nao um arrasto.
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) moveu = true;
+    x += dx; y += dy;
+    ultimoX = evento.clientX; ultimoY = evento.clientY;
+    desenhar();
+  };
+  const soltar = (evento: PointerEvent) => {
+    if (!arrastando) return;
+    arrastando = false;
+    img.releasePointerCapture(evento.pointerId);
+    desenhar();
+  };
+  img.onpointerup = soltar;
+  img.onpointercancel = soltar;
+
+  // Mudar o tamanho da janela reaproveita a imagem: recalcula o que cabe e, se
+  // a pessoa nao tinha aproximado, acompanha o novo tamanho.
+  const aoRedimensionar = () => {
+    if (!img.naturalWidth) return;
+    const { largura, altura } = moldura();
+    const novoCabe = Math.min(1, largura / img.naturalWidth, altura / img.naturalHeight);
+    if (escala <= cabe + 0.001) escala = novoCabe;
+    cabe = novoCabe;
+    desenhar();
+  };
+  window.addEventListener("resize", aoRedimensionar);
 
   const fechar = document.createElement("button");
   fechar.type = "button";
@@ -4600,6 +4933,7 @@ function abrirImagem(url: string, alt = "") {
   const sair = () => {
     fundo.remove();
     document.removeEventListener("keydown", tecla);
+    window.removeEventListener("resize", aoRedimensionar);
   };
   const tecla = (evento: KeyboardEvent) => { if (evento.key === "Escape") sair(); };
 
@@ -4612,6 +4946,10 @@ function abrirImagem(url: string, alt = "") {
   // Em tela cheia so o elemento em tela cheia e desenhado, entao o visualizador
   // precisa entrar dentro dele.
   (document.fullscreenElement || document.body).append(fundo);
+  // Imagem que ja estava em cache carrega antes de `onload` ser ligado, e nesse
+  // caso o evento nunca vem. Medir aqui cobre esse caso e tambem o inverso: se a
+  // imagem carregou antes do `append`, agora a moldura ja tem tamanho.
+  medir();
 }
 
 /// Mostra a midia dos links, sem passar pelo servidor.
@@ -5026,16 +5364,81 @@ function readVolumes(): Record<string, VolumePair> {
   try { return JSON.parse(localStorage.getItem(VOLUME_KEY) || "{}") as Record<string, VolumePair>; }
   catch { return {}; }
 }
-/// O slider ia ate 200%, mas `HTMLMediaElement.volume` **lanca excecao** acima
-/// de 1 ("The volume provided (2) is outside the range [0, 1]"). O reforco
-/// nunca funcionou: so quebrava. E quebrava caro, porque o `setVolume` e
-/// chamado dentro do `attachTrack` e na entrada da chamada — a excecao subia
-/// ate o `connect` e virava "erro de conexao".
+/// Ate onde o volume de uma pessoa pode ser empurrado. Acima de 100% o audio
+/// dela deixa de sair pelo elemento e passa por um `GainNode`, que nao tem o
+/// teto de 1 do `HTMLMediaElement.volume`.
+const REFORCO_MAX = 2;
+const limiteVolume = (valor: number) => Math.min(REFORCO_MAX, Math.max(0, Number.isFinite(valor) ? valor : 1));
+
+/// Reforcar quem fala baixo e **de quem escuta**, e vale so para ele.
 ///
-/// Volume acima de 1 exigiria mixagem por WebAudio no LiveKit, que muda o
-/// caminho do audio inteiro. Enquanto isso nao existe, o limite e 100%, e os
-/// valores antigos ja gravados sao trazidos para dentro da faixa.
-const limiteVolume = (valor: number) => Math.min(1, Math.max(0, Number.isFinite(valor) ? valor : 1));
+/// A saida anterior era a pessoa de microfone baixo aumentar o proprio ganho,
+/// e isso empurra o volume dela para a sala inteira: quem ja a ouvia bem passa
+/// a levar grito. Aqui cada um regula cada um, no proprio computador.
+///
+/// `HTMLMediaElement.volume` **lanca excecao** acima de 1 ("The volume provided
+/// (2) is outside the range [0, 1]"), e a excecao subia ate o `connect` e
+/// virava "erro de conexao". O caminho que aceita mais de 1 e o WebAudio: com
+/// um `AudioContext` na faixa, o `setVolume` do livekit escreve num `GainNode`
+/// em vez do elemento.
+///
+/// **So a faixa reforcada muda de caminho.** Ligar a mixagem por WebAudio na
+/// sala toda passaria o audio de todos por um lugar novo — e contexto suspenso
+/// ali significa chamada muda, que e exatamente o defeito da 0.7.21. Quem esta
+/// em 100% continua saindo pelo elemento, como sempre saiu.
+let contextoDeEscuta: AudioContext | null = null;
+/// Faixas que estao no caminho reforcado agora. Serve para desfazer o desvio
+/// quando o volume volta para 100% ou menos.
+const reforcadas = new Set<string>();
+
+/// Poe (ou tira) uma faixa no caminho do WebAudio. Devolve se o reforco esta
+/// valendo; `false` quer dizer que o volume tem de ser tratado como 100%.
+function rotearReforco(faixa: RemoteAudioTrack, querReforco: boolean): boolean {
+  // Faixa ainda sem `sid` nao foi anexada: nao ha elemento para calar nem como
+  // registrar o desvio. Ela volta por aqui quando `applyAllVolumes` rodar.
+  const sid = faixa.sid;
+  if (!sid) return false;
+  // `setAudioContext` e marcado como interno no livekit; e a unica costura que
+  // desvia **uma** faixa sem mexer nas outras.
+  const interna = faixa as unknown as { setAudioContext(ctx: AudioContext | undefined): void };
+  const elementos = () => document.querySelectorAll<HTMLAudioElement>("#audio-" + CSS.escape(sid));
+
+  if (!querReforco) {
+    if (!reforcadas.has(sid)) return false;
+    reforcadas.delete(sid);
+    try { interna.setAudioContext(undefined); } catch (erro) { console.warn("[volume] saida do reforco", erro); }
+    for (const el of elementos()) { delete el.dataset.reforcado; el.volume = 1; }
+    refreshAudioMuting();
+    return false;
+  }
+
+  try {
+    if (!contextoDeEscuta) contextoDeEscuta = new AudioContext();
+    // Contexto suspenso nao processa: sem isto a pessoa reforcada ficaria muda.
+    if (contextoDeEscuta.state === "suspended") void contextoDeEscuta.resume();
+    interna.setAudioContext(contextoDeEscuta);
+    reforcadas.add(sid);
+    // O som agora sai pelo contexto; deixar o elemento tocando junto dobraria a
+    // voz. `refreshAudioMuting` respeita a marca e nao desfaz isto.
+    for (const el of elementos()) { el.dataset.reforcado = "1"; el.volume = 0; el.muted = true; }
+    return true;
+  } catch (erro) {
+    // Falhando o desvio, a pessoa continua sendo ouvida no volume normal —
+    // nunca em silencio.
+    reforcadas.delete(sid);
+    console.warn("[volume] reforco indisponivel", erro);
+    return false;
+  }
+}
+
+/// As unicas fontes com audio, que sao tambem as unicas que `setVolume` aceita.
+type FonteDeAudio = Track.Source.Microphone | Track.Source.ScreenShareAudio;
+
+/// A faixa de audio de uma fonte de um participante, se ela estiver chegando.
+function faixaDeAudio(participante: RemoteParticipant, fonte: FonteDeAudio): RemoteAudioTrack | undefined {
+  const faixa = participante.getTrackPublication(fonte)?.track;
+  return faixa && faixa.kind === Track.Kind.Audio ? (faixa as RemoteAudioTrack) : undefined;
+}
 function volumeOf(name: string): VolumePair {
   const bruto = readVolumes()[key(name)] || { mic: 1, screen: 1 };
   return { ...bruto, mic: limiteVolume(bruto.mic), screen: limiteVolume(bruto.screen) };
@@ -5058,6 +5461,9 @@ function saveVolume(name: string, pair: VolumePair) {
 /// ouvida.
 function refreshAudioMuting() {
   for (const el of document.querySelectorAll<HTMLAudioElement>("audio[data-naoconcordo-audio]")) {
+    // Elemento desviado para o WebAudio fica mudo por definicao: o som dele sai
+    // pelo contexto. Escrever `muted = false` aqui traria a voz dobrada.
+    if (el.dataset.reforcado) { el.muted = true; continue; }
     const pair = volumeOf(el.dataset.who || "");
     const silenciado = el.dataset.fonte === "tela" ? pair.mudoTela : pair.mudoVoz;
     el.muted = !audioEnabled || Boolean(silenciado);
@@ -5072,11 +5478,27 @@ function applyVolume(name: string, pair: VolumePair) {
     // Protegido: um volume invalido nao pode derrubar a entrada na chamada,
     // que e por onde essa chamada passa.
     try {
-      participant.setVolume(pair.mudoVoz ? 0 : limiteVolume(pair.mic), Track.Source.Microphone);
-      participant.setVolume(pair.mudoTela ? 0 : limiteVolume(pair.screen), Track.Source.ScreenShareAudio);
+      aplicarFonte(participant, Track.Source.Microphone, limiteVolume(pair.mic), Boolean(pair.mudoVoz));
+      aplicarFonte(participant, Track.Source.ScreenShareAudio, limiteVolume(pair.screen), Boolean(pair.mudoTela));
     } catch (erro) { console.warn("[volume]", erro); }
   }
 }
+/// Regula uma fonte de um participante, desviando para o WebAudio so quando o
+/// pedido passa de 100%.
+function aplicarFonte(participante: RemoteParticipant, fonte: FonteDeAudio, volume: number, silenciado: boolean) {
+  const faixa = faixaDeAudio(participante, fonte);
+  // Sem a faixa ainda nao ha o que rotear; `applyAllVolumes` volta aqui quando
+  // ela chegar.
+  const reforcando = faixa ? rotearReforco(faixa, volume > 1) : false;
+  // Nao tendo conseguido o desvio, o elemento nao aceita mais de 1 — e passar
+  // 2 para ele levantaria excecao no meio da entrada da chamada.
+  const efetivo = reforcando ? volume : Math.min(1, volume);
+  // No caminho reforcado o elemento esta mudo, entao o surdo geral tem de valer
+  // pelo ganho; no caminho normal quem cuida disso e `refreshAudioMuting`.
+  const mudo = silenciado || (reforcando && !audioEnabled);
+  participante.setVolume(mudo ? 0 : efetivo, fonte);
+}
+
 /// Reaplica tudo, usado quando alguem entra ou publica uma faixa nova.
 function applyAllVolumes() {
   if (!room) return;
@@ -5092,7 +5514,9 @@ function volumeRow(name: string, kind: "mic" | "screen", label: string) {
   caption.className = "volume-label";
   caption.textContent = label;
   const slider = document.createElement("input");
-  slider.type = "range"; slider.min = "0"; slider.max = "100"; slider.step = "5";
+  // Ate 200%: e o reforco de quem escuta, para quem fala baixo demais mesmo
+  // com o microfone no talo do outro lado.
+  slider.type = "range"; slider.min = "0"; slider.max = String(REFORCO_MAX * 100); slider.step = "5";
   slider.value = String(Math.round(volumeOf(name)[kind] * 100));
   const value = document.createElement("span");
   value.className = "volume-value";

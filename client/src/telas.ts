@@ -15,7 +15,10 @@ import {
   pickSource, startShare, stopShare, switchShare, codecPreferido, type ShareQuality,
 } from "./screenshare";
 
-const API = import.meta.env.VITE_SERVER_URL || "http://127.0.0.1:3040";
+import * as servidor from "./servidor";
+
+// A janela separada precisa do mesmo servidor que a principal escolheu.
+const API = servidor.endereco();
 type AuthSession = { token: string; username: string; expiresAt: number };
 type LivekitAccess = { token: string; url: string; room: string };
 type Quality = { id: string; label: string; hint: string } & ShareQuality;

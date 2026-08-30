@@ -1,0 +1,86 @@
+/* Mesma paleta do cliente, para os dois parecerem o mesmo produto. */
+:root {
+  --fundo: #0d0d10;
+  --cartao: #16161b;
+  --linha: rgba(255, 255, 255, .07);
+  --texto: #e8e8ee;
+  --apagado: #8b8b96;
+  --destaque: #ff7a45;
+  --verde: #54d18b;
+  --vermelho: #e55;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--fundo);
+  color: var(--texto);
+  font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+}
+h2 { margin: 0 0 4px; font-size: 13px; letter-spacing: .02em; }
+
+.painel { max-width: 660px; margin: 0 auto; padding: 20px 22px 32px; display: grid; gap: 14px; }
+
+.cabecalho { display: flex; align-items: center; justify-content: space-between; padding-bottom: 4px; }
+.cabecalho strong { display: block; font-size: 17px; }
+.cabecalho small { color: var(--apagado); }
+
+.estado { font-size: 10px; text-transform: uppercase; letter-spacing: .09em; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--linha); }
+.estado.ligado { color: var(--verde); border-color: rgba(84, 209, 139, .45); }
+.estado.parcial { color: var(--destaque); border-color: rgba(255, 122, 69, .45); }
+.estado.parado { color: var(--apagado); }
+
+.cartao { background: var(--cartao); border: 1px solid var(--linha); border-radius: 12px; padding: 15px 16px; display: grid; gap: 10px; }
+/* O endereço é o que a pessoa veio buscar; ele se destaca do resto. */
+.cartao.destaque { border-color: rgba(255, 122, 69, .4); background: linear-gradient(160deg, rgba(255, 122, 69, .09), var(--cartao) 60%); }
+
+.rotulo { margin: 0; font-size: 10px; text-transform: uppercase; letter-spacing: .09em; color: var(--apagado); }
+.dica { margin: 0; color: var(--apagado); font-size: 12px; }
+.dica em { color: var(--texto); font-style: normal; }
+
+.linha-endereco { display: flex; gap: 8px; align-items: center; }
+.linha-endereco code { flex: 1; font: 15px/1.4 "Cascadia Mono", Consolas, monospace; color: var(--destaque); overflow-wrap: anywhere; }
+
+label { display: grid; gap: 4px; font-size: 11px; color: var(--apagado); }
+input {
+  width: 100%; padding: 9px 11px; border-radius: 9px;
+  border: 1px solid var(--linha); background: #0c0c0f; color: var(--texto);
+  font: inherit; outline: none;
+}
+input:focus { border-color: rgba(255, 122, 69, .5); }
+.par { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.acoes, .acoes-principais { display: flex; gap: 8px; flex-wrap: wrap; }
+button { font: inherit; border-radius: 9px; cursor: pointer; padding: 9px 15px; border: 1px solid var(--linha); }
+.primario { background: var(--destaque); border-color: var(--destaque); color: #14140f; font-weight: 600; }
+.secundario { background: transparent; color: var(--texto); }
+.secundario:hover { background: #24242a; }
+button:disabled { opacity: .5; cursor: default; }
+.ligacao { border: 0; background: none; color: var(--apagado); padding: 0; font-size: 11px; text-decoration: underline; }
+.ligacao:hover { color: var(--texto); }
+
+.cabecalho-secao { display: flex; align-items: baseline; justify-content: space-between; }
+
+/* Um endereço por cartãozinho, com o nome da placa embaixo: sem isso, uma
+   lista de IPs soltos não diz qual é o da VPN e qual é o do Docker. */
+.enderecos { display: flex; gap: 7px; flex-wrap: wrap; }
+.chip { display: grid; gap: 1px; text-align: left; background: #1d1d23; color: var(--texto); padding: 7px 11px; }
+.chip strong { font: 13px "Cascadia Mono", Consolas, monospace; }
+.chip small { color: var(--apagado); font-size: 10px; }
+.chip.vpn { border-color: rgba(84, 209, 139, .4); }
+.chip.vpn small { color: var(--verde); }
+.chip.ativo { border-color: var(--destaque); background: #26201d; }
+
+.recado { margin: 0; min-height: 17px; font-size: 12px; color: var(--apagado); }
+.recado.ok { color: var(--verde); }
+.recado.ruim { color: var(--vermelho); }
+
+.registro {
+  margin: 0; max-height: 190px; overflow: auto;
+  background: #0a0a0c; border: 1px solid var(--linha); border-radius: 9px;
+  padding: 10px; font: 11px/1.55 "Cascadia Mono", Consolas, monospace;
+  color: #b9b9c2; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+.hidden { display: none !important; }

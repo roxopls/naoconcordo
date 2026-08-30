@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>naoconcordo · servidor</title>
+    <link rel="stylesheet" href="./estilo.css" />
+  </head>
+  <body>
+    <main class="painel">
+      <header class="cabecalho">
+        <div>
+          <strong>naoconcordo</strong>
+          <small>servidor nesta máquina</small>
+        </div>
+        <div id="estado" class="estado parado">desligado</div>
+      </header>
+
+      <!-- O que a pessoa mais precisa: o endereço para passar aos amigos.
+           Fica no topo e some enquanto o servidor está desligado. -->
+      <section id="cartao-endereco" class="cartao destaque hidden">
+        <p class="rotulo">Endereço para os seus amigos</p>
+        <div class="linha-endereco">
+          <code id="endereco-amigos">—</code>
+          <button id="copiar" class="secundario" type="button">Copiar</button>
+        </div>
+        <p class="dica">No aplicativo deles: <em>Usar outro servidor</em>, na tela de entrada.</p>
+      </section>
+
+      <section class="cartao">
+        <div class="acoes-principais">
+          <button id="ligar" class="primario" type="button">Ligar servidor</button>
+          <button id="desligar" class="secundario hidden" type="button">Desligar</button>
+        </div>
+        <p id="recado" class="recado"></p>
+      </section>
+
+      <section class="cartao">
+        <h2>Como os amigos chegam aqui</h2>
+        <p class="dica">
+          Escolha o endereço desta máquina. Estando todos numa VPN como Radmin ou
+          Hamachi, use o endereço dela — é o único caminho que não exige abrir
+          porta no roteador.
+        </p>
+        <div id="lista-enderecos" class="enderecos"></div>
+        <label>Endereço ou domínio
+          <input id="endereco-publico" placeholder="26.31.4.7" autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="par">
+          <label>Porta<input id="porta" type="number" min="1" max="65535" value="3040" /></label>
+          <label>Administrador<input id="admin" placeholder="admin" autocomplete="off" /></label>
+        </div>
+        <div class="acoes">
+          <button id="salvar" class="secundario" type="button">Salvar</button>
+          <button id="firewall" class="secundario" type="button">Liberar no firewall</button>
+        </div>
+      </section>
+
+      <section class="cartao">
+        <h2>Voz, câmera e tela</h2>
+        <p id="livekit-estado" class="dica">Verificando…</p>
+        <button id="baixar-livekit" class="secundario hidden" type="button">Baixar LiveKit</button>
+      </section>
+
+      <section class="cartao">
+        <div class="cabecalho-secao">
+          <h2>Registro</h2>
+          <button id="abrir-pasta" class="ligacao" type="button">Abrir pasta de dados</button>
+        </div>
+        <pre id="registro" class="registro">—</pre>
+      </section>
+
+      <section class="cartao">
+        <h2>Aplicativo dos seus amigos</h2>
+        <p class="dica">
+          Compilar aqui gera um aplicativo que aponta para <em>este</em> servidor
+          e aceita atualização assinada pela <em>sua</em> chave. Quem instalar
+          passa a receber suas atualizações, e não as de mais ninguém.
+        </p>
+        <div class="acoes">
+          <button id="verificar-versao" class="secundario" type="button">Verificar versão</button>
+          <button id="compilar" class="primario hidden" type="button">Gerar aplicativo</button>
+        </div>
+        <p id="build-recado" class="dica"></p>
+      </section>
+    </main>
+    <script type="module" src="./painel.js"></script>
+  </body>
+</html>

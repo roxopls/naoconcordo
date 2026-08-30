@@ -62,6 +62,19 @@
           <button id="auth-mode-toggle" class="auth-switch" type="button">Primeiro acesso? Criar conta</button>
           <button id="forgot-password" class="auth-switch" type="button">Esqueci minha senha</button>
           <p id="login-error" class="error" role="alert"></p>
+          <!-- Fechado por padrao: quem usa o servidor do grupo nunca precisa
+               abrir isto, e um campo de endereco a vista na tela de entrada
+               assusta mais do que ajuda. -->
+          <button id="servidor-abrir" class="auth-switch" type="button">Usar outro servidor</button>
+          <div id="servidor-troca" class="servidor-troca hidden">
+            <label>Endereço do servidor<input id="servidor-endereco" placeholder="meuservidor.com.br:8443" autocomplete="off" spellcheck="false" /></label>
+            <div class="servidor-acoes">
+              <button id="servidor-testar" class="ghost-button" type="button">Testar</button>
+              <button id="servidor-usar" class="primary small" type="button">Usar este</button>
+              <button id="servidor-padrao" class="ghost-button" type="button">Voltar ao padrão</button>
+            </div>
+            <p id="servidor-recado" class="muted small"></p>
+          </div>
         </form>
       </section>
     </div>
@@ -133,11 +146,13 @@
       <main class="main-panel">
         <header class="topbar">
           <div><strong id="room-title"># geral</strong><span id="room-subtitle">Sala de texto e voz</span></div>
-          <button id="update-pill" class="ghost-button update-pill hidden" type="button" title="Novidades desta versão"><svg class="ic ic-sm"><use href="#i-spark"/></svg> <span id="update-pill-text">Atualizado</span></button>
-          <button id="fixadas-abrir" class="ghost-button" type="button" title="Mensagens fixadas neste canal"><svg class="ic ic-sm"><use href="#i-pin"/></svg></button>
-          <button id="busca-abrir" class="ghost-button" type="button" title="Buscar nas mensagens (Ctrl+F)"><svg class="ic ic-sm"><use href="#i-search"/></svg></button>
-          <button id="fingerprint-button" class="ghost-button hidden" title="Conferir identidade"><svg class="ic ic-sm"><use href="#i-lock"/></svg> Identidade</button>
-          <div id="status-pill" class="status-pill">offline</div>
+          <div class="topbar-acoes">
+            <button id="update-pill" class="ghost-button update-pill hidden" type="button" title="Novidades desta versão"><svg class="ic ic-sm"><use href="#i-spark"/></svg> <span id="update-pill-text">Atualizado</span></button>
+            <button id="fixadas-abrir" class="ghost-button so-icone" type="button" title="Mensagens fixadas neste canal"><svg class="ic ic-sm"><use href="#i-pin"/></svg></button>
+            <button id="busca-abrir" class="ghost-button so-icone" type="button" title="Buscar nas mensagens (Ctrl+F)"><svg class="ic ic-sm"><use href="#i-search"/></svg></button>
+            <button id="fingerprint-button" class="ghost-button hidden" title="Conferir identidade"><svg class="ic ic-sm"><use href="#i-lock"/></svg> Identidade</button>
+            <div id="status-pill" class="status-pill">offline</div>
+          </div>
         </header>
         <section id="stage" class="stage hidden"></section>
         <div id="stage-resizer" class="stage-resizer hidden" role="separator" aria-orientation="horizontal" title="Arraste para mudar a altura"><span></span></div>

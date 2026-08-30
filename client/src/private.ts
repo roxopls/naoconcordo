@@ -4,9 +4,17 @@
 // vai a chave publica. Cada par de amigos deriva um segredo por ECDH P-256,
 // passa por HKDF-SHA256 e cifra o conteudo com AES-256-GCM.
 //
+// A chave privada acompanha a **conta**, e nao o computador: ela e guardada no
+// servidor dentro de um cofre cifrado por uma chave derivada da senha, que o
+// servidor nunca ve. Entrando de outra maquina, a pessoa abre o mesmo historico.
+//
 // Limites conhecidos, que a interface comunica ao usuario:
 // - o servidor ainda ve remetente, destinatario, horario e tamanho aproximado;
-// - perder a chave privada local impede ler o historico antigo;
+// - a senha passa a ser a raiz do sigilo: quem souber a senha **e** tiver o
+//   banco do servidor abre o cofre e le o historico. Senha fraca enfraquece as
+//   conversas, o que antes nao acontecia;
+// - o codigo de recuperacao abre o mesmo cofre, e portanto vale tanto quanto a
+//   senha; o arquivo baixado avisa disso;
 // - ECDH estatico protege contra leitura pelo servidor, mas nao oferece o
 //   forward secrecy de um protocolo com ratchet.
 
@@ -16,6 +24,8 @@ const KDF_INFO = "naoconcordo-dm-v1";
 
 export type Identity = { publicKey: string; privateKey: JsonWebKey };
 export type PinCheck = { status: "novo" | "conhecido" | "mudou"; pinned?: string };
+/// A identidade cifrada como sai daqui para o servidor.
+export type Embrulho = { ciphertext: string; nonce: string };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -131,4 +141,66 @@ export function dropPin(owner: string, friend: string) {
 function readPins(owner: string): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(PIN_PREFIX + owner.toLowerCase()) || "{}") as Record<string, string>; }
   catch { return {}; }
+}
+
+// --------------------------------------------------------------- o cofre
+//
+// O que viaja para o servidor e a identidade cifrada. A chave que abre nasce da
+// senha (ou do codigo de recuperacao) aqui no aparelho.
+
+/// Prefixo que separa a chave do cofre do verificador de login.
+///
+/// **Isto e o que impede o servidor de abrir o cofre.** O verificador que ele
+/// guarda sai do mesmo PBKDF2, sobre a mesma senha, com o mesmo numero de
+/// voltas; sem um sal diferente as duas derivacoes dariam o mesmo material, e o
+/// que o servidor ja tem em maos abriria tudo.
+const COFRE_SAL = "naoconcordo-cofre-v1:";
+
+/// A chave que abre o cofre, derivada de um segredo que so o usuario tem.
+///
+/// `sal` e `voltas` sao os mesmos que o servidor manda para o login — o que
+/// muda e o prefixo acima.
+export async function chaveDoCofre(segredo: string, sal: string, voltas: number) {
+  const material = await crypto.subtle.importKey("raw", encoder.encode(segredo), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt: encoder.encode(COFRE_SAL + sal), iterations: voltas, hash: "SHA-256" },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/// Fecha a identidade no cofre.
+export async function fecharCofre(identity: Identity, chave: CryptoKey): Promise<Embrulho> {
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const claro = encoder.encode(JSON.stringify(identity));
+  const cifrado = await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce as BufferSource }, chave, claro as BufferSource);
+  return { ciphertext: toBase64Url(new Uint8Array(cifrado)), nonce: toBase64Url(nonce) };
+}
+
+/// Abre o cofre. Lanca se a chave estiver errada — senha trocada noutro
+/// aparelho, por exemplo — e quem chama decide o que dizer.
+export async function abrirCofre(embrulho: Embrulho, chave: CryptoKey): Promise<Identity> {
+  const claro = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: fromBase64Url(embrulho.nonce) as BufferSource },
+    chave,
+    fromBase64Url(embrulho.ciphertext) as BufferSource,
+  );
+  return JSON.parse(decoder.decode(claro)) as Identity;
+}
+
+/// Grava no aparelho a identidade que veio do cofre, para as proximas aberturas
+/// nao dependerem de ter a senha em maos — a sessao salva entra sem digitar.
+export function guardarIdentidadeLocal(username: string, identity: Identity) {
+  localStorage.setItem(IDENTITY_PREFIX + username.toLowerCase(), JSON.stringify(identity));
+}
+
+/// A identidade deste aparelho, se houver. Diferente de `loadIdentity`, **nao
+/// cria** uma nova: quem esta decidindo entre cofre e aparelho precisa saber que
+/// aqui nao havia nada, em vez de receber uma identidade recem-inventada.
+export function identidadeLocal(username: string): Identity | null {
+  const saved = localStorage.getItem(IDENTITY_PREFIX + username.toLowerCase());
+  if (!saved) return null;
+  try { return JSON.parse(saved) as Identity; } catch { return null; }
 }

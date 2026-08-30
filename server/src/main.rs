@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::{fs, sync::{RwLock, broadcast}};
 use axum::extract::DefaultBodyLimit;
-use tower_http::{cors::{Any, CorsLayer}, limit::RequestBodyLimitLayer, trace::TraceLayer};
+use tower_http::{cors::{Any, CorsLayer}, limit::RequestBodyLimitLayer, services::ServeDir, trace::TraceLayer};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -53,6 +53,9 @@ struct AppState {
     voice: Arc<RwLock<HashMap<String, Vec<String>>>>,
     files: Arc<RwLock<HashMap<String, StoredFile>>>,
     keys: Arc<RwLock<HashMap<String, IdentityKey>>>,
+    // A identidade privada de cada conta, cifrada pelo proprio dono. O servidor
+    // guarda e devolve; abrir, nao abre.
+    cofres: Arc<RwLock<HashMap<String, Cofre>>>,
     friendships: Arc<RwLock<Vec<Friendship>>>,
     envelopes: Arc<RwLock<Vec<Envelope>>>,
     events: broadcast::Sender<Broadcast>,
@@ -195,6 +198,31 @@ struct StoredFile {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IdentityKey { username: String, public_key: String, updated_at: DateTime<Utc> }
+
+/// A chave privada de conversas de uma conta, cifrada no cliente.
+///
+/// Fica aqui para que as conversas sigam a **conta**, e nao o computador: antes
+/// disso a chave nascia no `localStorage` e entrar de outra maquina significava
+/// identidade nova e historico ilegivel.
+///
+/// **O servidor nao tem como abrir isto.** A chave que abre e derivada da senha
+/// (ou do codigo de recuperacao) com um sal proprio, diferente do que gera o
+/// verificador de login guardado aqui. Guardar os dois embrulhos do mesmo
+/// conteudo e o que faz o codigo de recuperacao devolver tambem o historico.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Cofre {
+    username: String,
+    por_senha: Embrulho,
+    /// Ausente nas contas que migraram durante um login comum: ali a senha
+    /// estava em maos, o codigo de recuperacao nao.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    por_recuperacao: Option<Embrulho>,
+    updated_at: DateTime<Utc>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Embrulho { ciphertext: String, nonce: String }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -349,6 +377,7 @@ struct CustomizeServerInput {
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")]
 struct LivekitInput { room_id: String, #[serde(default)] viewer: bool, #[serde(default)] screen: bool }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")] struct PublicKeyInput { public_key: String }
+#[derive(Deserialize)] #[serde(rename_all = "camelCase")] struct CofreInput { por_senha: Embrulho, por_recuperacao: Option<Embrulho> }
 #[derive(Deserialize)] struct SearchQuery { q: Option<String> }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")] struct DirectMessageInput { to: String, ciphertext: String, nonce: String, #[serde(default)] attachments: Vec<String>, #[serde(default)] reply_to: Option<Uuid> }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")] struct EditDirectInput { ciphertext: String, nonce: String }
@@ -449,12 +478,22 @@ async fn main() {
         voice: Default::default(),
         files: Arc::new(RwLock::new(load_json(&config.data_dir, "files.json").await)),
         keys: Arc::new(RwLock::new(load_json(&config.data_dir, "keys.json").await)),
+        cofres: Arc::new(RwLock::new(load_json(&config.data_dir, "cofres.json").await)),
         friendships: Arc::new(RwLock::new(load_json(&config.data_dir, "friends.json").await)),
         envelopes: Arc::new(RwLock::new(load_envelopes(&config.data_dir).await)),
         config, auth_key, sessions: Default::default(), challenges: Default::default(), events,
     };
     let cors = CorsLayer::new().allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS]).allow_headers(Any);
+    // Onde ficam os instaladores e o manifesto que os clientes consultam. Fica
+    // ao lado dos dados quando ninguem escolhe outro lugar; a pasta e criada
+    // vazia para o `ServeDir` nao responder erro de caminho inexistente.
+    let updates_dir = env::var("UPDATES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| state.config.data_dir.join("updates"));
+    if let Err(erro) = tokio::fs::create_dir_all(&updates_dir).await {
+        eprintln!("nao foi possivel criar {}: {erro}", updates_dir.display());
+    }
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/auth/challenge", post(auth_challenge))
@@ -487,6 +526,7 @@ async fn main() {
         .route("/api/servers/{id}/customize", put(customize_server))
         .route("/api/servers/{id}/member-profile", put(update_server_member_profile))
         .route("/api/keys", put(publish_key))
+        .route("/api/cofre", get(ler_cofre).put(guardar_cofre))
         .route("/api/keys/{username}", get(get_key))
         .route("/api/users/search", get(search_users))
         .route("/api/friends", get(list_friends))
@@ -503,11 +543,23 @@ async fn main() {
         // maior levava 413, que atraves do proxy chega no navegador como
         // "Failed to fetch". O app prometia 50 MB desde sempre e nunca
         // entregou.
+        // Os arquivos de atualizacao dos clientes.
+        //
+        // Em Linux quem serve isto e o Caddy. No Windows, onde quem hospeda usa
+        // o painel e nao tem proxy nenhum na frente, o proprio servidor entrega
+        // — senao nao haveria como o dono distribuir atualizacao para os amigos
+        // dele sem montar um segundo servidor web.
+        .nest_service("/updates", ServeDir::new(updates_dir))
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(MAX_UPLOAD + 64 * 1024)).layer(cors)
         .layer(TraceLayer::new_for_http()).with_state(state);
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3040").await.expect("porta 3040 indisponivel");
-    println!("naoconcordo ouvindo em http://0.0.0.0:3040");
+    // A porta vem do ambiente para o painel de quem hospeda poder escolher: em
+    // casa a 3040 pode ja estar tomada, e ate agora nao havia como desviar sem
+    // recompilar. Sem a variavel, continua na 3040 de sempre.
+    let porta: u16 = env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(3040);
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", porta)).await
+        .unwrap_or_else(|erro| panic!("porta {porta} indisponivel: {erro}"));
+    println!("naoconcordo ouvindo em http://0.0.0.0:{porta}");
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.expect("servidor encerrou");
 }
 
@@ -1284,6 +1336,44 @@ async fn publish_key(State(state): State<AppState>, headers: HeaderMap, Json(bod
     persist_json(&state.config.data_dir, "keys.json", &*keys).await;
     Json(entry).into_response()
 }
+/// Devolve o cofre do proprio usuario. **So o dono**: nao ha caminho aqui para
+/// pedir o de outra pessoa, nem por vinculo de amizade. Um cofre alheio nas
+/// maos de alguem vira ataque de forca bruta contra a senha dela, sem limite de
+/// tentativas e sem deixar rastro.
+async fn ler_cofre(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some((_, session)) = authenticated(&state, &headers).await else { return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."); };
+    match state.cofres.read().await.get(&profile_key(&session.username)) {
+        Some(cofre) => Json(cofre.clone()).into_response(),
+        // Conta antiga, de antes do cofre: o cliente sobe o dela na entrada.
+        None => error(StatusCode::NOT_FOUND, "Esta conta ainda nao tem cofre."),
+    }
+}
+
+/// Guarda o cofre do proprio usuario, substituindo o anterior.
+///
+/// Sobrescrever e o comportamento certo: quem troca de senha reembrulha a mesma
+/// identidade, e quem recupera a conta reembrulha com o codigo novo.
+async fn guardar_cofre(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<CofreInput>) -> Response {
+    let Some((_, session)) = authenticated(&state, &headers).await else { return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."); };
+    // A identidade cifrada e um JSON com a chave JWK dentro; 4 KB sobra e ainda
+    // impede o cofre de virar deposito de arquivo.
+    for embrulho in [Some(&body.por_senha), body.por_recuperacao.as_ref()].into_iter().flatten() {
+        if !valid_b64(&embrulho.ciphertext, 4096) || !valid_b64(&embrulho.nonce, 16) {
+            return error(StatusCode::BAD_REQUEST, "Cofre invalido.");
+        }
+    }
+    let cofre = Cofre {
+        username: session.username.clone(),
+        por_senha: body.por_senha,
+        por_recuperacao: body.por_recuperacao,
+        updated_at: Utc::now(),
+    };
+    let mut cofres = state.cofres.write().await;
+    cofres.insert(profile_key(&session.username), cofre.clone());
+    persist_json(&state.config.data_dir, "cofres.json", &*cofres).await;
+    Json(cofre).into_response()
+}
+
 async fn get_key(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(username): axum::extract::Path<String>) -> Response {
     let Some((_, session)) = authenticated(&state, &headers).await else { return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."); };
     let target = normalize_name(&username);
