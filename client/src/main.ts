@@ -5021,6 +5021,9 @@ function renderLinkEmbeds(texto: string, into: HTMLElement) {
 const MAX_UPLOAD = 50 * 1024 * 1024;
 let pendingFiles: StoredFile[] = [];
 const blobCache = new Map<string, string>();
+/// O conteudo dos anexos ja baixados. Separado do `blobCache`, que guarda so o
+/// endereco `blob:` para as tags de imagem e video.
+const dadosCache = new Map<string, Blob>();
 
 async function uploadFile(file: File): Promise<StoredFile> {
   if (file.size > MAX_UPLOAD) throw new Error(file.name + " passa de 50 MB.");
@@ -5044,13 +5047,30 @@ async function uploadFile(file: File): Promise<StoredFile> {
 async function fileUrl(id: string): Promise<string> {
   const pronto = blobCache.get(id);
   if (pronto) return pronto;
+  const url = URL.createObjectURL(await arquivoBlob(id));
+  blobCache.set(id, url);
+  return url;
+}
+
+/// O conteudo do anexo em si.
+///
+/// Quem precisa dos bytes tem de vir por aqui, e **nao** por um `fetch` na URL
+/// `blob:` devolvida por `fileUrl`. A politica de conteudo da janela permite
+/// `blob:` em `img-src` e `media-src`, que e o que faz a imagem aparecer, mas
+/// nao em `connect-src`: buscar a mesma URL por `fetch` e recusado sem erro de
+/// rede, so um aviso no console. Era isso que impedia copiar a imagem.
+///
+/// Guardar o proprio blob tambem evita baixar o arquivo duas vezes.
+async function arquivoBlob(id: string): Promise<Blob> {
+  const guardado = dadosCache.get(id);
+  if (guardado) return guardado;
   const response = await fetch(API + "/api/files/" + encodeURIComponent(id), {
     headers: { Authorization: "Bearer " + (session?.token || "") },
   });
   if (!response.ok) throw new Error("Arquivo indisponível.");
-  const url = URL.createObjectURL(await response.blob());
-  blobCache.set(id, url);
-  return url;
+  const dados = await response.blob();
+  dadosCache.set(id, dados);
+  return dados;
 }
 
 /// Canal e PV compartilham a fila de anexos, entao os dois previews desenham.
@@ -5157,12 +5177,11 @@ function menuDoAnexo(file: StoredFile, event: MouseEvent) {
 /// Downloads; no navegador, o proprio download do navegador resolve.
 async function salvarAnexo(file: StoredFile) {
   try {
-    const url = await fileUrl(file.id);
-    const dados = await (await fetch(url)).blob();
+    const dados = await arquivoBlob(file.id);
 
     if (!ehTauri()) {
       const link = document.createElement("a");
-      link.href = url;
+      link.href = await fileUrl(file.id);
       link.download = file.name;
       link.click();
       return;
@@ -5210,8 +5229,7 @@ async function copiarLink(file: StoredFile) {
 /// canvas antes. Sem isso, colar no Paint ou no navegador falharia calado.
 async function copiarImagem(file: StoredFile) {
   try {
-    const url = await fileUrl(file.id);
-    const bruto = await (await fetch(url)).blob();
+    const bruto = await arquivoBlob(file.id);
     let png = bruto;
     if (bruto.type !== "image/png") {
       const bitmap = await createImageBitmap(bruto);
