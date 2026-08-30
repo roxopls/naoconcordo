@@ -1,3 +1,4 @@
+mod salvar;
 mod screen;
 mod uso;
 
@@ -32,6 +33,7 @@ pub fn run() {
         .manage(screen::ShareState::default())
         .invoke_handler(tauri::generate_handler![
             uso::uso_de_recursos,
+            salvar::salvar_em_downloads,
             screen::sources::screen_sources,
             screen::screen_border_diag,
             screen::screen_thumbnail,

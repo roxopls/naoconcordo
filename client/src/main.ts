@@ -4809,7 +4809,7 @@ function mencionaVoce(texto: string): boolean {
 /// da imagem, indo para o ponto que foi clicado — quem clica num detalhe quer
 /// ver aquele detalhe, e nao o centro da foto. A roda aproxima em volta do
 /// cursor, e com a imagem maior que a tela arrastar move.
-function abrirImagem(url: string, alt = "") {
+function abrirImagem(url: string, alt = "", anexo?: StoredFile) {
   const fundo = document.createElement("div");
   fundo.className = "lightbox";
 
@@ -4930,6 +4930,20 @@ function abrirImagem(url: string, alt = "") {
   fechar.setAttribute("aria-label", "Fechar");
   fechar.textContent = "×";
 
+  // Salvar so aparece quando se sabe de qual anexo a imagem veio: o
+  // visualizador tambem abre imagem de link, que nao passa pelo servidor.
+  const salvar = document.createElement("button");
+  salvar.type = "button";
+  salvar.className = "lightbox-salvar";
+  salvar.title = "Salvar imagem";
+  salvar.setAttribute("aria-label", "Salvar imagem");
+  salvar.append(icon("download", "ic-sm"));
+  salvar.classList.toggle("hidden", !anexo);
+  salvar.onclick = evento => {
+    evento.stopPropagation();
+    if (anexo) void salvarAnexo(anexo);
+  };
+
   const sair = () => {
     fundo.remove();
     document.removeEventListener("keydown", tecla);
@@ -4942,7 +4956,7 @@ function abrirImagem(url: string, alt = "") {
   fechar.onclick = sair;
   document.addEventListener("keydown", tecla);
 
-  fundo.append(img, fechar);
+  fundo.append(img, salvar, fechar);
   // Em tela cheia so o elemento em tela cheia e desenhado, entao o visualizador
   // precisa entrar dentro dele.
   (document.fullscreenElement || document.body).append(fundo);
@@ -5126,18 +5140,68 @@ function menuDoAnexo(file: StoredFile, event: MouseEvent) {
   if (file.mime.startsWith("image/")) {
     menu.append(menuAcao("Copiar imagem", "copy", () => void copiarImagem(file)));
   }
-  menu.append(menuAcao("Copiar link", "link", () => {
-    const endereco = API + "/api/files/" + encodeURIComponent(file.id);
-    void navigator.clipboard.writeText(endereco)
-      .then(() => showToast("Link copiado. Abre para quem está no naoconcordo."))
-      .catch(() => showToast(endereco));
-  }));
+  menu.append(menuAcao("Salvar", "download", () => void salvarAnexo(file)));
+  menu.append(menuAcao("Copiar link", "link", () => void copiarLink(file)));
   menu.append(menuAcao("Abrir", "spark", () => {
-    void fileUrl(file.id).then(url => abrirImagem(url, file.name));
+    void fileUrl(file.id).then(url => abrirImagem(url, file.name, file));
   }));
 
   const ancora = event.currentTarget as HTMLElement;
   montarMenu(menu, ancora, { x: event.clientX, y: event.clientY });
+}
+
+/// Guarda o anexo no computador.
+///
+/// O arquivo ja esta em memoria como blob autenticado, entao salvar nao passa
+/// pela rede de novo. No aplicativo quem grava e o Rust, direto na pasta de
+/// Downloads; no navegador, o proprio download do navegador resolve.
+async function salvarAnexo(file: StoredFile) {
+  try {
+    const url = await fileUrl(file.id);
+    const dados = await (await fetch(url)).blob();
+
+    if (!ehTauri()) {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = file.name;
+      link.click();
+      return;
+    }
+
+    // O canal com o Rust leva texto, entao o binario vai em base64. Convertido
+    // em pedacos: `String.fromCharCode(...bytes)` de uma vez estoura a pilha
+    // num arquivo grande.
+    const bytes = new Uint8Array(await dados.arrayBuffer());
+    let binario = "";
+    for (let inicio = 0; inicio < bytes.length; inicio += 0x8000) {
+      binario += String.fromCharCode(...bytes.subarray(inicio, inicio + 0x8000));
+    }
+    const onde = await invoke<string>("salvar_em_downloads", {
+      nome: file.name,
+      conteudoBase64: btoa(binario),
+    });
+    showToast("Salvo em " + onde);
+  } catch (erro) {
+    console.warn("[anexo] salvar", erro);
+    showToast("Não foi possível salvar o arquivo.");
+  }
+}
+
+/// Copia um endereco que abre fora do aplicativo.
+///
+/// O endereco da API exige cabecalho de autorizacao, que navegador nenhum manda;
+/// colado no Chrome ele respondia "Sessao invalida ou expirada". O servidor
+/// devolve um endereco assinado, que abre direto.
+async function copiarLink(file: StoredFile) {
+  try {
+    const { url } = await api<{ url: string }>("/api/files/" + encodeURIComponent(file.id) + "/link");
+    const completo = API + url;
+    await navigator.clipboard.writeText(completo);
+    showToast("Link copiado. Abre no navegador para quem receber.");
+  } catch (erro) {
+    console.warn("[anexo] link", erro);
+    showToast("Não foi possível gerar o link.");
+  }
 }
 
 /// Poe a imagem em si na area de transferencia, e nao o endereco dela.
@@ -5176,7 +5240,7 @@ function renderAttachments(message: { attachments?: StoredFile[] }, into: HTMLEl
       const img = document.createElement("img");
       img.alt = file.name; img.loading = "lazy";
       void fileUrl(file.id).then(url => { img.src = url; }).catch(() => { box.textContent = "(falhou ao carregar)"; });
-      img.onclick = () => void fileUrl(file.id).then(url => abrirImagem(url, file.name));
+      img.onclick = () => void fileUrl(file.id).then(url => abrirImagem(url, file.name, file));
       box.append(img);
     } else if (file.mime.startsWith("video/")) {
       const video = document.createElement("video");

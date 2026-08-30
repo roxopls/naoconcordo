@@ -513,6 +513,9 @@ async fn main() {
         .route("/api/messages/{id}", put(edit_message).delete(delete_message))
         .route("/api/files", post(upload_file))
         .route("/api/files/{id}", get(download_file))
+        .route("/api/files/{id}/link", get(link_do_arquivo))
+        // Sem `/api` e sem sessao: e o endereco que abre no navegador.
+        .route("/f/{id}", get(arquivo_por_link))
         .route("/api/livekit-token", post(livekit_token))
         .route("/api/servers/{server_id}/members", get(list_members))
         .route("/api/servers/members/add", post(add_member))
@@ -1263,6 +1266,39 @@ fn allowed_mime(mime: &str) -> Option<&'static str> {
 
 /// Recebe os bytes crus. O nome vai no cabecalho, nao no corpo, para nao
 /// precisar de multipart nem de base64 (que incharia 33% um arquivo de 50 MB).
+/// Limpa o nome que o remetente escolheu para o anexo.
+///
+/// O nome vem de outra pessoa, entao e entrada nao confiavel: barra,
+/// contrabarra e `..` precisam sair, senao um nome como `..\..\algo.exe`
+/// atravessaria pastas na hora de alguem salvar.
+///
+/// **O ponto simples fica.** A versao anterior filtrava os caracteres do
+/// conjunto `"/\.."`, e como isso e um conjunto e nao uma sequencia, ela
+/// apagava todo ponto: `foto.png` virava `fotopng`, e todo anexo perdia a
+/// extensao. Sem extensao o navegador nao sabe o que abrir, e o arquivo salvo
+/// chega sem tipo.
+fn nome_de_anexo(bruto: &str, ext: &str) -> String {
+    // So o ultimo trecho interessa: o resto seria caminho.
+    let so_nome = bruto.rsplit(['/', '\\']).next().unwrap_or("");
+    let limpo: String = so_nome.chars().filter(|c| !c.is_control()).take(120).collect();
+
+    // Sequencia de pontos vira um so, o que mata `..` sem matar a extensao.
+    let mut resultado = String::with_capacity(limpo.len());
+    let mut ponto_anterior = false;
+    for c in limpo.chars() {
+        if c == '.' {
+            if ponto_anterior { continue; }
+            ponto_anterior = true;
+        } else {
+            ponto_anterior = false;
+        }
+        resultado.push(c);
+    }
+
+    let resultado = resultado.trim().trim_start_matches('.').trim().to_string();
+    if resultado.is_empty() { format!("arquivo.{ext}") } else { resultado }
+}
+
 async fn upload_file(State(state): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
     let Some((_, session)) = authenticated(&state, &headers).await else { return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."); };
     let mime = headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
@@ -1270,7 +1306,7 @@ async fn upload_file(State(state): State<AppState>, headers: HeaderMap, body: ax
     if body.is_empty() { return error(StatusCode::BAD_REQUEST, "Arquivo vazio."); }
     if body.len() > MAX_UPLOAD { return error(StatusCode::PAYLOAD_TOO_LARGE, "O limite e de 50 MB por arquivo."); }
     let name = headers.get("x-file-name").and_then(|v| v.to_str().ok())
-        .map(|value| value.chars().filter(|c| !"/\\..".contains(*c)).take(120).collect::<String>())
+        .map(|value| nome_de_anexo(value, &ext))
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("arquivo.{ext}"));
 
@@ -1309,21 +1345,108 @@ async fn upload_file(State(state): State<AppState>, headers: HeaderMap, body: ax
 }
 
 /// Entrega o arquivo. Exige sessao: nada aqui e publico.
+/// A prova de que um endereco de arquivo saiu daqui.
+///
+/// O navegador nao manda cabecalho de autorizacao, entao um link colado fora do
+/// aplicativo nunca ia abrir: caia em "sessao invalida ou expirada". A prova
+/// viaja na propria URL.
+///
+/// **Quem tem o link abre o arquivo, sem conta.** E o mesmo que fazem os outros
+/// aplicativos de conversa, e e o que "copiar link" sempre prometeu. A prova e
+/// derivada da chave do servidor, entao ninguem adivinha o endereco de um
+/// arquivo que nao recebeu.
+fn prova_do_arquivo(state: &AppState, id: &str) -> Option<String> {
+    let mut mac = HmacSha256::new_from_slice(&state.auth_key).ok()?;
+    mac.update(b"arquivo:");
+    mac.update(id.as_bytes());
+    // Metade do digest ja da 128 bits, e deixa o link menos comprido.
+    Some(URL_SAFE_NO_PAD.encode(&mac.finalize().into_bytes()[..16]))
+}
+
+/// Compara sem revelar em qual caractere as duas divergem.
+fn prova_confere(esperada: &str, recebida: &str) -> bool {
+    if esperada.len() != recebida.len() { return false; }
+    esperada.bytes().zip(recebida.bytes()).fold(0_u8, |acc, (a, b)| acc | (a ^ b)) == 0
+}
+
+#[derive(Serialize)] #[serde(rename_all = "camelCase")] struct LinkDoArquivo { url: String }
+
+/// Devolve o endereco publico de um arquivo, para quem esta na sessao copiar.
+async fn link_do_arquivo(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    if authenticated(&state, &headers).await.is_none() {
+        return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
+    }
+    if !state.files.read().await.contains_key(&id) {
+        return error(StatusCode::NOT_FOUND, "Arquivo nao encontrado.");
+    }
+    let Some(prova) = prova_do_arquivo(&state, &id) else {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "Erro interno.");
+    };
+    Json(LinkDoArquivo { url: format!("/f/{id}?t={prova}") }).into_response()
+}
+
+#[derive(Deserialize)] struct ProvaQuery { t: Option<String> }
+
+/// Serve o arquivo para quem tem o link, sem exigir sessao.
+async fn arquivo_por_link(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(query): Query<ProvaQuery>,
+) -> Response {
+    let Some(esperada) = prova_do_arquivo(&state, &id) else {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "Erro interno.");
+    };
+    // Mesma resposta para prova errada e arquivo inexistente: senao daria para
+    // descobrir quais identificadores existem tentando um por um.
+    if !query.t.as_deref().map(|t| prova_confere(&esperada, t)).unwrap_or(false) {
+        return error(StatusCode::NOT_FOUND, "Arquivo nao encontrado.");
+    }
+    servir_arquivo(&state, &id, false).await
+}
+
 async fn download_file(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
     // Exige sessao. O cliente busca por fetch autenticado e monta um blob,
     // porque <img src> nao manda cabecalho de autorizacao.
     if authenticated(&state, &headers).await.is_none() {
         return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
     }
-    let Some(file) = state.files.read().await.get(&id).cloned() else { return error(StatusCode::NOT_FOUND, "Arquivo nao encontrado."); };
+    servir_arquivo(&state, &id, true).await
+}
+
+/// Le o arquivo do disco e responde com ele.
+///
+/// `privado` decide o cache: o que veio pela sessao nao pode ficar guardado num
+/// proxy compartilhado, o que veio por link assinado pode.
+async fn servir_arquivo(state: &AppState, id: &str, privado: bool) -> Response {
+    let Some(file) = state.files.read().await.get(id).cloned() else { return error(StatusCode::NOT_FOUND, "Arquivo nao encontrado."); };
     let dir = if file.disk == "fallback" { &state.config.upload_fallback_dir } else { &state.config.upload_dir };
     match fs::read(dir.join(&file.id)).await {
         Ok(bytes) => ([
             (axum::http::header::CONTENT_TYPE, file.mime.clone()),
-            (axum::http::header::CACHE_CONTROL, "private, max-age=31536000, immutable".to_string()),
+            (axum::http::header::CACHE_CONTROL,
+                if privado { "private, max-age=31536000, immutable".to_string() }
+                else { "public, max-age=31536000, immutable".to_string() }),
+            // O navegador mostra imagem, video e PDF na propria aba, e oferece
+            // salvar o resto com o nome que a pessoa enviou, em vez do
+            // identificador interno.
+            (axum::http::header::CONTENT_DISPOSITION, disposicao(&file)),
         ], bytes).into_response(),
         Err(_) => error(StatusCode::NOT_FOUND, "Arquivo nao encontrado no disco."),
     }
+}
+
+/// `inline` para o que o navegador sabe mostrar, `attachment` para o resto.
+fn disposicao(file: &StoredFile) -> String {
+    let mostra = file.mime.starts_with("image/")
+        || file.mime.starts_with("video/")
+        || file.mime.starts_with("audio/")
+        || file.mime == "application/pdf";
+    // O nome vai codificado: acento e espaco quebram o cabecalho, e aspas no
+    // nome permitiriam sair do campo.
+    let seguro: String = file.name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || "._- ".contains(c) { c } else { '_' })
+        .collect();
+    format!("{}; filename=\"{}\"", if mostra { "inline" } else { "attachment" }, seguro.trim())
 }
 
 async fn publish_key(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<PublicKeyInput>) -> Response {
@@ -1895,4 +2018,36 @@ async fn load_envelopes(dir: &Path) -> Vec<Envelope> {
 async fn persist_json<T: Serialize + ?Sized>(dir: &Path, file: &str, value: &T) {
     let path = dir.join(file); let temp = dir.join(format!("{file}.tmp"));
     if let Ok(bytes) = serde_json::to_vec_pretty(value) { if fs::write(&temp, bytes).await.is_ok() { let _ = fs::rename(temp, path).await; } }
+}
+
+#[cfg(test)]
+mod testes_nome {
+    use super::nome_de_anexo;
+
+    /// O nome do anexo vem de quem enviou, e por isso e entrada nao confiavel.
+    #[test]
+    fn nao_atravessa_pastas() {
+        assert_eq!(nome_de_anexo(r"..\..\Windows\System32\algo.png", "png"), "algo.png");
+        assert_eq!(nome_de_anexo("../../etc/passwd", "bin"), "passwd");
+        assert_eq!(nome_de_anexo("..", "png"), "arquivo.png");
+        assert_eq!(nome_de_anexo("", "png"), "arquivo.png");
+    }
+
+    /// O ponto simples precisa sobreviver: sem extensao o navegador nao sabe o
+    /// que abrir, e o arquivo salvo chega sem tipo.
+    #[test]
+    fn extensao_sobrevive() {
+        assert_eq!(nome_de_anexo("minha foto.png", "png"), "minha foto.png");
+        assert_eq!(nome_de_anexo("relatorio.final.pdf", "pdf"), "relatorio.final.pdf");
+        assert_eq!(nome_de_anexo("férias 2026.jpg", "jpg"), "férias 2026.jpg");
+    }
+
+    /// Nome comprido nao pode estourar o campo, e o corte nao pode deixar so
+    /// espaco.
+    #[test]
+    fn nome_comprido_e_cortado() {
+        let gigante = "a".repeat(400) + ".png";
+        assert_eq!(nome_de_anexo(&gigante, "png").chars().count(), 120);
+        assert_eq!(nome_de_anexo("   ", "png"), "arquivo.png");
+    }
 }

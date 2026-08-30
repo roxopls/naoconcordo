@@ -483,6 +483,9 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 .lightbox-img { position: absolute; top: 0; left: 0; transform-origin: 0 0; user-select: none; -webkit-user-drag: none; }
 /* Aproximada, a imagem ocupa a tela toda e o canto arredondado so atrapalha. */
 .lightbox:not([data-perto="1"]) .lightbox-img { border-radius: 8px; }
+/* Ao lado do fechar, com a mesma moldura redonda. */
+.lightbox-salvar { position: absolute; top: 16px; right: 62px; width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 50%; background: rgba(255,255,255,.12); color: #fff; cursor: pointer; }
+.lightbox-salvar:hover { background: rgba(255,255,255,.22); }
 .lightbox-close { position: absolute; top: 16px; right: 20px; width: 34px; height: 34px; border: 0; border-radius: 50%; background: rgba(255,255,255,.12); color: #fff; font-size: 20px; line-height: 1; cursor: pointer; }
 .lightbox-close:hover { background: rgba(255,255,255,.22); }
 

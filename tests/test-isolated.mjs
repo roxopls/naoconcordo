@@ -67,7 +67,7 @@ function rodar(suite) {
 }
 
 const suites = process.argv.slice(2).length ? process.argv.slice(2)
-  : ["test-invites.mjs", "test-account.mjs", "test-friends.mjs", "test-servers.mjs", "test-files.mjs", "test-messages.mjs", "test-cofre.mjs", "test-updates.mjs"];
+  : ["test-invites.mjs", "test-account.mjs", "test-friends.mjs", "test-servers.mjs", "test-files.mjs", "test-messages.mjs", "test-cofre.mjs", "test-updates.mjs", "test-link-arquivo.mjs"];
 
 if (!await esperarSaude()) {
   console.error("backend nao respondeu em /health\n" + saida);
