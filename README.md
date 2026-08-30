@@ -3,7 +3,7 @@
 Aplicativo de voz, vídeo, tela e texto para um grupo de amigos.
 Feito para ser auto-hospedado: um servidor seu, sem precisar depender de nenhuma empresa.
 
-O aplicativo é feito pra **Windows inicialmente**. O servidor roda em Linux, e é assim que ele foi testado e implantado, você pode desenvolver o executável do servidor pra Windows (o que eu não recomendo porque é beeem mais pesado).
+O aplicativo é feito pra **Windows inicialmente**. O servidor roda em Linux, e é assim que ele foi testado e implantado. Se você não quer nem chegar perto de um Linux, tem o painel de Windows: um instalador que sobe o servidor na sua máquina sem você abrir terminal nenhum (veja mais embaixo).
 
 ---
 
@@ -12,18 +12,19 @@ O aplicativo é feito pra **Windows inicialmente**. O servidor roda em Linux, e 
 São três coisas, e vale a pena você entender como a divisão funciona antes de configurar qualquer coisa,
 porque cada um se conecta de um jeito diferente:
 
-* **Cliente** — Tauri 2, interface em TypeScript, parte nativa em Rust. É a
-parte nativa que captura a tela sem o seletor do Edge, pega o áudio por processo, comprime pela placa de vídeo e registra os atalhos globais. Nada disso existe fora do Windows, e é por isso que o
-aplicativo é só de Windows (por enquanto).
-* **Servidor** — Axum, em Rust, com o estado em arquivos JSON no disco. Cuida
-de contas, servidores privados, canais, anexos, presença e mensagens. Não tem
-banco de dados para instalar.
-* **LiveKit** — o servidor de mídia, auto-hospedado. **A voz e o vídeo não
-passam pelo servidor de aplicação**: ele só assina a entrada, e o
-LiveKit cuida do resto.
+* **Cliente**: Tauri 2, interface em TypeScript, parte nativa em Rust. É a parte
+nativa que captura a tela sem o seletor do Edge, pega o áudio por processo,
+comprime pela placa de vídeo e registra os atalhos globais. Nada disso existe
+fora do Windows, e é por isso que o aplicativo é só de Windows (por enquanto).
+* **Servidor**: Axum, em Rust, com o estado em arquivos JSON no disco. Ele cuida
+de contas, servidores privados, canais, anexos, presença e mensagens, e não tem
+banco de dados pra instalar.
+* **LiveKit**: o servidor de mídia, auto-hospedado. **A voz e o vídeo não passam
+pelo servidor de aplicação**, ele só assina a entrada e o LiveKit cuida do
+resto.
 
-Mensagens privadas são cifradas ponta a ponta no cliente (ECDH P-256 →
-HKDF-SHA256 → AES-256-GCM). O servidor **NUNCA** vê o texto.
+Mensagens privadas são cifradas ponta a ponta no cliente (ECDH P-256,
+HKDF-SHA256 e AES-256-GCM). O servidor **NUNCA** vê o texto.
 
 ---
 
@@ -35,7 +36,7 @@ por uma rede virtual?**
 Voz e vídeo em tempo real precisam de UDP chegando na sua máquina. Isso não é um
 detalhe: é a diferença se isso aqui é uma solução pra você ou não. Existem três cenários, do mais simples pro mais chato.
 
-### Cenário 1 — Rede virtual (RadminVPN, Hamachi, ZeroTier, Tailscale)
+### Cenário 1: rede virtual (RadminVPN, Hamachi, ZeroTier, Tailscale)
 
 **Comece por aqui se você nunca hospedou nada.** Todo mundo entra na mesma rede
 virtual e passa a se enxergar como se estivesse na mesma casa. Então, essa é a solução que você não precisar mexer em nada na sua rede. (muito mais fácil que os outros)
@@ -52,18 +53,19 @@ No `infra/.env`:
 LIVEKIT_PUBLIC_URL=ws://IP-DO-SERVER-NA-VPN:7880
 ~~~
 
-No `infra/livekit.yaml`, desligue o TURN — ele serve para atravessar
-roteador, e aqui não há roteador no caminho:
+No `infra/livekit.yaml`, desligue o TURN, que serve pra atravessar
+roteador e aqui não tem roteador nenhum no caminho:
 
 ~~~yaml
 turn:
   enabled: false
 ~~~
 
-Quando compilar o cliente, aponte para o mesmo IP:
+No aplicativo de cada um, na tela de entrada, em **"Usar outro servidor"**, é só
+colar esse mesmo IP:
 
 ~~~
-VITE_SERVER_URL=http://IP-DO-SERVER-NA-VPN:3040
+http://IP-DO-SERVER-NA-VPN:3040
 ~~~
 
 Pronto. Sem HTTPS, sem domínio, sem porta encaminhada.
@@ -72,7 +74,7 @@ Obviamente todo mundo precisa estar conectado na mesma VPN que você, se alguém
 
 
 
-### Cenário 2 — Servidor alugado (VPS)
+### Cenário 2: servidor alugado (VPS)
 
 O caminho mais fácil se o grupo for crescer. O provedor te dá um IP
 público que não muda e portas que ninguém bloqueia.
@@ -91,7 +93,7 @@ público que não muda e portas que ninguém bloqueia.
 3. Configure o proxy reverso com certificado (o `Caddyfile` de exemplo já traz
 o formato) e use `https://` e `wss://` na configuração.
 
-### Cenário 3 — Servidor na sua casa
+### Cenário 3: servidor na sua casa
 
 Funciona, e é o que eu faço aqui com os meus amigos. Só tem quatro problemas, e é bom saber
 deles antes:
@@ -141,7 +143,7 @@ Subir:
 cd infra && docker compose up -d
 ~~~
 
-Isso se for de Docker — você sempre pode adaptar do jeito que preferir.
+Isso se for de Docker, você sempre pode adaptar do jeito que preferir.
 
 Sem Docker, o servidor é um binário só:
 
@@ -151,8 +153,11 @@ cd server && cargo run     # escuta em 127.0.0.1:3040
 
 ### Cliente
 
-O endereço do servidor entra no momento da compilação, por variável de
-ambiente. Crie `client/.env.local`:
+**Você não precisa compilar nada só pra trocar de servidor.** O endereço entra
+na tela de entrada, em "Usar outro servidor", e fica guardado ali.
+
+O que a compilação define é o endereço **padrão**, aquele que o aplicativo usa
+quando ninguém mexeu em nada. Crie `client/.env.local`:
 
 ~~~
 VITE_SERVER_URL=https://seu-endereco:8443
@@ -174,7 +179,7 @@ npm run tauri build    # instalador
 
 O aplicativo sabe se atualizar sozinho, mas só aceita pacote assinado pela sua
 chave. O `tauri.conf.json` publicado aqui vem **sem** endereço e **sem** chave
-pública de propósito — cada instalação usa as suas.
+pública de propósito, porque cada instalação usa as suas.
 
 ~~~bash
 npm run tauri signer generate -- -w minha.key
@@ -184,6 +189,25 @@ A chave pública vai em `plugins.updater.pubkey` e o endereço do manifesto em
 `plugins.updater.endpoints`. **A chave privada nunca entra no repositório**: com
 ela, qualquer um assina uma atualização falsa que todo cliente instalado aceita
 como legítima.
+
+---
+
+## Hospedar no Windows, sem terminal
+
+Se os três cenários acima já pareceram trabalho demais, tem esse caminho aqui.
+Baixe o `naoconcordo-servidor` nas
+[releases](https://github.com/roxopls/naoconcordo/releases) e instale.
+
+O painel faz tudo que está escrito na seção "Configurar" acima, só que sozinho.
+Ele gera as chaves, escreve a configuração, baixa o LiveKit, sobe o servidor e te
+mostra o endereço pronto pra copiar. Ele também lista os endereços da sua máquina
+com o nome de cada placa e coloca o da VPN primeiro, que é o que costuma
+funcionar sem você mexer no roteador.
+
+Tem também um botão que **gera os aplicativos dos seus amigos** assinados pela
+sua própria chave, e aí eles passam a receber atualização de você e não deste
+repositório. Só esse botão precisa de Node e Rust instalados, o resto do painel
+não precisa de nada.
 
 ---
 
@@ -200,8 +224,8 @@ Não toca no servidor de produção.
 
 ## O que não está neste repositório
 
-A configuração de implantação que depende da topologia de quem hospeda —
-scripts de rede, ajuste fino do servidor de mídia — e a chave privada de
+A configuração de implantação que depende da topologia de quem hospeda, ou seja,
+scripts de rede e ajuste fino do servidor de mídia, e também a chave privada de
 assinatura. Os arquivos `.example` trazem o formato de tudo que é preciso.
 
 
