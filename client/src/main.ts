@@ -4882,6 +4882,29 @@ function abrirImagem(url: string, alt = "", anexo?: StoredFile) {
     escalarEm(perto ? cabe : Math.max(1, cabe * 2.5), evento.clientX, evento.clientY);
   };
 
+  // As mesmas acoes do anexo na conversa. Sem isto, ampliar a imagem custava
+  // copiar e salvar: era preciso fechar, achar a mensagem de novo e clicar com
+  // o botao direito la.
+  img.oncontextmenu = evento => {
+    evento.preventDefault();
+    evento.stopPropagation();
+    if (anexo) { menuDoAnexo(anexo, evento, true); return; }
+
+    // Imagem que veio de um link na mensagem: nao ha anexo no servidor, entao o
+    // que se pode oferecer e o proprio endereco. Sem este caso o botao direito
+    // aqui nao faria nada, ja que o menu do sistema esta desligado.
+    closeUserMenu();
+    const menu = document.createElement("div");
+    menu.className = "user-menu";
+    menu.append(menuAcao("Copiar link", "link", () => {
+      void navigator.clipboard.writeText(url)
+        .then(() => showToast("Link copiado."))
+        .catch(() => showToast(url));
+    }));
+    menu.append(menuAcao("Abrir no navegador", "spark", () => void abrirExterno(url)));
+    montarMenu(menu, img, { x: evento.clientX, y: evento.clientY });
+  };
+
   img.onwheel = evento => {
     evento.preventDefault();
     escalarEm(escala * (evento.deltaY < 0 ? 1.15 : 1 / 1.15), evento.clientX, evento.clientY);
@@ -5146,7 +5169,9 @@ document.addEventListener("paste", async event => {
 ///
 /// Aqui as duas acoes fazem o que a pessoa queria: a imagem em si, ou um
 /// endereco que outra pessoa do grupo consegue abrir.
-function menuDoAnexo(file: StoredFile, event: MouseEvent) {
+/// `deDentroDoVisualizador` tira a acao de abrir: ela reabriria o visualizador
+/// por cima dele mesmo, e quem ja esta olhando a imagem nao precisa disso.
+function menuDoAnexo(file: StoredFile, event: MouseEvent, deDentroDoVisualizador = false) {
   event.preventDefault();
   closeUserMenu();
   const menu = document.createElement("div");
@@ -5162,9 +5187,11 @@ function menuDoAnexo(file: StoredFile, event: MouseEvent) {
   }
   menu.append(menuAcao("Salvar", "download", () => void salvarAnexo(file)));
   menu.append(menuAcao("Copiar link", "link", () => void copiarLink(file)));
-  menu.append(menuAcao("Abrir", "spark", () => {
-    void fileUrl(file.id).then(url => abrirImagem(url, file.name, file));
-  }));
+  if (!deDentroDoVisualizador) {
+    menu.append(menuAcao("Abrir", "spark", () => {
+      void fileUrl(file.id).then(url => abrirImagem(url, file.name, file));
+    }));
+  }
 
   const ancora = event.currentTarget as HTMLElement;
   montarMenu(menu, ancora, { x: event.clientX, y: event.clientY });
