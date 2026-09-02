@@ -24,8 +24,26 @@ fn mostrar_janela(app: &AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Um aplicativo por maquina. Precisa ser o primeiro plugin: ele decide
+        // se este processo continua vivo antes de qualquer outra coisa subir.
+        //
+        // Fechar a janela manda para a bandeja em vez de encerrar, entao quem
+        // achava que tinha fechado clicava no atalho de novo e ganhava um
+        // segundo aplicativo inteiro — duas conexoes de voz da mesma pessoa,
+        // uma ouvindo a outra. Agora a segunda partida so traz a janela que ja
+        // existe de volta.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            mostrar_janela(app);
+        }))
         // Atualizacao automatica: o pacote precisa estar assinado com a chave
         // privada do updater, que fica fora do repositorio e fora do servidor.
+        // Abrir junto com o Windows. Fica desligado ate a pessoa marcar nas
+        // configuracoes: aplicativo que se instala na inicializacao sozinho e
+        // exatamente o que ninguem quer.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())

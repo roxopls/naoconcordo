@@ -40,7 +40,7 @@ type RoomKind = "text" | "voice";
 type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind };
 type Profile = { username: string; avatar: string | null; avatarFile?: string | null; bio?: string | null; bannerFile?: string | null; color?: string | null };
 type ServerRole = "owner" | "mod" | "member";
-type Bootstrap = { servers: ServerInfo[]; rooms: RoomInfo[]; profiles: Profile[]; isOwner: boolean; isAdmin: boolean; roles: Record<string, ServerRole>; online: string[]; voice?: Record<string, string[]> };
+type Bootstrap = { servers: ServerInfo[]; rooms: RoomInfo[]; profiles: Profile[]; isOwner: boolean; isAdmin: boolean; roles: Record<string, ServerRole>; online: string[]; voice?: Record<string, string[]>; gifs?: boolean };
 type LivekitAccess = { token: string; url: string; room: string };
 type Friendship = { requester: string; addressee: string; status: "pending" | "accepted" };
 type FriendsData = { friends: string[]; incoming: Friendship[]; outgoing: Friendship[] };
@@ -448,6 +448,7 @@ async function enterApp() {
   void medirPing();
   const data = await api<Bootstrap>("/api/bootstrap");
   servers = data.servers; rooms = data.rooms; isAdmin = Boolean(data.isAdmin); roles = data.roles || {};
+  temGifs = Boolean(data.gifs); aplicarBotaoDeGif();
   setVoicePresence(data.voice);
   byId("admin-button").classList.toggle("hidden", !isAdmin);
   onlineUsers.clear();
@@ -1987,7 +1988,14 @@ async function connectVoice() {
     };
     next.on(RoomEvent.Connected, () => { if (!atual()) return; setStatus("online", true); playJoin(); silenciarAvisos(2000); announceDeafened(); refresh(); }).on(RoomEvent.Reconnecting, () => { if (atual()) setStatus("reconectando", false); })
       .on(RoomEvent.Reconnected, () => { if (!atual()) return; setStatus("online", true); silenciarAvisos(2000); })
-      .on(RoomEvent.Disconnected, () => { if (!atual()) return; setStatus("fora da chamada", false); playLeave(); voiceRoomId = ""; resetMediaState(); refresh(); })
+      .on(RoomEvent.Disconnected, motivo => {
+        if (!atual()) return;
+        setStatus("fora da chamada", false); playLeave(); voiceRoomId = ""; resetMediaState(); refresh();
+        // 2 e `DUPLICATE_IDENTITY`: a mesma conta entrou na chamada de outro
+        // lugar e o servidor de voz deixou a conexao nova no lugar desta. Sem
+        // dizer isso, a chamada simplesmente cai do nada.
+        if (motivo === 2) showToast("Sua conta entrou nesta chamada de outro aparelho.");
+      })
       .on(RoomEvent.ParticipantConnected, participant => {
         if (!atual()) return;
         if (!isScreenParticipant(participant) && avisosLiberados()) playJoin();
@@ -3638,6 +3646,73 @@ byId<HTMLFormElement>("admin-invite-form").addEventListener("submit", async even
 // usar o aplicativo, e ligado sem motivo so piora a captura de janela.
 const DXGI_KEY = "naoconcordo.forcar-dxgi";
 const forcarDuplicacao = () => localStorage.getItem(DXGI_KEY) === "1";
+// ----------------------------------------------------- abrir com o Windows
+// Quem manda e o registro do Windows, e nao um ajuste guardado aqui: alguem
+// pode ter tirado o naoconcordo da inicializacao por fora, e o interruptor tem
+// de contar a verdade quando as configuracoes abrem.
+async function pluginDeInicio() {
+  if (!ehTauri()) return null;
+  try {
+    return await import("@tauri-apps/plugin-autostart");
+  } catch {
+    return null;
+  }
+}
+
+/// Marca de que a escolha inicial ja foi feita nesta instalacao.
+const INICIO_DECIDIDO = "naoconcordo.inicio-automatico-decidido";
+
+/// Deixa a abertura automatica ligada na primeira vez, e **so** na primeira.
+///
+/// Sem a marca, todo arranque tornaria a ligar o que a pessoa acabou de
+/// desmarcar — o aplicativo discutindo com quem o usa. A marca e gravada antes
+/// de tentar ligar: se o Windows recusar, o certo e desistir e nao insistir a
+/// cada abertura.
+async function decidirAberturaInicial() {
+  if (localStorage.getItem(INICIO_DECIDIDO)) return;
+  const plugin = await pluginDeInicio();
+  if (!plugin) return;
+  localStorage.setItem(INICIO_DECIDIDO, "1");
+  try {
+    if (!(await plugin.isEnabled())) await plugin.enable();
+  } catch (erro) {
+    console.warn("[inicio] nao deu para ligar na primeira vez", erro);
+  }
+}
+
+async function carregarAberturaAutomatica() {
+  const linha = byId("abrir-com-windows").closest(".switch-row") as HTMLElement | null;
+  const plugin = await pluginDeInicio();
+  if (!plugin) {
+    // No navegador nao ha inicializacao do sistema para ligar.
+    linha?.classList.add("hidden");
+    byId("abrir-com-windows-nota").textContent = "Disponível no aplicativo instalado.";
+    return;
+  }
+  try {
+    byId<HTMLInputElement>("abrir-com-windows").checked = await plugin.isEnabled();
+  } catch (erro) {
+    console.warn("[inicio] nao deu para ler o estado", erro);
+  }
+}
+
+byId<HTMLInputElement>("abrir-com-windows").addEventListener("change", async event => {
+  const caixa = event.currentTarget as HTMLInputElement;
+  const plugin = await pluginDeInicio();
+  if (!plugin) return;
+  // Mexeu no interruptor: a escolha e dela daqui em diante.
+  localStorage.setItem(INICIO_DECIDIDO, "1");
+  try {
+    if (caixa.checked) await plugin.enable(); else await plugin.disable();
+    // Relido do sistema: se o Windows recusou, o interruptor volta sozinho em
+    // vez de mentir que ficou ligado.
+    caixa.checked = await plugin.isEnabled();
+  } catch (erro) {
+    caixa.checked = !caixa.checked;
+    showToast(erro instanceof Error ? erro.message : "Não foi possível mudar a inicialização.");
+  }
+});
+
 byId<HTMLInputElement>("modo-dev").addEventListener("change", event => {
   localStorage.setItem(DEV_KEY, (event.currentTarget as HTMLInputElement).checked ? "1" : "0");
   aplicarModoDev();
@@ -3707,6 +3782,7 @@ async function openDevicesDialog() {
   byId<HTMLInputElement>("canal-unstable").checked = canalAtual() === "unstable";
   byId("check-update-status").textContent = "";
   byId<HTMLInputElement>("modo-dev").checked = modoDev();
+  void carregarAberturaAutomatica();
   aplicarModoDev();
   aplicarAmbiente();
   byId<HTMLInputElement>("forcar-dxgi").checked = forcarDuplicacao();
@@ -3853,7 +3929,41 @@ type EstatisticasEnvio = {
   limite: string; msPorQuadro: number; codificador: string; eficiente: boolean;
   quadros: number; quedasDeResolucao: number; descartados: number;
   falhaCaptura: string | null; falhaEncoder: string | null;
+  chaves: number; pedidosDeChave: number;
+  chegados: number; foraDeRitmo: number; entregues: number; repetidos: number;
 };
+
+/// Leitura anterior do caminho do quadro, para mostrar taxa em vez de total.
+///
+/// Total acumulado nao se compara com a taxa pedida: sessenta por segundo em
+/// dez minutos e trinta e seis mil, e ninguem divide isso de cabeca enquanto
+/// olha a tela travar. A diferenca entre duas leituras, dividida pelo tempo
+/// entre elas, sai no mesmo numero que se pediu nas configuracoes.
+let caminhoAnterior:
+  | { t: number; chegados: number; foraDeRitmo: number; entregues: number; repetidos: number }
+  | null = null;
+
+/// Quadros por segundo em cada etapa, ou `null` na primeira leitura, que nao
+/// tem com o que comparar.
+function taxasDoCaminho(envio: EstatisticasEnvio) {
+  const agora = performance.now();
+  const antes = caminhoAnterior;
+  caminhoAnterior = {
+    t: agora, chegados: envio.chegados, foraDeRitmo: envio.foraDeRitmo,
+    entregues: envio.entregues, repetidos: envio.repetidos,
+  };
+  if (!antes) return null;
+  const segundos = (agora - antes.t) / 1000;
+  // Janela curta demais transforma um quadro de diferenca em vinte de taxa.
+  if (segundos < 0.5) { caminhoAnterior = antes; return null; }
+  const porSegundo = (atual: number, anterior: number) => Math.round((atual - anterior) / segundos);
+  return {
+    chegados: porSegundo(envio.chegados, antes.chegados),
+    foraDeRitmo: porSegundo(envio.foraDeRitmo, antes.foraDeRitmo),
+    entregues: porSegundo(envio.entregues, antes.entregues),
+    repetidos: porSegundo(envio.repetidos, antes.repetidos),
+  };
+}
 
 async function atualizarDiagnostico() {
   const caixa = byId("diag-box");
@@ -3877,6 +3987,25 @@ async function atualizarDiagnostico() {
           + "  quedas de resolucao: " + envio.quedasDeResolucao
           + (envio.descartados ? "  descartados: " + envio.descartados : ""),
         );
+        // Imagem esfarelada e decodificador sem quadro de referencia. Estes
+        // dois numeros dizem onde o conserto esta falhando: pedido chegando e
+        // imagem ainda quebrada aponta para o que o codificador produz; pedido
+        // que nao chega aponta para o caminho de volta do WebRTC.
+        linhas.push(
+          "       chaves: " + envio.chaves
+          + "  pedidas por quem assiste: " + envio.pedidosDeChave,
+        );
+        // O caminho do quadro, para a taxa abaixo do pedido ter dono. `tela` e
+        // o teto: se ja vem baixo dali, o conserto nao esta neste programa.
+        const taxas = taxasDoCaminho(envio);
+        if (taxas) {
+          linhas.push(
+            "       quadros/s  tela: " + taxas.chegados
+            + "  fora de ritmo: " + taxas.foraDeRitmo
+            + "  repetidos: " + taxas.repetidos
+            + "  total: " + (taxas.entregues + taxas.repetidos),
+          );
+        }
         if (envio.falhaCaptura) linhas.push("       CAPTURA PAROU: " + envio.falhaCaptura);
         if (envio.falhaEncoder) linhas.push("       CODIFICADOR PAROU: " + envio.falhaEncoder);
       }
@@ -5122,6 +5251,127 @@ async function queueFiles(list: FileList | File[]) {
     } catch (error) { showToast(error instanceof Error ? error.message : "Falha no envio."); }
   }
 }
+// --------------------------------------------------------------------- gifs
+// A busca vive no servidor: ele fala com o Tenor e devolve endereco proprio
+// para cada miniatura. Nada aqui conhece o endereco de la, e por isso a
+// politica de conteudo da janela continua fechada na propria origem.
+type GifAchado = { id: string; descricao: string; largura: number; altura: number; previa: string; ficha: string };
+/// O servidor tem chave do Tenor? Sem ela o botao nem aparece.
+let temGifs = false;
+
+/// Mostra ou esconde os dois botoes de GIF conforme o servidor.
+function aplicarBotaoDeGif() {
+  for (const id of ["gif-button", "dm-gif-button"]) {
+    byId(id).classList.toggle("hidden", !temGifs);
+  }
+}
+
+function abrirSeletorDeGif(ancora: HTMLElement) {
+  closeUserMenu();
+  const caixa = document.createElement("div");
+  caixa.className = "user-menu seletor-gif";
+  // Clicar dentro do painel nao pode fechar o painel: o ouvinte global fecha
+  // qualquer menu ao clique, e aqui se digita e se rola.
+  caixa.onclick = evento => evento.stopPropagation();
+
+  const busca = document.createElement("input");
+  busca.type = "search";
+  busca.placeholder = "Procurar um GIF";
+  const grade = document.createElement("div");
+  grade.className = "grade";
+  caixa.append(busca, grade);
+
+  const avisar = (texto: string) => {
+    const aviso = document.createElement("p");
+    aviso.className = "aviso";
+    aviso.textContent = texto;
+    grade.replaceChildren(aviso);
+  };
+
+  // Cada busca ganha um numero: resposta de busca antiga que chega depois da
+  // nova nao pode sobrescrever a grade.
+  let vez = 0;
+  async function procurar(termo: string) {
+    const minha = ++vez;
+    avisar("Procurando…");
+    try {
+      const pagina = await api<{ gifs: GifAchado[] }>("/api/gifs?q=" + encodeURIComponent(termo));
+      if (minha !== vez) return;
+      if (!pagina.gifs.length) { avisar("Nada encontrado."); return; }
+      grade.replaceChildren(...pagina.gifs.map(gif => cartaoDeGif(gif)));
+    } catch (erro) {
+      if (minha !== vez) return;
+      avisar(erro instanceof Error ? erro.message : "A busca falhou.");
+    }
+  }
+
+  function cartaoDeGif(gif: GifAchado) {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.title = gif.descricao;
+    const img = document.createElement("img");
+    // A proporcao vem junto para a grade nao pular enquanto carrega.
+    if (gif.largura && gif.altura) img.style.aspectRatio = gif.largura + " / " + gif.altura;
+    img.alt = gif.descricao;
+    img.loading = "lazy";
+    void previaDeGif(gif.previa).then(url => { img.src = url; });
+    botao.append(img);
+    botao.onclick = () => { closeUserMenu(); void escolherGif(gif); };
+    return botao;
+  }
+
+  // Espera parar de digitar: uma busca por tecla gastaria a cota do servidor
+  // sem nunca mostrar o resultado do que ainda esta sendo escrito.
+  let agendado = 0;
+  busca.oninput = () => {
+    window.clearTimeout(agendado);
+    agendado = window.setTimeout(() => void procurar(busca.value), 350);
+  };
+
+  montarMenu(caixa, ancora);
+  busca.focus();
+  void procurar("");
+}
+
+/// A miniatura vem autenticada e vira blob, pela mesma razao dos anexos:
+/// `<img src>` nao manda cabecalho de autorizacao.
+const gifCache = new Map<string, string>();
+async function previaDeGif(caminho: string): Promise<string> {
+  const pronto = gifCache.get(caminho);
+  if (pronto) return pronto;
+  const resposta = await fetch(API + caminho, {
+    headers: { Authorization: "Bearer " + (session?.token || "") },
+  });
+  if (!resposta.ok) throw new Error("miniatura indisponivel");
+  const url = URL.createObjectURL(await resposta.blob());
+  gifCache.set(caminho, url);
+  return url;
+}
+
+/// O servidor baixa o GIF e o guarda como anexo comum; daqui em diante ele e
+/// igual a um arquivo que alguem arrastou para a janela.
+async function escolherGif(gif: GifAchado) {
+  try {
+    const guardado = await api<StoredFile>("/api/gifs/guardar", {
+      method: "POST",
+      body: JSON.stringify({ ficha: gif.ficha, descricao: gif.descricao }),
+    });
+    if (!pendingFiles.some(item => item.id === guardado.id)) pendingFiles.push(guardado);
+    renderAttachPreview();
+  } catch (erro) {
+    showToast(erro instanceof Error ? erro.message : "Nao foi possivel trazer o GIF.");
+  }
+}
+
+byId("gif-button").addEventListener("click", evento => {
+  evento.stopPropagation();
+  abrirSeletorDeGif(evento.currentTarget as HTMLElement);
+});
+byId("dm-gif-button").addEventListener("click", evento => {
+  evento.stopPropagation();
+  abrirSeletorDeGif(evento.currentTarget as HTMLElement);
+});
+
 byId("attach-button").addEventListener("click", () => byId<HTMLInputElement>("attach-input").click());
 byId("dm-attach-button").addEventListener("click", () => byId<HTMLInputElement>("attach-input").click());
 byId<HTMLInputElement>("attach-input").addEventListener("change", async event => {
@@ -5402,7 +5652,9 @@ function isScreenParticipant(participant: { identity: string; metadata?: string 
   try {
     if (JSON.parse(participant.metadata || "{}").kind === "screen") return true;
   } catch { /* metadata vazio ou invalido: cai na checagem de identidade */ }
-  return /-screen-/.test(participant.identity);
+  // O `#tela` e a identidade de hoje; o `-screen-` e a de antes, e vale
+  // enquanto houver servidor sem atualizar do outro lado.
+  return /#tela$/.test(participant.identity) || /-screen-/.test(participant.identity);
 }
 
 /// Marca o canal e avisa, se a mensagem nao for do canal que esta aberto.
@@ -6193,6 +6445,8 @@ function resetMediaState() {
 function updateCallControls() {
   const ativa = Boolean(voiceRoomId) || room?.state === "connected" || room?.state === "connecting";
   byId("call-controls").classList.toggle("hidden", !ativa);
+  // O espaco do rodape pertence a barra: sem ela, o redator desce ate o fim.
+  byId("app-view").querySelector(".main-panel")?.classList.toggle("com-chamada", ativa);
   // Quem transmite precisa saber se tem plateia: desde o botao "Assistir",
   // transmitir para ninguem virou possibilidade real.
   const rotulo = screenButton.querySelector("small");
@@ -6289,6 +6543,7 @@ async function avisarOrigem(
 function initials(name: string) { return name.split(/\s+/).slice(0, 2).map(part => part[0]?.toUpperCase()).join(""); }
 async function resume() { if (!session) return; try { await api("/api/session"); await enterApp(); } catch { saveSession(null); } }
 void resume();
+void decidirAberturaInicial();
 byId("app-version").textContent = "v" + __APP_VERSION__;
 
 // ------------------------------------------------------ aviso de versao

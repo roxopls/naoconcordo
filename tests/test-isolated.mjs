@@ -9,7 +9,11 @@ import { spawn } from "node:child_process";
 const aqui = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
 // As suites vivem em `tests/`; o servidor e a configuracao ficam um nivel acima.
 const raiz = path.resolve(aqui, "..");
-const binario = path.join(raiz, "server", "target", "debug", process.platform === "win32" ? "naoconcordo-server.exe" : "naoconcordo-server");
+// `TEST_SERVER_BIN` existe porque compartilhamento de rede no Windows nao
+// deixa executar o que esta guardado nele: quem trabalha com o projeto num
+// disco de rede compila para um caminho local e aponta para la.
+const binario = process.env.TEST_SERVER_BIN
+  || path.join(raiz, "server", "target", "debug", process.platform === "win32" ? "naoconcordo-server.exe" : "naoconcordo-server");
 if (!fs.existsSync(binario)) {
   console.error("binario ausente: rode `cargo build` em server/ antes.\n" + binario);
   process.exit(2);
@@ -67,7 +71,7 @@ function rodar(suite) {
 }
 
 const suites = process.argv.slice(2).length ? process.argv.slice(2)
-  : ["test-invites.mjs", "test-account.mjs", "test-friends.mjs", "test-servers.mjs", "test-files.mjs", "test-messages.mjs", "test-cofre.mjs", "test-updates.mjs", "test-link-arquivo.mjs"];
+  : ["test-invites.mjs", "test-account.mjs", "test-friends.mjs", "test-servers.mjs", "test-files.mjs", "test-messages.mjs", "test-cofre.mjs", "test-updates.mjs", "test-link-arquivo.mjs", "test-identidade.mjs", "test-gifs.mjs"];
 
 if (!await esperarSaude()) {
   console.error("backend nao respondeu em /health\n" + saida);

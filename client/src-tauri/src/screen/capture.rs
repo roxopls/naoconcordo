@@ -10,7 +10,7 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
 };
 
 use livekit::webrtc::{
@@ -53,42 +53,266 @@ impl Destino {
     /// A conversao acontece nos dois caminhos porque nenhum codificador de
     /// hardware aceita BGRA na entrada; o que o hardware economiza e a
     /// compressao em si, que e a parte cara.
-    pub fn entregar(&self, bgra: &[u8], stride: u32, largura: u32, altura: u32) {
+    ///
+    /// `timestamp_us` e o instante em que o compositor **produziu** o quadro,
+    /// nao o instante em que esta funcao roda. Ver `Relogio`.
+    pub fn entregar(
+        &self,
+        bgra: &[u8],
+        stride: u32,
+        largura: u32,
+        altura: u32,
+        timestamp_us: i64,
+        ultimo: &Ultimo,
+    ) {
+        let pixels = largura as usize * altura as usize;
+        // NV12 sem folga: plano Y inteiro, depois o UV entrelacado com metade
+        // das linhas. E o formato que o MFT espera quando o passo de linha e
+        // igual a largura, e serve aos dois caminhos.
+        //
+        // O ARGB do libyuv e little-endian, entao os bytes batem com o BGRA que
+        // o Windows entrega. Nao ha troca de canais a fazer.
+        let mut nv12 = vec![0u8; pixels + pixels / 2];
+        let (plano_y, plano_uv) = nv12.split_at_mut(pixels);
+        yuv_helper::argb_to_nv12(
+            bgra, stride, plano_y, largura, plano_uv, largura,
+            largura as i32, altura as i32,
+        );
+
+        // Guardado antes de enviar, para a cadencia ter o que repetir mesmo se
+        // este for o unico quadro que a tela produzir no proximo segundo.
+        let nv12 = Arc::new(nv12);
+        ultimo.guardar(nv12.clone(), largura, altura);
+        self.enviar(&nv12, largura, altura, ultimo.carimbar(timestamp_us));
+    }
+
+    /// Reenvia o ultimo quadro convertido, com carimbo novo.
+    ///
+    /// Devolve `false` quando ainda nao houve quadro nenhum para repetir.
+    pub fn repetir(&self, ultimo: &Ultimo, intervalo_us: i64) -> bool {
+        let Some((nv12, largura, altura)) = ultimo.pegar() else { return false };
+        let carimbo = ultimo.carimbar(ultimo.ultimo_carimbo() + intervalo_us);
+        self.enviar(&nv12, largura, altura, carimbo);
+        true
+    }
+
+    fn enviar(&self, nv12: &Arc<Vec<u8>>, largura: u32, altura: u32, timestamp_us: i64) {
         match self {
             Self::Software(source) => {
                 // Um buffer novo por quadro, de proposito: o codificador
                 // continua referenciando o quadro anterior depois de
                 // `capture_frame` voltar, e reescrever aquela memoria
                 // apareceria como rasgo na imagem.
-                let mut nv12 = NV12Buffer::new(largura, altura);
-                let (stride_y, stride_uv) = nv12.strides();
-                let (data_y, data_uv) = nv12.data_mut();
-                // O ARGB do libyuv e little-endian, entao os bytes batem com o
-                // BGRA que o Windows entrega. Nao ha troca de canais a fazer.
-                yuv_helper::argb_to_nv12(
-                    bgra, stride, data_y, stride_y, data_uv, stride_uv,
-                    largura as i32, altura as i32,
+                let mut buffer = NV12Buffer::new(largura, altura);
+                let (stride_y, stride_uv) = buffer.strides();
+                let (data_y, data_uv) = buffer.data_mut();
+                // O buffer do libwebrtc pode ter folga de linha, e o que esta
+                // guardado nao tem: a copia anda linha a linha, e nao de uma vez.
+                let pixels = largura as usize * altura as usize;
+                let (origem_y, origem_uv) = nv12.split_at(pixels);
+                copiar_plano(origem_y, largura as usize, data_y, stride_y as usize, altura as usize);
+                copiar_plano(
+                    origem_uv, largura as usize, data_uv, stride_uv as usize,
+                    altura as usize / 2,
                 );
-                source.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, nv12));
+                let mut quadro = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
+                quadro.timestamp_us = timestamp_us;
+                source.capture_frame(&quadro);
             }
             Self::Hardware(encoder) => {
-                let pixels = largura as usize * altura as usize;
-                // NV12 sem folga: plano Y inteiro, depois o UV entrelacado com
-                // metade das linhas. E o formato que o MFT espera quando o
-                // passo de linha e igual a largura.
-                let mut nv12 = vec![0u8; pixels + pixels / 2];
-                let (plano_y, plano_uv) = nv12.split_at_mut(pixels);
-                yuv_helper::argb_to_nv12(
-                    bgra, stride, plano_y, largura, plano_uv, largura,
-                    largura as i32, altura as i32,
-                );
-                let agora = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_micros() as i64;
-                encoder.submit(nv12, largura, altura, agora);
+                encoder.submit(nv12.clone(), largura, altura, timestamp_us);
             }
         }
+    }
+}
+
+/// Copia `linhas` de `largura` bytes, de um plano sem folga para um com folga.
+fn copiar_plano(origem: &[u8], largura: usize, destino: &mut [u8], passo: usize, linhas: usize) {
+    for linha in 0..linhas {
+        let de = linha * largura;
+        let para = linha * passo;
+        if de + largura > origem.len() || para + largura > destino.len() {
+            break;
+        }
+        destino[para..para + largura].copy_from_slice(&origem[de..de + largura]);
+    }
+}
+
+/// O ultimo quadro convertido, para a cadencia repetir quando a tela nao
+/// produzir outro.
+///
+/// O Windows **nao entrega quadro quando nada mudou na tela** — a propria
+/// documentacao da captura diz que nao ha taxa constante e que quem precisa de
+/// cadencia fixa tem de repetir o ultimo quadro. Por isso pedir 60 e receber 57
+/// nao se conserta mexendo no ritmo: o quadro que falta nunca existiu. Repetir
+/// custa quase nada em banda, porque quadro igual ao anterior comprime a
+/// praticamente zero.
+#[derive(Default)]
+pub struct Ultimo {
+    quadro: std::sync::Mutex<Option<(Arc<Vec<u8>>, u32, u32)>>,
+    /// Carimbo do ultimo quadro que saiu, seja real ou repetido.
+    ///
+    /// O repetido entra no meio da sequencia dos reais, e tempo que anda para
+    /// tras desmonta a reproducao do outro lado. Aqui os dois passam pela mesma
+    /// porta, que so deixa avancar.
+    emitido: AtomicI64,
+}
+
+impl Ultimo {
+    fn guardar(&self, nv12: Arc<Vec<u8>>, largura: u32, altura: u32) {
+        if let Ok(mut vaga) = self.quadro.lock() {
+            *vaga = Some((nv12, largura, altura));
+        }
+    }
+
+    fn pegar(&self) -> Option<(Arc<Vec<u8>>, u32, u32)> {
+        self.quadro.lock().ok().and_then(|vaga| vaga.clone())
+    }
+
+    fn ultimo_carimbo(&self) -> i64 {
+        self.emitido.load(Ordering::Relaxed)
+    }
+
+    /// Devolve o carimbo a usar, nunca menor que o anterior.
+    fn carimbar(&self, proposto: i64) -> i64 {
+        let anterior = self.emitido.load(Ordering::Relaxed);
+        let escolhido = proposto.max(anterior + 1);
+        self.emitido.store(escolhido, Ordering::Relaxed);
+        escolhido
+    }
+}
+
+/// Onde cada quadro para, do compositor ate a faixa publicada.
+///
+/// A taxa que aparece no diagnostico vem do fim da fila, e um numero abaixo do
+/// pedido nao diz de quem e a culpa: pode ser a tela que nao produziu, o ritmo
+/// aqui que descartou, ou o codificador que nao deu conta. Os tres tem conserto
+/// diferente e nenhum deles se deduz do outro, entao cada um tem seu contador.
+#[derive(Default)]
+pub struct Contagem {
+    /// Quadros que o motor de captura entregou. Teto de tudo o que vem depois:
+    /// se isto ja esta abaixo do pedido, nada la na frente recupera.
+    pub chegados: AtomicU64,
+    /// Descartados pela cadencia, por terem chegado antes do prazo.
+    pub fora_de_ritmo: AtomicU64,
+    /// Convertidos e passados adiante.
+    pub entregues: AtomicU64,
+    /// Repeticoes do ultimo quadro, quando a tela nao produziu nada no prazo.
+    pub repetidos: AtomicU64,
+}
+
+impl Contagem {
+    pub fn ler(&self) -> (u64, u64, u64, u64) {
+        (
+            self.chegados.load(Ordering::Relaxed),
+            self.fora_de_ritmo.load(Ordering::Relaxed),
+            self.entregues.load(Ordering::Relaxed),
+            self.repetidos.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// Sobe a thread de cadencia para uma captura que ja esta de pe.
+fn iniciar_cadencia(
+    destino: &Destino,
+    ultimo: &Arc<Ultimo>,
+    contagem: &Arc<Contagem>,
+    stop: Arc<AtomicBool>,
+    intervalo: std::time::Duration,
+) {
+    let cadencia = Cadencia {
+        destino: destino.clone(),
+        ultimo: ultimo.clone(),
+        contagem: contagem.clone(),
+        stop,
+        intervalo,
+    };
+    std::thread::spawn(move || cadencia.rodar());
+}
+
+/// Segura a taxa pedida repetindo o ultimo quadro quando a tela nao produz.
+///
+/// Roda numa thread propria em vez de dentro da captura porque o gatilho e
+/// justamente **a ausencia** de quadro: nao ha callback nenhum para pendurar
+/// isso. A cada prazo vencido sem entrega nova, o ultimo quadro sai de novo.
+///
+/// Custa pouco: quadro identico ao anterior comprime a quase nada, e a
+/// repeticao so acontece quando a tela esta parada, que e exatamente quando
+/// sobra processador.
+struct Cadencia {
+    destino: Destino,
+    ultimo: Arc<Ultimo>,
+    contagem: Arc<Contagem>,
+    stop: Arc<AtomicBool>,
+    intervalo: std::time::Duration,
+}
+
+impl Cadencia {
+    fn rodar(self) {
+        let intervalo_us = self.intervalo.as_micros() as i64;
+        let mut visto = 0u64;
+        let mut proximo = std::time::Instant::now() + self.intervalo;
+        while !self.stop.load(Ordering::Relaxed) {
+            let agora = std::time::Instant::now();
+            if agora < proximo {
+                // Dormir no maximo um prazo por vez, para o pedido de parada
+                // ser atendido logo mesmo com taxa baixa.
+                std::thread::sleep((proximo - agora).min(self.intervalo));
+                continue;
+            }
+
+            let entregues = self.contagem.entregues.load(Ordering::Relaxed);
+            if entregues == visto && self.destino.repetir(&self.ultimo, intervalo_us) {
+                self.contagem.repetidos.fetch_add(1, Ordering::Relaxed);
+            }
+            visto = self.contagem.entregues.load(Ordering::Relaxed);
+
+            proximo += self.intervalo;
+            // Prazo muito atrasado — a maquina engasgou — recomeca de agora, em
+            // vez de disparar uma rajada de repeticoes para "recuperar".
+            if proximo < agora {
+                proximo = agora + self.intervalo;
+            }
+        }
+    }
+}
+
+/// Traduz o relogio da captura para microssegundos desde a epoca.
+///
+/// O carimbo de um quadro tem de marcar o instante em que o compositor
+/// **produziu** a imagem, e nao o instante em que a conversao para NV12
+/// terminou. A conversao demora um tanto diferente a cada quadro — depende do
+/// que esta na tela e do que mais disputa o processador — e essa diferenca ia
+/// inteira para dentro do carimbo. Do outro lado, isso e imagem que anda em
+/// passos desiguais mesmo com a taxa cheia: os quadros chegam todos, mas com a
+/// hora errada escrita neles.
+///
+/// Os dois motores de captura contam desde que a maquina ligou, cada um do
+/// proprio zero. O primeiro quadro fixa a correspondencia com a epoca e os
+/// seguintes andam por diferenca: o espacamento passa a ser o da captura, e a
+/// base continua sendo a mesma que a transmissao sempre usou.
+pub struct Relogio {
+    base: Option<(i64, i64)>,
+}
+
+impl Relogio {
+    pub fn novo() -> Self {
+        Self { base: None }
+    }
+
+    /// `captura_us` vem do relogio do motor de captura. Zero ou negativo
+    /// significa que aquele motor nao soube dizer, e ai vale o relogio de
+    /// parede — que e o que havia antes.
+    pub fn epoca(&mut self, captura_us: i64) -> i64 {
+        let agora = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as i64;
+        if captura_us <= 0 {
+            return agora;
+        }
+        let (captura_zero, epoca_zero) = *self.base.get_or_insert((captura_us, agora));
+        epoca_zero + (captura_us - captura_zero)
     }
 }
 
@@ -231,6 +455,8 @@ pub struct CaptureFlags {
     pub intervalo: std::time::Duration,
     /// Janela cuja barra de titulo deve ficar de fora, quando pedido.
     pub recortar_janela: Option<isize>,
+    pub contagem: Arc<Contagem>,
+    pub ultimo: Arc<Ultimo>,
 }
 
 pub struct ScreenCapture {
@@ -253,6 +479,51 @@ pub struct ScreenCapture {
     /// entrega 30. O prazo avanca em passos do intervalo justamente para nao
     /// herdar esse atraso.
     proximo: std::time::Instant,
+    /// Chegada do quadro anterior e o espaco medio entre chegadas.
+    ///
+    /// A folga do prazo sai daqui: para saber se um quadro chegou "cedo" e
+    /// preciso saber de quanto em quanto tempo a tela entrega.
+    ultima_chegada: Option<std::time::Instant>,
+    periodo_fonte: Option<std::time::Duration>,
+    relogio: Relogio,
+    contagem: Arc<Contagem>,
+    ultimo: Arc<Ultimo>,
+}
+
+impl ScreenCapture {
+    /// Quanto um quadro pode chegar antes do prazo e ainda contar como o quadro
+    /// **daquele** prazo.
+    ///
+    /// Era um quarto do intervalo pedido, fixo. Isso resolve o caso da tela que
+    /// corre mais rapido do que se pede — 144 Hz para 60 fps — e nao resolve o
+    /// caso das duas taxas iguais: ai nao sobra folga nenhuma, e alguns
+    /// milissegundos de tremida no compositor bastam para o quadro chegar
+    /// "adiantado" e ser jogado fora. Sessenta pedidos viram cinquenta e
+    /// poucos entregues, e a diferenca aparece como imagem que engasga.
+    ///
+    /// A folga certa e meio periodo da propria fonte: cada quadro fica com o
+    /// prazo mais perto dele. Com a tela na mesma taxa que se pede, nada e
+    /// descartado; com a tela mais rapida, a conta continua pegando um a cada
+    /// tantos, como antes.
+    fn folga(&self) -> std::time::Duration {
+        match self.periodo_fonte {
+            Some(periodo) => periodo.min(self.intervalo) / 2,
+            None => self.intervalo / 4,
+        }
+    }
+
+    /// Media lenta do espaco entre chegadas: uma tremida sozinha nao deve mexer
+    /// na folga.
+    fn anotar_chegada(&mut self, agora: std::time::Instant) {
+        if let Some(anterior) = self.ultima_chegada {
+            let medida = agora.saturating_duration_since(anterior);
+            self.periodo_fonte = Some(match self.periodo_fonte {
+                Some(atual) => (atual * 7 + medida) / 8,
+                None => medida,
+            });
+        }
+        self.ultima_chegada = Some(agora);
+    }
 }
 
 impl GraphicsCaptureApiHandler for ScreenCapture {
@@ -267,6 +538,11 @@ impl GraphicsCaptureApiHandler for ScreenCapture {
             recortar_janela: ctx.flags.recortar_janela,
             // No passado para o primeiro quadro sair na hora.
             proximo: std::time::Instant::now(),
+            ultima_chegada: None,
+            periodo_fonte: None,
+            relogio: Relogio::novo(),
+            contagem: ctx.flags.contagem,
+            ultimo: ctx.flags.ultimo,
         })
     }
 
@@ -285,9 +561,13 @@ impl GraphicsCaptureApiHandler for ScreenCapture {
         //
         // A folga existe porque o quadro que chega um fio antes do prazo e o
         // quadro certo, nao um quadro adiantado: sem ela, jitter de um
-        // milissegundo derruba metade da taxa.
+        // milissegundo derruba metade da taxa. Quanto ela vale depende do
+        // ritmo da propria tela — ver `folga`.
         let agora = std::time::Instant::now();
-        if agora + self.intervalo / 4 < self.proximo {
+        self.contagem.chegados.fetch_add(1, Ordering::Relaxed);
+        self.anotar_chegada(agora);
+        if agora + self.folga() < self.proximo {
+            self.contagem.fora_de_ritmo.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         // Cadencia fixa. Se a captura engasgou e o prazo ficou para tras, volta
@@ -296,6 +576,10 @@ impl GraphicsCaptureApiHandler for ScreenCapture {
         if self.proximo < agora {
             self.proximo = agora + self.intervalo;
         }
+
+        // Lido antes da conversao, e do relogio do proprio compositor.
+        let captura_us = frame.timestamp().map(|t| t.Duration / 10).unwrap_or(0);
+        let timestamp_us = self.relogio.epoca(captura_us);
 
         let width = frame.width();
         let height = frame.height();
@@ -333,7 +617,8 @@ impl GraphicsCaptureApiHandler for ScreenCapture {
         }
         let bgra = &bgra[inicio..];
 
-        self.destino.entregar(bgra, stride, width, height);
+        self.destino.entregar(bgra, stride, width, height, timestamp_us, &self.ultimo);
+        self.contagem.entregues.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -353,6 +638,7 @@ pub enum CaptureHandle {
     Wgc {
         control: Option<CaptureControl<ScreenCapture, <ScreenCapture as GraphicsCaptureApiHandler>::Error>>,
         stop: Arc<AtomicBool>,
+        contagem: Arc<Contagem>,
     },
     /// DXGI Desktop Duplication: sem borda e sem aviso, em qualquer Windows a
     /// partir do 8. Duplica o monitor; janela sai por recorte.
@@ -369,9 +655,17 @@ impl CaptureHandle {
         }
     }
 
+    /// Chegados, descartados pela cadencia e entregues, nessa ordem.
+    pub fn contagem(&self) -> (u64, u64, u64, u64) {
+        match self {
+            Self::Wgc { contagem, .. } => contagem.ler(),
+            Self::Dxgi(handle) => handle.contagem(),
+        }
+    }
+
     pub fn stop(&mut self) {
         match self {
-            Self::Wgc { control, stop } => {
+            Self::Wgc { control, stop, .. } => {
                 stop.store(true, Ordering::Relaxed);
                 if let Some(control) = control.take() {
                     let _ = control.stop();
@@ -403,6 +697,9 @@ pub fn start(
     // na descricao que chega a interface: depurar captura em maquina alheia sem
     // isso e adivinhacao, porque build de release nao tem console.
     let mut queda: Option<String> = None;
+    let contagem = Arc::new(Contagem::default());
+    let ultimo = Arc::new(Ultimo::default());
+    let intervalo = std::time::Duration::from_secs_f64(1.0 / fps.max(1.0));
 
     // Escolha do motor. O WGC e o preferido: captura a janela de verdade, sem
     // depender de ela estar visivel, e nao gasta CPU copiando a tela inteira.
@@ -416,8 +713,11 @@ pub fn start(
         || !(GraphicsCaptureApi::is_border_settings_supported().unwrap_or(false)
             && borderless_allowed())
     {
-        match super::dxgi::start(target, destino.clone(), fps) {
-            Ok(handle) => return Ok((CaptureHandle::Dxgi(handle), "duplicação".into())),
+        match super::dxgi::start(target, destino.clone(), fps, contagem.clone(), ultimo.clone()) {
+            Ok(handle) => {
+                iniciar_cadencia(&destino, &ultimo, &contagem, handle.parada(), intervalo);
+                return Ok((CaptureHandle::Dxgi(handle), "duplicação".into()));
+            }
             // DXGI pode faltar em maquina virtual ou sessao remota. Ai o WGC
             // com borda ainda e melhor do que nao compartilhar nada.
             Err(erro) => {
@@ -428,15 +728,19 @@ pub fn start(
     }
 
     let stop = Arc::new(AtomicBool::new(false));
+    // A cadencia precisa do mesmo destino, e `flags` leva o original embora.
+    let destino_da_cadencia = destino.clone();
     let flags = CaptureFlags {
         destino,
         stop: stop.clone(),
-        intervalo: std::time::Duration::from_secs_f64(1.0 / fps.max(1.0)),
+        intervalo,
         // So faz sentido para janela: monitor nao tem barra de titulo.
         recortar_janela: match (sem_barra, target) {
             (true, Target::Window(hwnd)) => Some(hwnd),
             _ => None,
         },
+        contagem: contagem.clone(),
+        ultimo: ultimo.clone(),
     };
 
     // Pedir uma opcao que o Windows daquela maquina nao conhece nao devolve a
@@ -491,5 +795,8 @@ pub fn start(
         Some(erro) => format!("WGC (duplicação indisponível: {erro})"),
         None => "WGC".to_string(),
     };
-    Ok((CaptureHandle::Wgc { control: Some(control), stop }, motor))
+    // Depois de a captura abrir: thread repetindo quadro de uma captura que
+    // nao subiu seria trabalho para ninguem.
+    iniciar_cadencia(&destino_da_cadencia, &ultimo, &contagem, stop.clone(), intervalo);
+    Ok((CaptureHandle::Wgc { control: Some(control), stop, contagem }, motor))
 }

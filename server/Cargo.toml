@@ -18,5 +18,9 @@ tokio = { version = "1", features = ["full"] }
 # `fs` serve os arquivos de atualizacao para quem hospeda no Windows, onde nao
 # ha Caddy na frente para fazer isso.
 tower-http = { version = "0.6", features = ["cors", "limit", "trace", "fs"] }
+# Busca de GIF: o servidor fala com o Tenor para o cliente nao ter de falar.
+# `rustls` em vez do TLS do sistema para o binario de Windows nao depender
+# de nada instalado na maquina de quem hospeda.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 

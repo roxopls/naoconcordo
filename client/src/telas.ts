@@ -11,6 +11,7 @@
 
 import { RemoteTrack, Room, RoomEvent, Track } from "livekit-client";
 import "./styles.css";
+import { instalarBarra } from "./barra";
 import {
   pickSource, startShare, stopShare, switchShare, codecPreferido, type ShareQuality,
 } from "./screenshare";
@@ -211,4 +212,5 @@ async function start() {
   }
 }
 
+void instalarBarra("Telas — naoconcordo");
 void start();

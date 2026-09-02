@@ -77,7 +77,12 @@ nav { flex: 1; padding: 16px 10px; overflow-y: auto; }
 /* Flex em vez de grid com linhas fixas: os filhos ocultos usam display:none e
    saem do fluxo, entao posicao de linha nao e confiavel — era isso que fazia o
    1fr cair no compositor e o chat crescer sem rolagem. */
-.main-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #141417; position: relative; padding-bottom: 82px; }
+.main-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #141417; position: relative; }
+/* O rodape so e reservado enquanto a barra de chamada existe: ela flutua por
+   cima (`position: fixed`), e sem chamada esse espaco deixava o redator boiando
+   acima do fim da janela. Anda junto com `updateCallControls`, que e quem mostra
+   e esconde a barra. */
+.main-panel.com-chamada { padding-bottom: 82px; }
 .main-panel > .topbar { flex: 0 0 64px; }
 .main-panel > .stage { flex: 0 0 auto; }
 .main-panel > .messages { flex: 1 1 auto; }
@@ -569,6 +574,21 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 .reacao-add { padding: 1px 7px; border: 1px solid transparent; border-radius: 999px; background: none; color: var(--muted); font-size: 12px; cursor: pointer; opacity: 0; transition: opacity .15s; }
 .message:hover .reacao-add, .reacao-add:focus { opacity: 1; }
 .reacao-add:hover { border-color: var(--line); background: #1d1d22; color: #ededf2; }
+/* Letras no lugar de desenho: "GIF" e o rotulo que todo mundo ja reconhece,
+   e nenhum icone de tres letras fica legivel em 32 pixels. */
+.composer-gif { font: 700 10px/1 system-ui, sans-serif; letter-spacing: .04em; }
+
+.seletor-gif { width: 340px; padding: 8px; display: grid; gap: 8px; }
+.seletor-gif input { width: 100%; padding: 8px 10px; color: white; background: #202025; border: 1px solid var(--line); border-radius: 9px; outline: 0; }
+.seletor-gif input:focus { border-color: var(--accent); }
+/* Duas colunas de altura livre: GIF e alto ou largo sem aviso, e forcar todos
+   ao mesmo quadro cortaria metade da piada. */
+.seletor-gif .grade { height: 300px; overflow-y: auto; columns: 2; column-gap: 6px; scrollbar-color: #29292f transparent; }
+.seletor-gif .grade button { width: 100%; margin: 0 0 6px; padding: 0; display: block; border: 0; border-radius: 8px; overflow: hidden; background: #202025; cursor: pointer; }
+.seletor-gif .grade img { width: 100%; display: block; }
+.seletor-gif .grade button:hover { outline: 2px solid var(--accent); }
+.seletor-gif .aviso { padding: 20px 8px; color: #8b8b95; text-align: center; }
+
 .seletor-emoji { display: flex; flex-wrap: wrap; gap: 2px; max-width: 190px; padding: 6px; }
 .seletor-emoji button { width: 30px; height: 30px; border: 0; border-radius: 7px; background: none; font-size: 16px; cursor: pointer; }
 .seletor-emoji button:hover { background: #2a2a31; }
@@ -702,6 +722,18 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 .titlebar-botoes svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.2; }
 /* Com a barra no ar, a aplicacao ocupa o que sobra da tela. */
 .titlebar:not(.hidden) ~ .app-shell { height: calc(100vh - 32px); }
+/* Nas janelas de telas e de cameras a barra e o primeiro filho do corpo, e o
+   resto precisa caber no que sobra. */
+body.com-barra { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+body.com-barra > .titlebar { flex: 0 0 32px; }
+/* As duas janelas fixavam a altura em `100vh`, o que com a barra somaria 32px a
+   mais e faria a ultima fileira sair pela borda de baixo. Dentro do corpo em
+   coluna, ocupar o que sobra e o certo. */
+body.com-barra .cameras-window-grid,
+body.com-barra .telas-grid { height: auto; flex: 1 1 auto; min-height: 0; }
+/* O aviso de "conectando" cobria a tela inteira, barra inclusive, e os botoes
+   ficavam sem clique por baixo dele. */
+body.com-barra .cameras-status { top: 32px; }
 
 /* Aviso que leva a origem da mensagem: sem o convite visual ninguem descobre
    que da para clicar. */

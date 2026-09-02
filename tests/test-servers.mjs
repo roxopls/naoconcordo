@@ -35,7 +35,7 @@ check("donoRecebeTokenDeTela", tokenTela.status === 200, String(tokenTela.status
 const claimsTela = decodificar((await tokenTela.json()).token);
 const tokenNormal = await post("/api/livekit-token", { roomId: canalVoz.id }, dono.token);
 const claimsNormal = decodificar((await tokenNormal.json()).token);
-check("telaTemIdentidadeSeparada", claimsTela.sub !== claimsNormal.sub && claimsTela.sub.includes("-screen-"), claimsTela.sub);
+check("telaTemIdentidadeSeparada", claimsTela.sub !== claimsNormal.sub && claimsTela.sub.endsWith("#tela"), claimsTela.sub);
 check("telaMantemONome", claimsTela.name === claimsNormal.name, claimsTela.name);
 check("telaPublicaMasNaoAssina", claimsTela.video.canPublish === true && claimsTela.video.canSubscribe === false, JSON.stringify(claimsTela.video));
 // `hidden` esconderia a faixa de todo mundo, e o compartilhamento nao chegaria.

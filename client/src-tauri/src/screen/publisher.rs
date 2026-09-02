@@ -168,7 +168,14 @@ pub async fn start(
                 source: TrackSource::Screenshare,
                 video_encoding: Some(VideoEncoding {
                     max_bitrate: quality.bitrate,
-                    max_framerate: quality.fps,
+                    // Com folga de proposito. O limitador do libwebrtc corta o
+                    // quadro que faria a taxa instantanea passar do teto, e a
+                    // taxa instantanea de uma tela de 60 Hz passa de 60 o tempo
+                    // todo — ela nunca entrega exatamente de 16,667 em 16,667
+                    // ms. Teto exato aqui significa perder alguns quadros por
+                    // segundo de uma sequencia que ja vem no ritmo certo. Quem
+                    // segura o ritmo de verdade e a cadencia da captura.
+                    max_framerate: quality.fps + 2.0,
                 }),
                 // Simulcast de tela gasta upload que esta escasso nesta casa e
                 // ninguem aqui assiste em telinha.
@@ -280,24 +287,54 @@ pub struct Estatisticas {
     pub falha_captura: Option<String>,
     /// Idem para o codificador de hardware, que tambem morria calado.
     pub falha_encoder: Option<String>,
+    /// Quadros-chave produzidos, e pedidos que chegaram de quem assiste.
+    ///
+    /// Imagem "esfarelada" e decodificador sem quadro de referencia: ele mostra
+    /// lixo ate chegar uma chave. Os dois numeros separam dois defeitos: pedido
+    /// chegando e imagem ainda quebrada aponta para o que o codificador produz;
+    /// pedido que nao chega aponta para o caminho de volta do WebRTC.
+    pub chaves: u64,
+    pub pedidos_de_chave: u64,
+    /// O caminho do quadro, do compositor ate a faixa.
+    ///
+    /// A taxa sozinha nao diz de quem e a culpa quando fica abaixo do pedido.
+    /// `chegados` e o teto: se a tela nao produziu, nada adiante recupera.
+    /// `fora_de_ritmo` e o que a cadencia recusou por ter vindo antes do prazo.
+    /// `entregues` menos `descartados` e o que o codificador de fato viu.
+    pub chegados: u64,
+    pub fora_de_ritmo: u64,
+    pub entregues: u64,
+    /// Repeticoes do ultimo quadro, para a taxa nao cair quando a tela para.
+    pub repetidos: u64,
 }
 
 /// Estatisticas da transmissao em curso, ou `None` quando nao ha nenhuma.
 pub async fn estatisticas(state: &ShareState) -> Option<Estatisticas> {
-    let (track, hardware, falha_captura, falha_encoder) = {
+    let (
+        track,
+        hardware,
+        falha_captura,
+        falha_encoder,
+        (chegados, fora_de_ritmo, entregues, repetidos),
+    ) = {
         let guarda = state.0.lock().await;
         let share = guarda.as_ref()?;
         // O nome vem daqui, e nao do WebRTC: com a GPU comprimindo, o que ele
         // conhece e o codificador de passagem, que nao comprime nada.
         let hardware = share.encoder.as_ref().map(|hw| {
-            (format!("{} ({})", hw.nome(), hw.codec().nome_livekit()), hw.descartados())
+            (
+                format!("{} ({})", hw.nome(), hw.codec().nome_livekit()),
+                hw.descartados(),
+                hw.contagem_de_chaves(),
+            )
         });
         let falha_encoder = share.encoder.as_ref().and_then(|hw| hw.falha());
-        (share.video_track.clone(), hardware, share.capture.falha(), falha_encoder)
+        let caminho = share.capture.contagem();
+        (share.video_track.clone(), hardware, share.capture.falha(), falha_encoder, caminho)
     };
-    let (nome_hardware, descartados) = match hardware {
-        Some((nome, descartados)) => (Some(nome), descartados),
-        None => (None, 0),
+    let (nome_hardware, descartados, (chaves, pedidos_de_chave)) = match hardware {
+        Some((nome, descartados, contagem)) => (Some(nome), descartados, contagem),
+        None => (None, 0, (0, 0)),
     };
     // Fora do cadeado: `get_stats` conversa com a thread de sinalizacao do
     // WebRTC, e segurar o estado ate a resposta travaria parar e pausar.
@@ -328,6 +365,12 @@ pub async fn estatisticas(state: &ShareState) -> Option<Estatisticas> {
             descartados,
             falha_captura,
             falha_encoder,
+            chegados,
+            fora_de_ritmo,
+            entregues,
+            repetidos,
+            chaves,
+            pedidos_de_chave,
             quadros: fora.frames_encoded,
             quedas_de_resolucao: fora.quality_limitation_resolution_changes,
         });

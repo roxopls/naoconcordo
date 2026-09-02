@@ -41,6 +41,11 @@ export async function abrirJanela(
     return Boolean(aberta);
   }
   const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-  new WebviewWindow(rotulo, { url, title: titulo, width: largura, height: altura, resizable: true });
+  // Sem a moldura do Windows: a barra desenhada pelo proprio aplicativo entra no
+  // lugar dela, e assim todas as janelas ficam com a mesma cara.
+  new WebviewWindow(rotulo, {
+    url, title: titulo, width: largura, height: altura,
+    resizable: true, decorations: false,
+  });
   return true;
 }

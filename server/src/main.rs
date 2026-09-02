@@ -18,6 +18,8 @@ use axum::extract::DefaultBodyLimit;
 use tower_http::{cors::{Any, CorsLayer}, limit::RequestBodyLimitLayer, services::ServeDir, trace::TraceLayer};
 use uuid::Uuid;
 
+mod gifs;
+
 type HmacSha256 = Hmac<Sha256>;
 const DEFAULT_ROOM: &str = "geral";
 const MAX_MESSAGES: usize = 2_000;
@@ -28,7 +30,14 @@ const SESSION_SECONDS: u64 = 7 * 24 * 60 * 60;
 const PASSWORD_ITERATIONS: u32 = 210_000;
 
 #[derive(Clone)]
-struct Config { auth_salt: String, owner_password: String, admin_username: String, livekit_key: String, livekit_secret: String, livekit_url: String, data_dir: PathBuf, upload_dir: PathBuf, upload_fallback_dir: PathBuf, upload_primary_cap: u64 }
+struct Config { auth_salt: String, owner_password: String, admin_username: String, livekit_key: String, livekit_secret: String, livekit_url: String, data_dir: PathBuf, upload_dir: PathBuf, upload_fallback_dir: PathBuf, upload_primary_cap: u64,
+    /// Chave da busca de GIF, e de qual provedor ela e. Sem chave o botao nao
+    /// aparece no cliente.
+    ///
+    /// O nome nao cita provedor de proposito: o Tenor fechou para cadastros
+    /// novos em janeiro de 2026, e trocar de fonte tem de ser uma linha no
+    /// `.env`, nao uma versao nova do servidor.
+    gif_key: Option<String>, gif_provider: gifs::Provedor }
 #[derive(Clone)]
 struct AppState {
     config: Config, auth_key: [u8; 32],
@@ -419,7 +428,10 @@ struct ChallengeOutput {
 #[derive(Serialize)] struct HealthOutput { ok: bool, service: &'static str, time: DateTime<Utc> }
 #[derive(Serialize)] struct LivekitOutput { token: String, url: String, room: String }
 #[derive(Serialize)] struct WelcomeOutput { #[serde(rename = "type")] kind: &'static str, messages: Vec<ChatMessage> }
-#[derive(Serialize)] #[serde(rename_all = "camelCase")] struct BootstrapOutput { servers: Vec<ServerInfo>, rooms: Vec<RoomInfo>, profiles: Vec<Profile>, is_owner: bool, is_admin: bool, roles: HashMap<String, ServerRole>, online: Vec<String>, voice: HashMap<String, Vec<String>> }
+#[derive(Serialize)] #[serde(rename_all = "camelCase")] struct BootstrapOutput { servers: Vec<ServerInfo>, rooms: Vec<RoomInfo>, profiles: Vec<Profile>, is_owner: bool, is_admin: bool, roles: HashMap<String, ServerRole>, online: Vec<String>, voice: HashMap<String, Vec<String>>,
+    /// Se este servidor tem busca de GIF. Sem isso o cliente mostraria um botao
+    /// que so sabe dar erro.
+    gifs: bool }
 #[derive(Serialize)] #[serde(rename_all = "camelCase")]
 struct InviteView { code: String, label: String, created_at: DateTime<Utc>, created_by: String, used_by: Option<String>, used_at: Option<DateTime<Utc>>, revoked: bool }
 #[derive(Serialize)] #[serde(rename_all = "camelCase")] struct InvitesOutput { invites: Vec<InviteView> }
@@ -452,6 +464,10 @@ async fn main() {
         data_dir: PathBuf::from(env::var("DATA_DIR").unwrap_or_else(|_| "/app/data".into())),
         upload_dir: PathBuf::from(env::var("UPLOAD_DIR").unwrap_or_else(|_| "/app/uploads".into())),
         upload_fallback_dir: PathBuf::from(env::var("UPLOAD_FALLBACK_DIR").unwrap_or_else(|_| "/app/uploads-fallback".into())),
+        // Opcional de proposito: quem hospeda sem chave continua com tudo o
+        // mais funcionando, so sem a busca de GIF.
+        gif_key: env::var("GIF_API_KEY").ok().filter(|chave| !chave.trim().is_empty()),
+        gif_provider: gifs::Provedor::ler(&env::var("GIF_PROVIDER").unwrap_or_default()),
         // Quando o disco principal passa disso, o proximo arquivo vai para a
         // reserva. Contamos o que gravamos em vez de perguntar ao sistema,
         // para nao depender de chamada externa dentro do container.
@@ -511,6 +527,9 @@ async fn main() {
         .route("/api/profile/avatar", put(update_avatar))
         .route("/api/profile", put(update_profile))
         .route("/api/messages/{id}", put(edit_message).delete(delete_message))
+        .route("/api/gifs", get(buscar_gifs))
+        .route("/api/gifs/midia", get(midia_de_gif))
+        .route("/api/gifs/guardar", post(guardar_gif))
         .route("/api/files", post(upload_file))
         .route("/api/files/{id}", get(download_file))
         .route("/api/files/{id}/link", get(link_do_arquivo))
@@ -752,6 +771,7 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Respons
         servers, rooms,
         profiles: state.profiles.read().await.values().cloned().collect(),
         is_owner: session.is_owner, is_admin: is_admin(&state, &session.username), roles, online, voice,
+        gifs: state.config.gif_key.is_some(),
     }).into_response()
 }
 /// Admin do sistema: quem emite convites e ve quem os usou.
@@ -920,8 +940,20 @@ async fn livekit_token(State(state): State<AppState>, headers: HeaderMap, Json(b
     //   faixa para ninguem. Ele nao vira um fantasma na lista porque divide o
     //   `name` com a pessoa, e a interface agrupa por nome; o `metadata` fica
     //   como marca explicita, util para depurar quem e quem numa sala.
-    let sub = if body.screen { format!("{}-screen-{}", s.username, random_token(5)) }
-              else { format!("{}-{}", s.username, random_token(5)) };
+    //
+    // A identidade e fixa, uma por sabor. Antes ela levava um sufixo sorteado
+    // a cada pedido de token, e cada conexao virava uma pessoa diferente aos
+    // olhos do LiveKit. Quando uma conexao caia sem se despedir — queda de
+    // rede, aplicativo fechado no tapa — a antiga ficava na sala como fantasma
+    // que ainda publica microfone, e quem voltava encontrava a si mesmo e se
+    // ouvia. Com identidade fixa o LiveKit desconecta a conexao velha sozinho
+    // assim que a nova entra, que e exatamente o que se quer.
+    //
+    // O `#` separa porque `valid_name` nao o aceita num nome de usuario: assim
+    // ninguem consegue registrar um nome que colida com a tela de outra pessoa.
+    let sub = if body.screen { format!("{}#tela", s.username) }
+              else if body.viewer { format!("{}#cameras", s.username) }
+              else { s.username.clone() };
     let metadata = body.screen.then(|| format!(r#"{{"kind":"screen","owner":{}}}"#,
         serde_json::Value::String(s.username.clone())));
     let claims = LivekitClaims { iss: state.config.livekit_key.clone(), sub, name: s.username,
@@ -1310,15 +1342,38 @@ async fn upload_file(State(state): State<AppState>, headers: HeaderMap, body: ax
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("arquivo.{ext}"));
 
+    match guardar_bytes(&state, &session.username, &body, &mime, &ext, name).await {
+        Ok((stored, novo)) => {
+            let status = if novo { StatusCode::CREATED } else { StatusCode::OK };
+            (status, Json(stored)).into_response()
+        }
+        Err((status, motivo)) => error(status, motivo),
+    }
+}
+
+/// Grava bytes como anexo e devolve a ficha, mais se o arquivo era novo.
+///
+/// Extraido de `upload_file` porque o GIF escolhido na busca entra pelo mesmo
+/// caminho: o servidor baixa uma vez e o resto do aplicativo passa a tratar
+/// aquilo como qualquer outro anexo — mesmo link, mesmo menu, mesma copia unica
+/// por conteudo.
+async fn guardar_bytes(
+    state: &AppState,
+    dono: &str,
+    body: &[u8],
+    mime: &str,
+    ext: &str,
+    name: String,
+) -> Result<(StoredFile, bool), (StatusCode, &'static str)> {
     // O id e o hash do conteudo: o mesmo arquivo enviado de novo nao ocupa
     // espaco duas vezes, e ainda ganha o envio instantaneo.
-    let digest = <Sha256 as sha2::Digest>::digest(&body);
+    let digest = <Sha256 as sha2::Digest>::digest(body);
     let id = format!("{}.{}", URL_SAFE_NO_PAD.encode(digest), ext);
 
     {
         let files = state.files.read().await;
         if let Some(existing) = files.get(&id) {
-            return (StatusCode::OK, Json(existing.clone())).into_response();
+            return Ok((existing.clone(), false));
         }
     }
 
@@ -1330,18 +1385,119 @@ async fn upload_file(State(state): State<AppState>, headers: HeaderMap, body: ax
     } else {
         (state.config.upload_fallback_dir.clone(), "fallback")
     };
-    if fs::write(dir.join(&id), &body).await.is_err() {
-        return error(StatusCode::INSUFFICIENT_STORAGE, "Nao foi possivel gravar o arquivo.");
+    if fs::write(dir.join(&id), body).await.is_err() {
+        return Err((StatusCode::INSUFFICIENT_STORAGE, "Nao foi possivel gravar o arquivo."));
     }
 
     let stored = StoredFile {
-        id: id.clone(), name, mime, size: body.len() as u64,
-        owner: session.username.clone(), created_at: Utc::now(), disk: disk.into(),
+        id: id.clone(), name, mime: mime.to_string(), size: body.len() as u64,
+        owner: dono.to_string(), created_at: Utc::now(), disk: disk.into(),
     };
     let mut files = state.files.write().await;
     files.insert(id, stored.clone());
     persist_json(&state.config.data_dir, "files.json", &*files).await;
-    (StatusCode::CREATED, Json(stored)).into_response()
+    Ok((stored, true))
+}
+
+#[derive(Deserialize)]
+struct BuscaDeGif {
+    #[serde(default)] q: String,
+    #[serde(default)] pos: String,
+    #[serde(default)] locale: String,
+}
+
+/// Procura GIF no Tenor. Exige sessao, como tudo aqui.
+async fn buscar_gifs(State(state): State<AppState>, headers: HeaderMap, Query(busca): Query<BuscaDeGif>) -> Response {
+    if authenticated(&state, &headers).await.is_none() {
+        return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
+    }
+    let Some(chave) = state.config.gif_key.as_deref() else {
+        return error(StatusCode::NOT_IMPLEMENTED, "Este servidor nao tem busca de GIF configurada.");
+    };
+    // Termo enorme so gasta a cota do provedor, e o cursor vem de volta dele:
+    // os dois sao podados antes de virar URL.
+    let termo: String = busca.q.chars().take(100).collect();
+    let posicao: String = busca.pos.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "-_=.".contains(*c)).take(120).collect();
+    let idioma = if !busca.locale.is_empty()
+        && busca.locale.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        busca.locale.chars().take(10).collect()
+    } else {
+        "pt_BR".to_string()
+    };
+    match gifs::procurar(state.config.gif_provider, chave, &state.auth_key, &termo, &posicao, &idioma).await {
+        Ok(pagina) => Json(pagina).into_response(),
+        Err(motivo) => {
+            // O motivo pode trazer a chave da API de volta: fica no log.
+            eprintln!("[gifs] busca falhou: {motivo}");
+            error(StatusCode::BAD_GATEWAY, "A busca de GIF nao respondeu.")
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct MidiaDeGif { #[serde(default)] f: String }
+
+/// Repassa a miniatura, para o cliente nunca falar com o provedor.
+async fn midia_de_gif(State(state): State<AppState>, headers: HeaderMap, Query(pedido): Query<MidiaDeGif>) -> Response {
+    if authenticated(&state, &headers).await.is_none() {
+        return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
+    }
+    let Some(url) = gifs::abrir(&state.auth_key, state.config.gif_provider, &pedido.f) else {
+        return error(StatusCode::NOT_FOUND, "Nao encontrado.");
+    };
+    match gifs::baixar(&url).await {
+        Ok((bytes, tipo)) => {
+            let mut cabecalhos = HeaderMap::new();
+            if let Ok(valor) = tipo.parse() { cabecalhos.insert("content-type", valor); }
+            // A miniatura e imutavel: o endereco carrega o conteudo dentro da
+            // assinatura, entao guardar em cache nunca serve imagem velha.
+            if let Ok(valor) = "public, max-age=86400".parse() { cabecalhos.insert("cache-control", valor); }
+            (StatusCode::OK, cabecalhos, bytes).into_response()
+        }
+        Err(_) => error(StatusCode::NOT_FOUND, "Nao encontrado."),
+    }
+}
+
+#[derive(Deserialize)]
+struct GuardarGif { ficha: String, #[serde(default)] descricao: String }
+
+/// Baixa o GIF escolhido e o guarda como anexo comum.
+///
+/// Guardar, em vez de mandar o endereco de fora dentro da mensagem: assim a
+/// conversa nao depende de um servico de terceiro continuar no ar — e o Tenor
+/// fechando as portas mostrou que isso acontece — e quem abre a mensagem depois
+/// nao avisa o provedor de que a leu.
+async fn guardar_gif(State(state): State<AppState>, headers: HeaderMap, Json(pedido): Json<GuardarGif>) -> Response {
+    let Some((_, session)) = authenticated(&state, &headers).await else {
+        return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
+    };
+    let Some(url) = gifs::abrir(&state.auth_key, state.config.gif_provider, &pedido.ficha) else {
+        return error(StatusCode::NOT_FOUND, "Nao encontrado.");
+    };
+    let (bytes, tipo) = match gifs::baixar(&url).await {
+        Ok(par) => par,
+        Err(motivo) => {
+            eprintln!("[gifs] download falhou: {motivo}");
+            return error(StatusCode::BAD_GATEWAY, "Nao foi possivel baixar o GIF.");
+        }
+    };
+    let Some(ext) = allowed_mime(&tipo) else {
+        return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Tipo de arquivo nao aceito.");
+    };
+    // A descricao que o provedor manda e um titulo — "Dance Dancing GIF" — e nao
+    // um nome de arquivo. Sem a extensao, o que a pessoa salvar chega ao disco
+    // sem tipo, e o Windows nao sabe com o que abrir.
+    let nome = nome_de_anexo(&pedido.descricao, &ext);
+    let nome = if nome.to_lowercase().ends_with(&format!(".{ext}")) {
+        nome
+    } else {
+        format!("{nome}.{ext}")
+    };
+    match guardar_bytes(&state, &session.username, &bytes, &tipo, &ext, nome).await {
+        Ok((stored, _)) => (StatusCode::CREATED, Json(stored)).into_response(),
+        Err((status, motivo)) => error(status, motivo),
+    }
 }
 
 /// Entrega o arquivo. Exige sessao: nada aqui e publico.

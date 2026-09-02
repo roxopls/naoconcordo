@@ -58,6 +58,14 @@ fn salvar_config(nova: Config) -> Result<(), String> {
     atual.endereco_publico = nova.endereco_publico.trim().to_string();
     atual.porta = if nova.porta == 0 { 3040 } else { nova.porta };
     atual.admin = if nova.admin.trim().is_empty() { "admin".into() } else { nova.admin.trim().to_string() };
+    // Esta e a excecao a regra acima: nao e segredo deste servidor, e sim uma
+    // credencial de um servico de fora que quem hospeda tem de colar aqui.
+    atual.gif_key = nova.gif_key.trim().to_string();
+    atual.gif_provider = if nova.gif_provider.trim().is_empty() {
+        "giphy".into()
+    } else {
+        nova.gif_provider.trim().to_lowercase()
+    };
     config::salvar(&atual)
 }
 

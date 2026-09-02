@@ -50,6 +50,21 @@
           <label>Porta<input id="porta" type="number" min="1" max="65535" value="3040" /></label>
           <label>Administrador<input id="admin" placeholder="admin" autocomplete="off" /></label>
         </div>
+        <div class="par">
+          <label>Busca de GIF
+            <select id="gif-provider">
+              <option value="giphy">Giphy</option>
+              <option value="tenor">Tenor</option>
+            </select>
+          </label>
+          <label>Chave (opcional)<input id="gif-key" placeholder="em branco: sem botão de GIF" autocomplete="off" spellcheck="false" /></label>
+        </div>
+        <p class="dica">
+          Liga o botão de GIF no aplicativo. A chave fica só neste servidor — é
+          ele quem conversa com o provedor, nunca o computador de quem usa.
+          O Tenor parou de aceitar cadastros novos em janeiro de 2026, então
+          serve apenas a quem já tem chave dele.
+        </p>
         <div class="acoes">
           <button id="salvar" class="secundario" type="button">Salvar</button>
           <button id="firewall" class="secundario" type="button">Liberar no firewall</button>

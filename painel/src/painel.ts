@@ -24,6 +24,8 @@ type Config = {
   enderecoPublico: string;
   porta: number;
   admin: string;
+  gifProvider: string;
+  gifKey: string;
 };
 type Endereco = { ip: string; interface: string; vpn: boolean };
 type Situacao = {
@@ -75,6 +77,8 @@ function pintar(situacao: Situacao) {
     byId<HTMLInputElement>("endereco-publico").value = config.enderecoPublico;
     byId<HTMLInputElement>("porta").value = String(config.porta);
     byId<HTMLInputElement>("admin").value = config.admin;
+    byId<HTMLSelectElement>("gif-provider").value = config.gifProvider || "giphy";
+    byId<HTMLInputElement>("gif-key").value = config.gifKey || "";
   }
 
   // ----------------------------------------------------------- enderecos
@@ -133,6 +137,8 @@ async function salvar() {
     enderecoPublico: byId<HTMLInputElement>("endereco-publico").value.trim(),
     porta: Number(byId<HTMLInputElement>("porta").value) || 3040,
     admin: byId<HTMLInputElement>("admin").value.trim() || "admin",
+    gifProvider: byId<HTMLSelectElement>("gif-provider").value,
+    gifKey: byId<HTMLInputElement>("gif-key").value.trim(),
   };
   try {
     await invoke("salvar_config", { nova: config });
@@ -145,7 +151,7 @@ async function salvar() {
 }
 
 // ------------------------------------------------------------------- botoes
-for (const id of ["endereco-publico", "porta", "admin"]) {
+for (const id of ["endereco-publico", "porta", "admin", "gif-provider", "gif-key"]) {
   byId(id).addEventListener("input", () => { editando = true; });
 }
 byId("salvar").onclick = () => void salvar();

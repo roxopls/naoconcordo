@@ -48,6 +48,16 @@ pub struct Config {
     pub owner_password: String,
     pub livekit_key: String,
     pub livekit_secret: String,
+    /// Busca de GIF: de qual provedor e com qual chave. Chave vazia significa
+    /// sem busca — o botao some no aplicativo e nada mais muda.
+    ///
+    /// O provedor e configuravel porque eles fecham: o Tenor parou de aceitar
+    /// cadastros novos em janeiro de 2026. Trocar de fonte tem de ser um campo
+    /// nesta tela, nao uma versao nova do servidor.
+    #[serde(default)]
+    pub gif_provider: String,
+    #[serde(default)]
+    pub gif_key: String,
 }
 
 fn segredo() -> String {
@@ -70,6 +80,10 @@ impl Config {
             // mesmo — e os dois lados aqui somos nos.
             livekit_key: "naoconcordo".into(),
             livekit_secret: segredo(),
+            // Nao ha como gerar estas: quem hospeda pega a sua com o
+            // provedor, ou deixa em branco e fica sem o botao de GIF.
+            gif_provider: "giphy".into(),
+            gif_key: String::new(),
         }
     }
 
@@ -83,6 +97,10 @@ impl Config {
             ("LIVEKIT_API_KEY".into(), self.livekit_key.clone()),
             ("LIVEKIT_API_SECRET".into(), self.livekit_secret.clone()),
             ("LIVEKIT_PUBLIC_URL".into(), self.url_livekit()),
+            // Vazia de proposito quando nao configurada: o servidor trata
+            // ausente e vazia do mesmo jeito.
+            ("GIF_API_KEY".into(), self.gif_key.clone()),
+            ("GIF_PROVIDER".into(), self.gif_provider.clone()),
             ("DATA_DIR".into(), pasta_dados().display().to_string()),
             ("UPLOAD_DIR".into(), pasta_anexos().display().to_string()),
             // Sem disco de reserva na maquina de casa: o mesmo lugar serve.

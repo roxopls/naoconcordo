@@ -18,6 +18,7 @@ use std::sync::{
 };
 
 use windows::Win32::Foundation::{HMODULE, HWND, RECT};
+use windows::Win32::System::Performance::QueryPerformanceFrequency;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
@@ -47,11 +48,21 @@ pub struct DuplicationHandle {
     thread: Option<std::thread::JoinHandle<()>>,
     /// Por que a duplicacao parou, quando parou sozinha.
     falha: Arc<std::sync::Mutex<Option<String>>>,
+    contagem: Arc<super::capture::Contagem>,
 }
 
 impl DuplicationHandle {
     pub fn falha(&self) -> Option<String> {
         self.falha.lock().ok().and_then(|vaga| vaga.clone())
+    }
+
+    pub fn contagem(&self) -> (u64, u64, u64, u64) {
+        self.contagem.ler()
+    }
+
+    /// O mesmo sinal de parada do laco, para a cadencia encerrar junto.
+    pub fn parada(&self) -> Arc<AtomicBool> {
+        self.stop.clone()
     }
 }
 
@@ -191,7 +202,13 @@ fn textura_de_leitura(
 }
 
 /// Comeca a duplicar e alimenta `destino` com os quadros.
-pub fn start(target: Target, destino: Destino, fps: f64) -> Result<DuplicationHandle, String> {
+pub fn start(
+    target: Target,
+    destino: Destino,
+    fps: f64,
+    contagem: Arc<super::capture::Contagem>,
+    ultimo: Arc<super::capture::Ultimo>,
+) -> Result<DuplicationHandle, String> {
     let (monitor, janela) = monitor_do_alvo(target);
     let (origem_x, origem_y) = origem_do_monitor(monitor)?;
 
@@ -220,7 +237,10 @@ pub fn start(target: Target, destino: Destino, fps: f64) -> Result<DuplicationHa
     // que sobra e so o do `AcquireNextFrame`, nao o da tela inteira.
     let intervalo = std::time::Duration::from_secs_f64(1.0 / fps.max(1.0));
 
+    let contagem_thread = contagem.clone();
     let thread = std::thread::spawn(move || {
+        let contagem = contagem_thread;
+        let ultimo = ultimo;
         let anotar = |motivo: String| {
             eprintln!("[captura] duplicacao encerrada: {motivo}");
             if let Ok(mut vaga) = anotar.lock() {
@@ -273,6 +293,18 @@ pub fn start(target: Target, destino: Destino, fps: f64) -> Result<DuplicationHa
         // periodo de tela depois e mede um fio a menos que o intervalo, entao e
         // descartado — 60 fps pedidos viram 30 entregues.
         let mut proximo = std::time::Instant::now();
+        // Ritmo da fonte e relogio dos carimbos: mesmos motivos do WGC, ver
+        // `ScreenCapture::folga` e `Relogio` em `capture.rs`.
+        let mut ultima_chegada: Option<std::time::Instant> = None;
+        let mut periodo_fonte: Option<std::time::Duration> = None;
+        let mut relogio = super::capture::Relogio::novo();
+        // A duplicacao conta em batidas do contador de alta resolucao, nao em
+        // microssegundos.
+        let batidas_por_segundo = {
+            let mut f = 0i64;
+            unsafe { QueryPerformanceFrequency(&mut f) }.ok();
+            f
+        };
 
         while !parar.load(Ordering::Relaxed) {
             let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -299,7 +331,21 @@ pub fn start(target: Target, destino: Destino, fps: f64) -> Result<DuplicationHa
             // vale para o quadro que chega um fio antes do prazo, que e o quadro
             // certo e nao um adiantado.
             let agora = std::time::Instant::now();
-            if agora + intervalo / 4 < proximo {
+            contagem.chegados.fetch_add(1, Ordering::Relaxed);
+            if let Some(anterior) = ultima_chegada {
+                let medida = agora.saturating_duration_since(anterior);
+                periodo_fonte = Some(match periodo_fonte {
+                    Some(atual) => (atual * 7 + medida) / 8,
+                    None => medida,
+                });
+            }
+            ultima_chegada = Some(agora);
+            let folga = match periodo_fonte {
+                Some(periodo) => periodo.min(intervalo) / 2,
+                None => intervalo / 4,
+            };
+            if agora + folga < proximo {
+                contagem.fora_de_ritmo.fetch_add(1, Ordering::Relaxed);
                 let _ = unsafe { dup.ReleaseFrame() };
                 continue;
             }
@@ -307,6 +353,14 @@ pub fn start(target: Target, destino: Destino, fps: f64) -> Result<DuplicationHa
             if proximo < agora {
                 proximo = agora + intervalo;
             }
+
+            // Do relogio da duplicacao, antes de copiar e converter.
+            let captura_us = if batidas_por_segundo > 0 {
+                info.LastPresentTime * 1_000_000 / batidas_por_segundo
+            } else {
+                0
+            };
+            let timestamp_us = relogio.epoca(captura_us);
 
             if let Ok(quadro) = recurso.cast::<ID3D11Texture2D>() {
                 unsafe { context.CopyResource(&leitura, &quadro) };
@@ -317,7 +371,8 @@ pub fn start(target: Target, destino: Destino, fps: f64) -> Result<DuplicationHa
                     let (x, y, largura, altura) =
                         recorte(janela, origem_x, origem_y, largura_tela, altura_tela);
                     if largura >= 2 && altura >= 2 {
-                        enviar(&destino, &mapa, x, y, largura, altura);
+                        enviar(&destino, &mapa, x, y, largura, altura, timestamp_us, &ultimo);
+                        contagem.entregues.fetch_add(1, Ordering::Relaxed);
                     }
                     unsafe { context.Unmap(&leitura, 0) };
                 }
@@ -327,7 +382,7 @@ pub fn start(target: Target, destino: Destino, fps: f64) -> Result<DuplicationHa
     });
 
     match espera.recv() {
-        Ok(Ok(())) => Ok(DuplicationHandle { stop, thread: Some(thread), falha }),
+        Ok(Ok(())) => Ok(DuplicationHandle { stop, thread: Some(thread), falha, contagem }),
         Ok(Err(erro)) => Err(erro),
         Err(_) => Err("A duplicacao de tela nao iniciou.".into()),
     }
@@ -370,6 +425,8 @@ fn enviar(
     y: u32,
     largura: u32,
     altura: u32,
+    timestamp_us: i64,
+    ultimo: &super::capture::Ultimo,
 ) {
     let stride = mapa.RowPitch as usize;
     let inicio = y as usize * stride + x as usize * 4;
@@ -378,5 +435,5 @@ fn enviar(
     // limites dela por `recorte`, entao o intervalo existe dentro do mapa.
     let bgra = unsafe { std::slice::from_raw_parts((mapa.pData as *const u8).add(inicio), total) };
 
-    destino.entregar(bgra, stride as u32, largura, altura);
+    destino.entregar(bgra, stride as u32, largura, altura, timestamp_us, ultimo);
 }

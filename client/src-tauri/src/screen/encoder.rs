@@ -73,7 +73,10 @@ struct Job {
     /// NV12 empacotado: plano Y de `largura * altura`, seguido do plano UV
     /// entrelacado de metade da altura. Sem folga de linha — e o que o MFT
     /// espera quando o `stride` e igual a largura.
-    nv12: Vec<u8>,
+    ///
+    /// `Arc` porque o mesmo quadro pode sair de novo quando a tela nao produz
+    /// outro: guardar para repetir nao pode custar uma copia por quadro.
+    nv12: Arc<Vec<u8>>,
     largura: u32,
     altura: u32,
     timestamp_us: i64,
@@ -91,6 +94,16 @@ pub struct EncoderHandle {
     /// Pedido de quadro-chave vindo de fora do laco, para quando retomar uma
     /// transmissao pausada.
     chave: Arc<AtomicBool>,
+    /// Quantos quadros-chave o codificador foi mandado produzir, e quantos
+    /// pedidos vieram de quem assiste.
+    ///
+    /// A imagem "esfarelada" e o decodificador sem quadro de referencia: ele
+    /// mostra lixo ate chegar uma chave. Saber se o pedido **chegou** separa
+    /// dois defeitos diferentes: se chega e a imagem continua quebrada, o
+    /// problema esta no que o codificador produz; se nao chega, o caminho de
+    /// volta do WebRTC e que nao esta funcionando.
+    chaves: Arc<AtomicU64>,
+    pedidos_de_chave: Arc<AtomicU64>,
     /// Por que o codificador parou, quando parou sozinho. Sem isto a thread
     /// morria calada e a transmissao ficava em zero quadro sem explicacao.
     falha: Arc<std::sync::Mutex<Option<String>>>,
@@ -107,6 +120,14 @@ impl EncoderHandle {
     }
     pub fn descartados(&self) -> u64 {
         self.descartados.load(Ordering::Relaxed)
+    }
+
+    /// Quadros-chave produzidos e pedidos recebidos, nessa ordem.
+    pub fn contagem_de_chaves(&self) -> (u64, u64) {
+        (
+            self.chaves.load(Ordering::Relaxed),
+            self.pedidos_de_chave.load(Ordering::Relaxed),
+        )
     }
 
     /// Por que o codificador parou, quando parou.
@@ -127,7 +148,7 @@ impl EncoderHandle {
     /// Entrega um quadro. Devolve `false` quando a fila esta cheia — o quadro
     /// e descartado de proposito: encher a fila so aumentaria o atraso da
     /// imagem sem aumentar a taxa que o codificador da conta.
-    pub fn submit(&self, nv12: Vec<u8>, largura: u32, altura: u32, timestamp_us: i64) -> bool {
+    pub fn submit(&self, nv12: Arc<Vec<u8>>, largura: u32, altura: u32, timestamp_us: i64) -> bool {
         let Some(tx) = self.tx.as_ref() else { return false };
         match tx.try_send(Job { nv12, largura, altura, timestamp_us }) {
             Ok(()) => true,
@@ -210,6 +231,8 @@ pub fn iniciar(
     let stop = Arc::new(AtomicBool::new(false));
     let descartados = Arc::new(AtomicU64::new(0));
     let chave = Arc::new(AtomicBool::new(false));
+    let chaves = Arc::new(AtomicU64::new(0));
+    let pedidos_de_chave = Arc::new(AtomicU64::new(0));
     let falha = Arc::new(std::sync::Mutex::new(None::<String>));
     // A thread responde qual codec conseguiu abrir; ate ela responder, quem
     // chamou nao sabe se ha hardware.
@@ -217,13 +240,15 @@ pub fn iniciar(
 
     let stop_thread = stop.clone();
     let chave_thread = chave.clone();
+    let chaves_thread = chaves.clone();
+    let pedidos_thread = pedidos_de_chave.clone();
     let falha_thread = falha.clone();
     let thread = std::thread::Builder::new()
         .name("tela-encoder".into())
         .spawn(move || {
             rodar(
-                source, rx, stop_thread, chave_thread, falha_thread, pronto_tx, ordem, largura,
-                altura, fps, bitrate,
+                source, rx, stop_thread, chave_thread, chaves_thread, pedidos_thread,
+                falha_thread, pronto_tx, ordem, largura, altura, fps, bitrate,
             );
         })
         .map_err(|e| format!("Nao foi possivel criar a thread do codificador: {e}"))?;
@@ -239,6 +264,8 @@ pub fn iniciar(
             nome,
             descartados,
             chave,
+            chaves,
+            pedidos_de_chave,
             falha,
         }),
         Ok(Err(erro)) => {
@@ -263,6 +290,8 @@ fn rodar(
     rx: Receiver<Job>,
     stop: Arc<AtomicBool>,
     chave: Arc<AtomicBool>,
+    chaves: Arc<AtomicU64>,
+    pedidos_de_chave: Arc<AtomicU64>,
     falha: Arc<std::sync::Mutex<Option<String>>>,
     pronto: std::sync::mpsc::Sender<Result<(HwCodec, String), String>>,
     ordem: &'static [HwCodec],
@@ -306,7 +335,10 @@ fn rodar(
         }
         let _ = pronto.send(Ok((mft.codec, mft.nome.clone())));
 
-        laco(&source, &rx, &stop, &chave, &falha, &mut mft, ordem, fps, bitrate);
+        laco(
+            &source, &rx, &stop, &chave, &chaves, &pedidos_de_chave, &falha, &mut mft, ordem,
+            fps, bitrate,
+        );
 
         mft.encerrar();
         drop(mft);
@@ -322,6 +354,8 @@ unsafe fn laco(
     rx: &Receiver<Job>,
     stop: &AtomicBool,
     chave: &AtomicBool,
+    chaves: &AtomicU64,
+    pedidos_de_chave: &AtomicU64,
     falha: &std::sync::Mutex<Option<String>>,
     mft: &mut Mft,
     ordem: &'static [HwCodec],
@@ -353,7 +387,14 @@ unsafe fn laco(
                 unsafe { mft.definir_bitrate(alvo) };
             }
         }
-        if source.take_keyframe_request() || chave.swap(false, Ordering::Relaxed) {
+        // Contados separadamente: o pedido vem de quem assiste, e a chave e o
+        // que de fato saiu daqui. Os dois numeros juntos dizem em que ponto o
+        // conserto do "esfarelado" esta falhando.
+        if source.take_keyframe_request() {
+            pedidos_de_chave.fetch_add(1, Ordering::Relaxed);
+            forcar_chave = true;
+        }
+        if chave.swap(false, Ordering::Relaxed) {
             forcar_chave = true;
         }
 
@@ -372,6 +413,7 @@ unsafe fn laco(
                     }
                     if forcar_chave {
                         unsafe { mft.forcar_chave() };
+                        chaves.fetch_add(1, Ordering::Relaxed);
                         forcar_chave = false;
                     }
                     if let Err(erro) = unsafe { entregar_com_folga(mft, source, &job) } {
@@ -422,6 +464,7 @@ unsafe fn laco(
                     }
                     if forcar_chave {
                         unsafe { mft.forcar_chave() };
+                        chaves.fetch_add(1, Ordering::Relaxed);
                         forcar_chave = false;
                     }
                     if let Err(erro) = unsafe { entregar_com_folga(mft, source, &job) } {
@@ -841,7 +884,7 @@ impl Mft {
         // Preto em NV12: luminancia no piso e croma no meio da escala.
         let mut preto = vec![0x10u8; pixels + pixels / 2];
         preto[pixels..].fill(0x80);
-        let teste = Job { nv12: preto, largura: self.largura, altura: self.altura, timestamp_us: 0 };
+        let teste = Job { nv12: Arc::new(preto), largura: self.largura, altura: self.altura, timestamp_us: 0 };
 
         let limite = std::time::Instant::now() + Duration::from_secs(3);
         let mut entregue = false;

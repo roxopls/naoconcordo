@@ -11,6 +11,7 @@
 import { RemoteParticipant, RemoteTrack, Room, RoomEvent, Track } from "livekit-client";
 import { grade } from "./gridlayout";
 import "./styles.css";
+import { instalarBarra } from "./barra";
 
 import * as servidor from "./servidor";
 
@@ -200,4 +201,5 @@ async function start() {
   }
 }
 
+void instalarBarra("Câmeras — naoconcordo");
 void start();
