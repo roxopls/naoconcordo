@@ -545,6 +545,13 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
    Fica acima do redator e longe da navegacao — o painel flutuante antigo
    nascia por cima da lista de canais e engolia os cliques dela. */
 .camera-mini { position: absolute; right: 18px; bottom: 150px; z-index: 25; width: 232px; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden; background: #09090b; border: 1px solid var(--line); box-shadow: 0 14px 34px rgba(0,0,0,.5); }
+/* Arrastavel: o cursor avisa, e enquanto arrasta o texto nao pode ser
+   selecionado sem querer. */
+.camera-mini { cursor: grab; user-select: none; }
+.camera-mini.arrastando { cursor: grabbing; box-shadow: 0 18px 44px rgba(0,0,0,.62); }
+/* Tela compartilhada e mais larga que rosto, e cortar a beirada esconderia
+   justamente o que a pessoa esta mostrando. */
+.camera-mini.mini-tela { width: 300px; }
 .camera-mini video { width: 100%; height: 100%; object-fit: contain; display: block; }
 .camera-mini label { position: absolute; left: 6px; bottom: 6px; margin: 0; padding: 2px 7px; background: rgba(0,0,0,.7); border-radius: 5px; font-size: 10px; }
 .camera-mini-voltar { position: absolute; top: 6px; right: 6px; width: 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 7px; background: rgba(0,0,0,.6); color: #f3f3f4; cursor: pointer; opacity: 0; transition: opacity .15s; }
@@ -577,6 +584,29 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 /* Letras no lugar de desenho: "GIF" e o rotulo que todo mundo ja reconhece,
    e nenhum icone de tres letras fica legivel em 32 pixels. */
 .composer-gif { font: 700 10px/1 system-ui, sans-serif; letter-spacing: .04em; }
+
+/* Categorias: grupos de canais dentro de um servidor. O cabecalho tem a cara do
+   rotulo de secao, e nao a de um canal, para nao parecer clicavel como sala. */
+.category-head { display: flex; align-items: center; gap: 4px; padding: 10px 8px 4px; }
+.category-name { flex: 1; display: flex; align-items: center; gap: 6px; padding: 2px 4px; border: 0; border-radius: 6px; background: none; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; text-align: left; cursor: pointer; }
+.category-name:hover { color: #f3f3f4; }
+/* Recuo do conteudo: e o que mostra, sem borda nenhuma, que os canais estao
+   dentro daquele grupo. */
+.category-body { padding-left: 8px; border-left: 1px solid var(--line); margin-left: 12px; }
+/* Arrastar canal e categoria.
+   A linha de insercao e desenhada com `box-shadow`, e nao com `border`: borda
+   muda a altura do elemento, e a lista inteira pularia um pixel a cada vez que o
+   cursor passasse por cima de um canal. */
+.arrastando { opacity: .4; }
+.drop-antes { box-shadow: inset 0 2px 0 var(--accent); }
+.drop-depois { box-shadow: inset 0 -2px 0 var(--accent); }
+.drop-dentro { background: rgba(255,122,69,.12); border-radius: 8px; }
+/* Lista vazia precisa de altura para ter onde soltar; sem isto uma categoria
+   sem canal nenhum nao teria area que aceitasse o arrasto. */
+.category-body { min-height: 12px; }
+#room-list, #voice-list { min-height: 8px; }
+
+.menu-title { margin: 2px 8px 6px; color: var(--muted); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; }
 
 .seletor-gif { width: 340px; padding: 8px; display: grid; gap: 8px; }
 .seletor-gif input { width: 100%; padding: 8px 10px; color: white; background: #202025; border: 1px solid var(--line); border-radius: 9px; outline: 0; }

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { abrirExterno, abrirJanela, ehTauri } from "./ambiente";
+import { abrirExterno, abrirJanela, bloquearRecarregar, ehTauri } from "./ambiente";
+import { baixarPreferencias, vigiarPreferencias } from "./preferencias";
 import {
   LocalTrackPublication, RemoteAudioTrack, RemoteParticipant, RemoteTrack, Room, RoomEvent,
   Track, VideoPresets,
@@ -37,10 +38,11 @@ type ChatMessage = { id: string; username: string; text: string; createdAt: stri
 type AuthSession = { token: string; username: string; expiresAt: number };
 type ServerInfo = { id: string; name: string; iconFile?: string | null; bannerFile?: string | null; description?: string | null };
 type RoomKind = "text" | "voice";
-type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind };
+type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind; categoryId?: string | null; posicao?: number };
 type Profile = { username: string; avatar: string | null; avatarFile?: string | null; bio?: string | null; bannerFile?: string | null; color?: string | null };
 type ServerRole = "owner" | "mod" | "member";
-type Bootstrap = { servers: ServerInfo[]; rooms: RoomInfo[]; profiles: Profile[]; isOwner: boolean; isAdmin: boolean; roles: Record<string, ServerRole>; online: string[]; voice?: Record<string, string[]>; gifs?: boolean };
+type Categoria = { id: string; serverId: string; name: string; posicao: number };
+type Bootstrap = { servers: ServerInfo[]; rooms: RoomInfo[]; profiles: Profile[]; isOwner: boolean; isAdmin: boolean; roles: Record<string, ServerRole>; online: string[]; voice?: Record<string, string[]>; categorias?: Categoria[]; gifs?: boolean };
 type LivekitAccess = { token: string; url: string; room: string };
 type Friendship = { requester: string; addressee: string; status: "pending" | "accepted" };
 type FriendsData = { friends: string[]; incoming: Friendship[]; outgoing: Friendship[] };
@@ -79,6 +81,12 @@ let session: AuthSession | null = readSession();
 let chat: WebSocket | null = null, room: Room | null = null;
 let servers: ServerInfo[] = [], rooms: RoomInfo[] = [], history: ChatMessage[] = [];
 let profiles = new Map<string, Profile>(), currentServerId = "", currentRoomId = "", isAdmin = false;
+/// Os grupos de canais dos servidores que esta conta enxerga, na ordem que o
+/// servidor decidiu — ordenar de novo aqui so criaria uma segunda regra para
+/// discordar da primeira.
+let categorias: Categoria[] = [];
+/// Se o servidor deste endereco sabe o que sao categorias.
+let temCategorias = false;
 // Canal de voz onde a chamada esta, independente do canal de texto aberto.
 let voiceRoomId = "";
 // "home" mostra amigos e conversas privadas; "server", os canais.
@@ -443,12 +451,21 @@ recoveryForm.addEventListener("submit", async event => {
 });
 async function enterApp() {
   if (!session) return;
+  // Antes de qualquer coisa desenhar: tudo o que le esses ajustes le por funcao
+  // e sob demanda, entao gravar agora faz a tela ja nascer certa.
+  await baixarPreferencias(api);
+  vigiarPreferencias(api);
   // Primeira medida ja na entrada: esperar o relogio de dez segundos deixaria
   // o estado sem numero justo quando a pessoa esta olhando para ele.
   void medirPing();
   const data = await api<Bootstrap>("/api/bootstrap");
   servers = data.servers; rooms = data.rooms; isAdmin = Boolean(data.isAdmin); roles = data.roles || {};
   temGifs = Boolean(data.gifs); aplicarBotaoDeGif();
+  // Servidor mais antigo nao conhece categorias e nem manda o campo. Distinguir
+  // "nenhuma categoria" de "este servidor nao sabe o que e isso" e o que evita
+  // oferecer um botao cujo unico resultado seria erro.
+  temCategorias = data.categorias !== undefined;
+  categorias = data.categorias || [];
   setVoicePresence(data.voice);
   byId("admin-button").classList.toggle("hidden", !isAdmin);
   onlineUsers.clear();
@@ -549,79 +566,21 @@ function renderNavigation() {
     ? (roles[currentServerId] === "owner" ? "dono" : roles[currentServerId] === "mod" ? "moderador" : "membro")
     : "amigos";
   const mine = rooms.filter(item => item.serverId === currentServerId);
-  const textRooms = mine.filter(item => item.kind === "text");
-  const voiceRooms = mine.filter(item => item.kind === "voice");
-  byId("room-list").replaceChildren(...(textRooms.length ? textRooms.map(item => {
-    const button = document.createElement("button");
-    button.className = "channel" + (mode === "room" && item.id === currentRoomId ? " active" : "");
-    button.append(icon("hash", "room-dot"), document.createTextNode(item.name));
-    const pendentes = unreadRooms.get(item.id) || 0;
-    const citacoes = mencoesPorSala.get(item.id) || 0;
-    if (pendentes || citacoes) {
-      button.classList.add("unread");
-      const badge = document.createElement("span");
-      // Selo de mencao ganha da contagem: o que importa e "falaram com voce",
-      // nao quantas mensagens passaram.
-      badge.className = "unread-badge" + (citacoes ? " mencionado" : "");
-      badge.textContent = citacoes ? "@" : (pendentes > 99 ? "99+" : String(pendentes));
-      button.append(badge);
-    }
-    button.onclick = () => selectRoom(item.id); return button;
-  }) : [emptyLine("Nenhum canal de texto.")]));
-  byId("voice-list").replaceChildren(...voiceRooms.flatMap(item => {
-    const button = document.createElement("button");
-    button.className = "channel voice" + (item.id === voiceRoomId ? " active" : "");
-    button.append(icon("speaker", "room-dot"), document.createTextNode(item.name));
-    // Clicar no canal em que voce ja esta **nao** desconecta: mostra ou esconde
-    // o palco da chamada. Sair e o botao de desligar, que existe para isso e
-    // nao se aperta sem querer ao procurar quem esta na sala.
-    button.onclick = () => {
-      if (item.id === voiceRoomId && (room?.state === "connected" || room?.state === "connecting")) {
-        palcoDaChamada = !palcoDaChamada;
-        void selectServer(item.serverId);
-        renderCameras();
-        return;
-      }
-      void toggleVoice(item.id);
-    };
-    const nodes: HTMLElement[] = [button];
-    // Quem esta na chamada aparece embaixo do canal, como no Discord — em
-    // qualquer canal, nao so no seu: dava para entrar numa sala vazia sem
-    // saber que a conversa estava na do lado.
-    const naSala = peopleInVoice(item.id);
-    if (naSala.length) {
-      const box = document.createElement("div"); box.className = "voice-members";
-      for (const name of naSala) {
-        const row = document.createElement("div"); row.className = "voice-member"; row.dataset.who = name;
-        const avatar = document.createElement("div"); avatar.className = "avatar"; paintAvatar(avatar, name);
-        const label = document.createElement("span"); label.textContent = name;
-        row.append(avatar, label);
-        // Mesmas marcas do painel da direita: quem esta na chamada mostra aqui
-        // se esta com o microfone ou o audio desligado.
-        const marks = document.createElement("span"); marks.className = "person-marks";
-        if (micMuted(name)) marks.append(icon("mic-off", "ic-sm"));
-        if (audioMuted(name)) marks.append(icon("audio-off", "ic-sm"));
-        if (silencedByMe(name)) marks.append(icon("silenced", "ic-sm silenced-mark"));
-        const selo = liveBadge(name);
-        if (selo) marks.append(selo);
-        if (marks.childNodes.length) row.append(marks);
-        row.classList.add("clickable");
-        // Em si mesmo nao ha volume nem silenciar para ajustar, entao o clique
-        // vai direto ao cartao de perfil em vez de abrir um menu vazio.
-        row.onclick = key(name) === key(session?.username || "")
-          ? event => { event.stopPropagation(); abrirPerfil(name); }
-          : event => { event.stopPropagation(); openUserMenu(name, row); };
-        row.oncontextmenu = event => {
-          event.preventDefault();
-          event.stopPropagation();
-          openUserMenu(name, row, { x: event.clientX, y: event.clientY });
-        };
-        box.append(row);
-      }
-      nodes.push(box);
-    }
-    return nodes;
-  }));
+  // Fora de categoria continua em cima, nas duas secoes de sempre: servidor que
+  // nunca criou grupo nenhum fica exatamente como estava.
+  const soltos = mine.filter(item => !item.categoryId || !grupoExiste(item.categoryId));
+  const textRooms = soltos.filter(item => item.kind === "text");
+  const voiceRooms = soltos.filter(item => item.kind === "voice");
+  byId("room-list").replaceChildren(...textRooms.map(botaoDeTexto));
+  byId("voice-list").replaceChildren(...voiceRooms.flatMap(linhasDeVoz));
+  // Secao sem nada dentro nao aparece. O "+" dela ia junto, e criar o primeiro
+  // canal passou a ser pelo botao direito no vazio da barra.
+  esconderSecaoVazia("room-list", textRooms.length > 0);
+  esconderSecaoVazia("voice-list", voiceRooms.length > 0);
+  // Soltar aqui e tirar o canal de qualquer categoria.
+  alvoSemCategoria(byId("room-list"), "text");
+  alvoSemCategoria(byId("voice-list"), "voice");
+  desenharCategorias(mine);
   const selected = rooms.find(item => item.id === currentRoomId);
   if (mode === "dm") {
     byId("room-title").textContent = "@ " + currentFriend;
@@ -721,16 +680,6 @@ function syncStagePlacement() {
   stage.classList.toggle("hidden", !mostrar);
   byId("stage-resizer").classList.toggle("hidden", !mostrar);
   renderCameraMini();
-  // So abre sozinha se houver o que assistir: abrir uma janela vazia sempre
-  // que a pessoa troca de servidor seria um estorvo.
-  if (!aqui && !screenWindowOpen && voiceRoomId && stage.children.length) {
-    janelaAutomatica = true;
-    void openScreenWindow();
-  }
-  if (aqui && screenWindowOpen && janelaAutomatica) {
-    janelaAutomatica = false;
-    void closeScreenWindow();
-  }
 }
 // ------------------------------------------------- altura do palco
 // A alca nativa do `resize: vertical` e um triangulo de 12px no canto direito:
@@ -1315,6 +1264,10 @@ function connectChat() {
     if (payload.type === "roomCreated" && payload.room) {
       if (!rooms.some(item => item.id === payload.room!.id)) { rooms.push(payload.room); renderNavigation(); }
     }
+    // Organizar canais mexe em duas listas ao mesmo tempo, e em ate quatro
+    // operacoes diferentes. Reler o estado inteiro custa menos do que aplicar
+    // cada mudanca na ordem certa — e nao tem como sair errado.
+    if (payload.type === "canaisOrganizados") void recarregarOrganizacao();
     if (payload.type === "profileUpdated" && payload.profile) { profiles.set(payload.profile.username.toLowerCase(), payload.profile); renderMessages(); renderPeople(); if (payload.profile.username === session?.username) paintMyAvatars(payload.profile.username); }
     if (payload.type === "friendRequested" && payload.friendship) {
       if (key(payload.friendship.addressee) === key(session?.username || "")) showToast(payload.friendship.requester + " quer ser seu amigo.");
@@ -2061,6 +2014,7 @@ async function connectVoice() {
         if (publication.source === Track.Source.ScreenShare) {
           noteShareStopped(publication.trackSid);
           assistindo.delete(publication.trackSid);
+          telasVistas.delete(publication.trackSid);
           document.getElementById("oferta-" + publication.trackSid)?.remove();
           syncStagePlacement();
         }
@@ -2085,7 +2039,12 @@ async function connectVoice() {
         refresh();
       })
       .on(RoomEvent.ParticipantAttributesChanged, () => { if (!atual()) return; updateCallControls(); refresh(); })
-      .on(RoomEvent.TrackUnsubscribed, track => { if (!atual()) return; detachTrack(track.sid); if (track.sid) removeCamera(track.sid); })
+      .on(RoomEvent.TrackUnsubscribed, track => {
+        if (!atual()) return;
+        soltarDoReforco(track);
+        detachTrack(track.sid);
+        if (track.sid) removeCamera(track.sid);
+      })
       .on(RoomEvent.LocalTrackPublished, publication => { if (atual()) attachLocalPublication(publication); })
       .on(RoomEvent.LocalTrackUnpublished, publication => { if (!atual()) return; const sid = publication.track?.sid; if (sid) { detachTrack(sid); removeCamera(sid); } });
     await next.connect(access.url, access.token, { autoSubscribe: true });
@@ -2277,6 +2236,45 @@ async function reiniciarPortao() {
   });
   pararMedidorDoPortao = parar;
 }
+
+/// Ronda que religa faixa de audio que parou de tocar.
+///
+/// O `play()` de cada faixa era chamado **uma vez**, na hora de anexar, e o
+/// comentario dizia que o `unlockAudio` destravaria depois. So que o
+/// `unlockAudio` roda no momento de entrar na chamada e tira o proprio ouvinte
+/// assim que o som libera: faixa que chega **depois** nao tem quem a religue.
+///
+/// E ai esta o defeito que so reabrir o aplicativo resolvia. Quando alguem sai e
+/// volta rapido, quem ficou na chamada recebe a faixa nova daquela pessoa e
+/// chama `play()` uma vez. Se essa unica chamada falhar — a politica de
+/// reproducao do WebView, o dispositivo de saida trocando, ou a propria faixa
+/// sendo reanexada no mesmo instante — aquela pessoa fica muda para quem ficou,
+/// e para mais ninguem. Quem ficou nao sai da chamada, entao nada reanexa nada.
+///
+/// A ronda varre em vez de tratar caso a caso, pelo mesmo motivo das
+/// preferencias: assim ela pega tambem as causas que eu nao previ.
+function rondaDeAudio() {
+  window.setInterval(() => {
+    if (!inCall()) return;
+    // O portao geral do LiveKit tambem pode ter fechado no meio do caminho.
+    if (room && !room.canPlaybackAudio) void room.startAudio().catch(() => { /* proxima volta */ });
+    for (const el of document.querySelectorAll<HTMLAudioElement>("audio[data-naoconcordo-audio]")) {
+      // Pausado de proposito nao existe aqui: silenciar e `muted`, nao `pause`.
+      if (!el.paused || el.ended) continue;
+      void el.play().catch(() => { /* proxima volta */ });
+    }
+  }, 3000);
+
+  // Interacao do usuario e o que a politica de reproducao espera: aproveita.
+  const religar = () => {
+    for (const el of document.querySelectorAll<HTMLAudioElement>("audio[data-naoconcordo-audio]")) {
+      if (el.paused && !el.ended) void el.play().catch(() => { /* segue */ });
+    }
+  };
+  document.addEventListener("click", religar);
+  document.addEventListener("keydown", religar);
+}
+rondaDeAudio();
 
 /// Destrava a reproducao de som. Se o WebView recusar, tenta de novo no primeiro
 /// clique do usuario, que conta como interacao.
@@ -2509,9 +2507,11 @@ function attachTrack(track: RemoteTrack, participant: RemoteParticipant) {
     // seria ouvido pelo tempo entre anexar e reaplicar.
     refreshAudioMuting();
     applyVolume(who, volumeOf(who));
-    void audio.play().catch(() => { /* destravado depois por unlockAudio */ });
+    void audio.play().catch(() => { /* a ronda abaixo tenta de novo */ });
   } else if (track.source === Track.Source.ScreenShare) {
     attachVideo(track, who);
+    if (track.sid) telasVistas.set(track.sid, { sid: track.sid, label: who, attach: () => track.attach() });
+    renderCameraMini();
   } else if (track.source === Track.Source.Camera) {
     addCamera(track, who, false);
   }
@@ -2527,6 +2527,15 @@ function attachLocalPublication(publication: LocalTrackPublication) {
 // As faixas de camera ficam num registro proprio para poderem ser redesenhadas
 // em qualquer container: o painel do app ou a janela separada.
 type CameraTrack = { sid: string; label: string; who: string; muted: boolean; attach: () => HTMLMediaElement };
+
+/// As telas que estao sendo assistidas, para o quadradinho poder mostrar uma.
+///
+/// As tiles de tela vivem soltas no palco, sem registro — o que basta enquanto
+/// so o palco as desenha. O quadradinho precisa desenhar a mesma faixa noutro
+/// lugar, e procurar `<video>` dentro do DOM do palco para roubar de la seria
+/// prender um ao outro.
+type TelaAssistida = { sid: string; label: string; attach: () => HTMLMediaElement };
+const telasVistas = new Map<string, TelaAssistida>();
 const cameras = new Map<string, CameraTrack>();
 
 // Quem esta falando agora, por nome. O anel vermelho sai daqui.
@@ -2726,33 +2735,143 @@ let miniAtual = "";
 /// Distancia fixa nao serve: o redator cresce com anexos e com a barra de
 /// resposta, e o botao Enviar acaba embaixo do video — foi assim que o painel
 /// flutuante antigo comia os cliques da navegacao.
+/// Onde a pessoa largou o quadradinho, se largou em algum lugar.
+///
+/// Fica so nesta maquina: e uma coordenada em pixels, e a tela do outro
+/// computador tem outro tamanho — levar junto poria o quadro fora do alcance.
+const MINI_KEY = "naoconcordo.mini-posicao";
+type PontoDoMini = { x: number; y: number };
+function miniGuardado(): PontoDoMini | null {
+  try { return JSON.parse(localStorage.getItem(MINI_KEY) || "null") as PontoDoMini | null; }
+  catch { return null; }
+}
+
+/// Mantem o quadradinho dentro da janela.
+///
+/// Sem isto, diminuir a janela depois de ter arrastado o quadro para a beirada
+/// o deixaria fora da tela, sem jeito de trazer de volta.
+function encaixarMini(x: number, y: number): PontoDoMini {
+  const caixa = byId("camera-mini");
+  const largura = caixa.offsetWidth || 232;
+  const altura = caixa.offsetHeight || 130;
+  const pai = caixa.offsetParent as HTMLElement | null;
+  const limite = pai ? pai.getBoundingClientRect() : { width: window.innerWidth, height: window.innerHeight };
+  return {
+    x: Math.max(8, Math.min(x, limite.width - largura - 8)),
+    y: Math.max(8, Math.min(y, limite.height - altura - 8)),
+  };
+}
+
 function posicionarCameraMini() {
   const caixa = byId("camera-mini");
+  const escolhido = miniGuardado();
+  if (escolhido) {
+    const dentro = encaixarMini(escolhido.x, escolhido.y);
+    caixa.style.left = dentro.x + "px";
+    caixa.style.top = dentro.y + "px";
+    caixa.style.right = "auto";
+    caixa.style.bottom = "auto";
+    return;
+  }
+  // Sem escolha da pessoa: em cima do redator, como sempre esteve.
   const redator = [byId("message-form"), byId("dm-form")]
     .find(form => !form.classList.contains("hidden"));
   const altura = redator ? redator.getBoundingClientRect().height : 82;
+  caixa.style.left = "auto";
+  caixa.style.top = "auto";
+  caixa.style.right = "18px";
   caixa.style.bottom = Math.round(altura + 14) + "px";
 }
 
+/// Deixa o quadradinho ser arrastado pelo mouse.
+///
+/// Ligado uma vez so, no elemento que nunca e recriado: o conteudo de dentro
+/// troca a cada faixa nova, e pendurar isso ali perderia o arrasto no meio.
+function permitirArrastarMini() {
+  const caixa = byId("camera-mini");
+  let solto: ((evento: PointerEvent) => void) | null = null;
+
+  caixa.addEventListener("pointerdown", evento => {
+    // Os botoes de dentro continuam clicaveis: arrastar comeca no fundo.
+    if ((evento.target as HTMLElement).closest("button")) return;
+    if (evento.button !== 0) return;
+    const caixaAgora = caixa.getBoundingClientRect();
+    const pai = (caixa.offsetParent as HTMLElement | null)?.getBoundingClientRect();
+    const deslocX = evento.clientX - caixaAgora.left;
+    const deslocY = evento.clientY - caixaAgora.top;
+    let moveu = false;
+    caixa.setPointerCapture(evento.pointerId);
+    caixa.classList.add("arrastando");
+
+    const mover = (movimento: PointerEvent) => {
+      moveu = true;
+      const ponto = encaixarMini(
+        movimento.clientX - deslocX - (pai?.left || 0),
+        movimento.clientY - deslocY - (pai?.top || 0),
+      );
+      caixa.style.left = ponto.x + "px";
+      caixa.style.top = ponto.y + "px";
+      caixa.style.right = "auto";
+      caixa.style.bottom = "auto";
+    };
+    solto = (fim: PointerEvent) => {
+      caixa.releasePointerCapture(fim.pointerId);
+      caixa.classList.remove("arrastando");
+      caixa.removeEventListener("pointermove", mover);
+      if (solto) caixa.removeEventListener("pointerup", solto);
+      solto = null;
+      // Clique sem movimento nao vira posicao nova.
+      if (!moveu) return;
+      localStorage.setItem(MINI_KEY, JSON.stringify({
+        x: parseInt(caixa.style.left, 10) || 0,
+        y: parseInt(caixa.style.top, 10) || 0,
+      }));
+    };
+    caixa.addEventListener("pointermove", mover);
+    caixa.addEventListener("pointerup", solto);
+  });
+
+  // Janela redimensionada pode ter deixado o quadro para fora.
+  window.addEventListener("resize", () => {
+    if (!byId("camera-mini").classList.contains("hidden")) posicionarCameraMini();
+  });
+}
+permitirArrastarMini();
+
+/// O quadradinho que segue a chamada quando voce sai do servidor dela.
+///
+/// Mostra **a tela que voce esta assistindo**, e so cai para uma camera quando
+/// nao ha tela nenhuma. Trocar de servidor no meio de uma transmissao abria uma
+/// janela inteira antes, o que e resposta grande demais para quem so foi ler uma
+/// mensagem noutro lugar.
 function renderCameraMini() {
   const caixa = byId("camera-mini");
-  const visiveis = [...cameras.values()].filter(entry => !camerasOcultas.has(entry.sid));
-  // Com a janela separada aberta as cameras ja estao noutro lugar; repetir aqui
-  // so gastaria banda desenhando a mesma pessoa duas vezes.
-  const mostrar = !chamadaNaTela() && !cameraWindowOpen && visiveis.length > 0;
+  const telas = [...telasVistas.values()].filter(entry => assistindo.has(entry.sid));
+  const rostos = [...cameras.values()].filter(entry => !camerasOcultas.has(entry.sid));
+  // Com a janela separada aberta aquilo ja esta noutro lugar; repetir aqui so
+  // gastaria banda desenhando a mesma coisa duas vezes.
+  const temTela = telas.length > 0 && !screenWindowOpen;
+  const temRosto = rostos.length > 0 && !cameraWindowOpen;
+  const mostrar = !chamadaNaTela() && (temTela || temRosto);
   caixa.classList.toggle("hidden", !mostrar);
+  caixa.classList.toggle("mini-tela", mostrar && temTela);
   if (!mostrar) {
     caixa.replaceChildren();
     miniAtual = "";
     return;
   }
 
-  const falando = visiveis.find(entry => speaking.has(key(entry.who)));
-  // Sem ninguem falando, fica quem ja estava: trocar sozinho a cada silencio
-  // daria um piscar constante no canto da tela.
-  const escolhida = falando
-    || visiveis.find(entry => entry.sid === miniAtual)
-    || visiveis[0];
+  let escolhida: { sid: string; label: string; who?: string; attach: () => HTMLMediaElement };
+  if (temTela) {
+    // Tela ganha da camera: quem saiu do servidor no meio de uma transmissao
+    // quer continuar vendo a transmissao, nao o rosto de quem narra.
+    escolhida = telas.find(entry => entry.sid === miniAtual) || telas[0];
+  } else {
+    const falando = rostos.find(entry => speaking.has(key(entry.who)));
+    // Sem ninguem falando, fica quem ja estava: trocar sozinho a cada silencio
+    // daria um piscar constante no canto da tela.
+    escolhida = falando || rostos.find(entry => entry.sid === miniAtual) || rostos[0];
+  }
   if (escolhida.sid === miniAtual) return;
   miniAtual = escolhida.sid;
 
@@ -2772,10 +2891,26 @@ function renderCameraMini() {
   posicionarCameraMini();
   caixa.oncontextmenu = event => {
     event.preventDefault();
-    openUserMenu(escolhida.who, caixa, { x: event.clientX, y: event.clientY }, [
+    // Virar janela continua existindo, mas agora e escolha de quem clica.
+    if (temTela) {
+      abrirMenuSimples(caixa, { x: event.clientX, y: event.clientY }, [
+        menuAcao("Abrir numa janela", "window", () => void openScreenWindow()),
+      ]);
+      return;
+    }
+    openUserMenu(escolhida.who || escolhida.label, caixa, { x: event.clientX, y: event.clientY }, [
       menuAcao("Virar janela", "window", () => void openCameraWindow()),
     ]);
   };
+}
+
+/// Um menu de acoes que nao pertence a ninguem — o de tela, por exemplo.
+function abrirMenuSimples(ancora: HTMLElement, ponto: { x: number; y: number }, acoes: HTMLElement[]) {
+  closeUserMenu();
+  const menu = document.createElement("div");
+  menu.className = "user-menu";
+  menu.append(...acoes);
+  montarMenu(menu, ancora, ponto);
 }
 
 // ------------------------------------------- janela nativa de cameras
@@ -2953,7 +3088,7 @@ let screenWindowOpen = false;
 // A janela separada aberta por conta propria (voce saiu da tela do servidor da
 // chamada) e diferente da que voce abriu no botao: so a automatica se fecha
 // sozinha quando voce volta. Fechar a sua seria mexer no que voce escolheu.
-let janelaAutomatica = false;
+
 let lastScreenBeat = 0;
 let screenWatch = 0;
 
@@ -2970,7 +3105,6 @@ function setScreenSubscription(active: boolean) {
 function onScreenWindowClosed() {
   if (!screenWindowOpen) return;
   screenWindowOpen = false;
-  janelaAutomatica = false;
   window.clearInterval(screenWatch);
   setScreenSubscription(true);
 }
@@ -4010,6 +4144,18 @@ async function atualizarDiagnostico() {
         if (envio.falhaEncoder) linhas.push("       CODIFICADOR PAROU: " + envio.falhaEncoder);
       }
     } catch { /* a transmissao pode ter parado entre a checagem e a chamada */ }
+  }
+  // Faixa de audio pausada e a pessoa que voce nao ouve. Aqui em cima, sempre
+  // visivel: e o numero que separa "nao ouco fulano" de "fulano nao esta
+  // falando", e sem ele a conversa vira adivinhacao.
+  const faixas = [...document.querySelectorAll<HTMLAudioElement>("audio[data-naoconcordo-audio]")];
+  const paradas = faixas.filter(el => el.paused && !el.ended);
+  if (faixas.length) {
+    linhas.push(
+      "OUVE   " + faixas.length + " faixa(s)"
+      + (paradas.length ? "  PARADAS: " + paradas.map(el => el.dataset.who || "?").join(", ") : "  todas tocando")
+      + (room && !room.canPlaybackAudio ? "  (som bloqueado pelo sistema)" : ""),
+    );
   }
   linhas.push(...await diagnosticoDeRecepcao());
 
@@ -5638,6 +5784,10 @@ function noteShareStarted(sid: string) {
   playShareOn();
 }
 function noteShareStopped(sid: string) {
+  // O registro e limpo mesmo quando a transmissao nao estava sendo assistida:
+  // deixar o quadradinho com uma faixa que acabou daria um retangulo preto que
+  // nao some sozinho.
+  if (sid && telasVistas.delete(sid)) renderCameraMini();
   if (!sid || !sharingNow.delete(sid)) return;
   playShareOff();
 }
@@ -5774,9 +5924,20 @@ function rotearReforco(faixa: RemoteAudioTrack, querReforco: boolean): boolean {
   }
 
   try {
-    if (!contextoDeEscuta) contextoDeEscuta = new AudioContext();
+    if (!contextoDeEscuta) {
+      contextoDeEscuta = new AudioContext();
+      vigiarContextoDeEscuta(contextoDeEscuta);
+    }
     // Contexto suspenso nao processa: sem isto a pessoa reforcada ficaria muda.
-    if (contextoDeEscuta.state === "suspended") void contextoDeEscuta.resume();
+    if (contextoDeEscuta.state === "suspended") {
+      void contextoDeEscuta.resume().catch(erro => {
+        // Falhar aqui e o caso perigoso: o elemento ja esta mudo e o contexto
+        // nao toca, entao a pessoa some. Desfazer o desvio a traz de volta em
+        // volume normal.
+        console.warn("[volume] contexto nao retomou", erro);
+        desfazerReforcos();
+      });
+    }
     interna.setAudioContext(contextoDeEscuta);
     reforcadas.add(sid);
     // O som agora sai pelo contexto; deixar o elemento tocando junto dobraria a
@@ -5790,6 +5951,67 @@ function rotearReforco(faixa: RemoteAudioTrack, querReforco: boolean): boolean {
     console.warn("[volume] reforco indisponivel", erro);
     return false;
   }
+}
+
+/// Desconecta do contexto de escuta a faixa que esta saindo.
+///
+/// `detachTrack` so apagava o `sid` do registro, e o registro nao e o que segura
+/// a faixa: quem segura e o proprio `AudioContext`, com os nos que o LiveKit
+/// montou dentro dele. Sem desfazer o desvio, cada pessoa que sai deixa a
+/// aparelhagem dela ligada num contexto compartilhado que nunca e limpo — e o
+/// estrago se acumula justamente com sair e voltar, que e quando isso mais
+/// acontece.
+function soltarDoReforco(faixa: { sid?: string; kind?: unknown }) {
+  const sid = faixa.sid;
+  if (!sid || !reforcadas.has(sid)) return;
+  reforcadas.delete(sid);
+  const interna = faixa as unknown as { setAudioContext?: (ctx: AudioContext | undefined) => void };
+  try { interna.setAudioContext?.(undefined); }
+  catch (erro) { console.warn("[volume] saida do reforco", erro); }
+}
+
+/// Tira **todas** as faixas do caminho reforcado e as devolve ao volume normal.
+///
+/// Rede de seguranca, nao ajuste: um volume preferido nunca pode virar silencio.
+/// No caminho reforcado o elemento de audio fica mudo de proposito, porque o som
+/// sai pelo contexto — e se o contexto para, aquela pessoa simplesmente some
+/// para quem a reforcou, sem aviso e sem jeito de perceber que foi isso.
+///
+/// Ouvir alguem a 100% quando se pediu 150% e uma decepcao pequena. Nao ouvir e
+/// um defeito.
+function desfazerReforcos() {
+  if (!reforcadas.size) return;
+  console.warn("[volume] desfazendo o reforco de", reforcadas.size, "faixa(s)");
+  for (const sid of [...reforcadas]) {
+    reforcadas.delete(sid);
+    for (const el of document.querySelectorAll<HTMLAudioElement>("#audio-" + CSS.escape(sid))) {
+      delete el.dataset.reforcado;
+      el.volume = 1;
+      el.muted = false;
+    }
+  }
+  refreshAudioMuting();
+  showToast("O reforço de volume foi desligado para ninguém ficar sem som.");
+}
+
+/// Fica de olho no contexto: ele para sozinho.
+///
+/// No Windows, trocar o dispositivo de saida — plugar o fone, tirar o fone —
+/// suspende o `AudioContext`. O navegador tambem o suspende por politica de
+/// reproducao. Nos dois casos o som some sem ninguem tocar em nada, e quem esta
+/// do outro lado continua falando achando que esta sendo ouvido.
+function vigiarContextoDeEscuta(contexto: AudioContext) {
+  contexto.onstatechange = () => {
+    if (contexto.state === "running") return;
+    // Tenta voltar sozinho primeiro; so desiste se nao der.
+    void contexto.resume().catch(() => desfazerReforcos());
+    // `resume` pode resolver sem o contexto voltar a tocar de fato.
+    window.setTimeout(() => { if (contexto.state !== "running") desfazerReforcos(); }, 1500);
+  };
+  // Trocar de fone no meio da chamada e o caso comum.
+  navigator.mediaDevices?.addEventListener?.("devicechange", () => {
+    if (contexto.state !== "running") void contexto.resume().catch(() => desfazerReforcos());
+  });
 }
 
 /// As unicas fontes com audio, que sao tambem as unicas que `setVolume` aceita.
@@ -6300,6 +6522,637 @@ function openUserMenu(
 /// mesma armadilha da barra de chamada. O menu e efemero (fecha a cada clique
 /// fora), entao pode viver dentro do `stage` sem o risco de sumir de vez que a
 /// barra corria.
+// -------------------------------------------------------------- arrastar
+// Organizar canal e categoria com o mouse.
+//
+// O menu de "mover para cima" continua existindo — serve a quem usa teclado e a
+// quem esta num toque, onde arrastar em lista estreita e sofrido. Mas puxar com
+// o mouse e o jeito que as pessoas tentam primeiro.
+//
+// O estado do arrasto vive aqui, e nao no `dataTransfer`, porque no meio de um
+// `dragover` o navegador **nao deixa ler** o que esta sendo carregado — so na
+// hora do `drop`. Sem isto nao daria para decidir se o alvo aceita a coisa que
+// vem vindo, e todo canal aceitaria toda categoria.
+type Arrasto = { tipo: "canal" | "categoria"; id: string };
+let arrasto: Arrasto | null = null;
+
+/// Tira as marcas de "vai cair aqui" de tudo.
+function limparAlvos() {
+  for (const alvo of document.querySelectorAll(".drop-antes, .drop-depois, .drop-dentro")) {
+    alvo.classList.remove("drop-antes", "drop-depois", "drop-dentro");
+  }
+}
+
+/// Deixa um elemento ser puxado.
+function tornarArrastavel(elemento: HTMLElement, coisa: Arrasto) {
+  if (!podeOrganizar()) return;
+  elemento.draggable = true;
+  elemento.ondragstart = evento => {
+    arrasto = coisa;
+    elemento.classList.add("arrastando");
+    // Alguns navegadores cancelam o arrasto sem nenhum dado definido.
+    evento.dataTransfer?.setData("text/plain", coisa.id);
+    if (evento.dataTransfer) evento.dataTransfer.effectAllowed = "move";
+  };
+  elemento.ondragend = () => {
+    arrasto = null;
+    elemento.classList.remove("arrastando");
+    limparAlvos();
+  };
+}
+
+/// Marca onde o que vem sendo puxado vai cair: antes ou depois deste elemento.
+function ladoDoAlvo(elemento: HTMLElement, evento: DragEvent): "antes" | "depois" {
+  const caixa = elemento.getBoundingClientRect();
+  return evento.clientY < caixa.top + caixa.height / 2 ? "antes" : "depois";
+}
+
+/// Um canal aceita outro canal caindo perto dele.
+function alvoDeCanal(elemento: HTMLElement, item: RoomInfo) {
+  if (!podeOrganizar()) return;
+  // Texto so troca de lugar com texto, e voz com voz. Dentro de uma categoria os
+  // dois aparecem na mesma coluna, mas o desenho sempre poe os de texto antes:
+  // aceitar a mistura faria o canal cair num lugar diferente do que a linha
+  // acabou de prometer.
+  const combina = () => {
+    if (arrasto?.tipo !== "canal" || arrasto.id === item.id) return false;
+    return rooms.find(outro => outro.id === arrasto!.id)?.kind === item.kind;
+  };
+  elemento.ondragover = evento => {
+    if (!combina()) return;
+    evento.preventDefault();
+    limparAlvos();
+    elemento.classList.add(ladoDoAlvo(elemento, evento) === "antes" ? "drop-antes" : "drop-depois");
+  };
+  elemento.ondragleave = () => elemento.classList.remove("drop-antes", "drop-depois");
+  elemento.ondrop = evento => {
+    if (!combina() || !arrasto) return;
+    evento.preventDefault();
+    evento.stopPropagation();
+    const lado = ladoDoAlvo(elemento, evento);
+    limparAlvos();
+    void soltarCanal(arrasto.id, item.categoryId ?? null, item.id, lado);
+  };
+}
+
+/// Uma categoria aceita canal caindo dentro dela, e outra categoria caindo
+/// perto dela.
+function alvoDeCategoria(cabecalho: HTMLElement, corpo: HTMLElement | null, categoria: Categoria) {
+  if (!podeOrganizar()) return;
+  const aceita = (evento: DragEvent) => {
+    if (!arrasto) return;
+    if (arrasto.tipo === "categoria" && arrasto.id === categoria.id) return;
+    evento.preventDefault();
+    limparAlvos();
+    if (arrasto.tipo === "canal") {
+      cabecalho.classList.add("drop-dentro");
+      corpo?.classList.add("drop-dentro");
+    } else {
+      cabecalho.classList.add(ladoDoAlvo(cabecalho, evento) === "antes" ? "drop-antes" : "drop-depois");
+    }
+  };
+  const solta = (evento: DragEvent) => {
+    if (!arrasto) return;
+    if (arrasto.tipo === "categoria" && arrasto.id === categoria.id) return;
+    evento.preventDefault();
+    evento.stopPropagation();
+    const lado = ladoDoAlvo(cabecalho, evento);
+    const puxado = arrasto;
+    limparAlvos();
+    if (puxado.tipo === "canal") void soltarCanal(puxado.id, categoria.id, null, "depois");
+    else void soltarCategoria(puxado.id, categoria.id, lado);
+  };
+  cabecalho.ondragover = aceita;
+  cabecalho.ondragleave = () => limparAlvos();
+  cabecalho.ondrop = solta;
+  if (corpo) {
+    corpo.ondragover = evento => { if (arrasto?.tipo === "canal") aceita(evento); };
+    corpo.ondragleave = () => limparAlvos();
+    corpo.ondrop = evento => { if (arrasto?.tipo === "canal") solta(evento); };
+  }
+}
+
+/// As duas listas de cima aceitam canal para tira-lo de qualquer categoria.
+function alvoSemCategoria(lista: HTMLElement, tipo: RoomKind) {
+  if (!podeOrganizar()) return;
+  lista.ondragover = evento => {
+    if (arrasto?.tipo !== "canal") return;
+    const puxado = rooms.find(item => item.id === arrasto!.id);
+    // So o mesmo tipo: canal de voz caindo na lista de texto seria mudanca de
+    // natureza, nao de lugar.
+    if (!puxado || puxado.kind !== tipo) return;
+    evento.preventDefault();
+    limparAlvos();
+    lista.classList.add("drop-dentro");
+  };
+  lista.ondragleave = () => lista.classList.remove("drop-dentro");
+  lista.ondrop = evento => {
+    if (arrasto?.tipo !== "canal") return;
+    const puxado = rooms.find(item => item.id === arrasto!.id);
+    if (!puxado || puxado.kind !== tipo) return;
+    evento.preventDefault();
+    limparAlvos();
+    void soltarCanal(arrasto.id, null, null, "depois");
+  };
+}
+
+/// Move o canal e manda o arranjo novo.
+///
+/// `perto` vazio joga no fim daquele grupo, que e o que "cair na area vazia da
+/// categoria" quer dizer.
+async function soltarCanal(id: string, categoria: string | null, perto: string | null, lado: "antes" | "depois") {
+  const puxado = rooms.find(item => item.id === id);
+  if (!puxado) return;
+  const doServidor = rooms.filter(item => item.serverId === currentServerId && item.id !== id);
+  let onde = doServidor.length;
+  if (perto) {
+    const alvo = doServidor.findIndex(item => item.id === perto);
+    if (alvo >= 0) onde = lado === "antes" ? alvo : alvo + 1;
+  } else if (categoria) {
+    // Fim do grupo: depois do ultimo canal que ja esta nele.
+    const ultimo = doServidor.map(item => item.categoryId ?? null).lastIndexOf(categoria);
+    if (ultimo >= 0) onde = ultimo + 1;
+  }
+  doServidor.splice(onde, 0, { ...puxado, categoryId: categoria });
+
+  // Desenha antes de perguntar ao servidor: arrastar tem de responder na hora.
+  // Se a gravacao falhar, `recarregarOrganizacao` traz o estado de verdade.
+  const outros = rooms.filter(item => item.serverId !== currentServerId);
+  rooms = [...outros, ...doServidor];
+  renderNavigation();
+  await gravarOrganizacao(doServidor);
+}
+
+async function soltarCategoria(id: string, perto: string, lado: "antes" | "depois") {
+  const minhas = categorias.filter(item => item.serverId === currentServerId);
+  const puxada = minhas.find(item => item.id === id);
+  if (!puxada) return;
+  const resto = minhas.filter(item => item.id !== id);
+  const alvo = resto.findIndex(item => item.id === perto);
+  const onde = alvo < 0 ? resto.length : (lado === "antes" ? alvo : alvo + 1);
+  resto.splice(onde, 0, puxada);
+
+  categorias = [...categorias.filter(item => item.serverId !== currentServerId), ...resto];
+  renderNavigation();
+  await gravarOrganizacao(rooms.filter(item => item.serverId === currentServerId));
+}
+
+async function gravarOrganizacao(doServidor: RoomInfo[]) {
+  const arranjo = {
+    categorias: categorias.filter(item => item.serverId === currentServerId).map(item => item.id),
+    canais: doServidor.map(item => ({ id: item.id, categoryId: item.categoryId ?? null })),
+  };
+  try {
+    await api<void>("/api/servers/" + encodeURIComponent(currentServerId) + "/organizacao", {
+      method: "PUT", body: JSON.stringify(arranjo),
+    });
+  } catch (erro) {
+    showToast(erro instanceof Error ? erro.message : "Não foi possível salvar a ordem.");
+    await recarregarOrganizacao();
+  }
+}
+
+// ------------------------------------------------------------- categorias
+// Grupos de canais dentro de um servidor. Valem para os dois tipos ao mesmo
+// tempo: uma campanha de RPG tem a mesa de voz e os canais de texto dela, e
+// separar isso em dois grupos de mesmo nome so daria trabalho a quem organiza.
+
+/// Quais grupos estao fechados. Segue a conta, e nao a maquina: fechar a
+/// campanha que nao e sua e arrumacao pessoal, e ter de refazer isso em cada
+/// computador seria o mesmo incomodo que os volumes tinham.
+const FECHADAS_KEY = "naoconcordo.categorias-fechadas";
+function fechadas(): Set<string> {
+  try { return new Set(JSON.parse(localStorage.getItem(FECHADAS_KEY) || "[]") as string[]); }
+  catch { return new Set(); }
+}
+function guardarFechadas(conjunto: Set<string>) {
+  localStorage.setItem(FECHADAS_KEY, JSON.stringify([...conjunto]));
+}
+
+const grupoExiste = (id: string) => categorias.some(item => item.id === id);
+const podeOrganizar = () =>
+  temCategorias && (roles[currentServerId] === "owner" || roles[currentServerId] === "mod");
+
+/// Rele a organizacao inteira depois de alguem mexer nela.
+///
+/// Reler tudo em vez de aplicar cada mudanca: sao quatro operacoes que mexem em
+/// duas listas, e a que aplicasse fora de ordem deixaria canal orfao na tela.
+async function recarregarOrganizacao() {
+  try {
+    const dados = await api<Bootstrap>("/api/bootstrap");
+    temCategorias = dados.categorias !== undefined;
+    categorias = dados.categorias || [];
+    rooms = dados.rooms;
+    // O canal aberto pode ter sido o apagado: ficar olhando para uma conversa
+    // que nao existe mais deixaria a tela mentindo ate alguem clicar noutra.
+    if (currentRoomId && !rooms.some(item => item.id === currentRoomId)) {
+      const proximo = rooms.find(item => item.serverId === currentServerId && item.kind === "text");
+      if (proximo) { await selectRoom(proximo.id); return; }
+      currentRoomId = "";
+    }
+    renderNavigation();
+  } catch (erro) {
+    console.warn("[categorias] nao deu para reler", erro);
+  }
+}
+
+/// Desenha os grupos embaixo dos canais soltos.
+function desenharCategorias(doServidor: RoomInfo[]) {
+  const caixa = byId("category-list");
+  const minhas = categorias.filter(item => item.serverId === currentServerId);
+  const encolhidas = fechadas();
+
+  caixa.replaceChildren(...minhas.flatMap(categoria => {
+    const dentro = doServidor.filter(item => item.categoryId === categoria.id);
+    const fechada = encolhidas.has(categoria.id);
+
+    const cabecalho = document.createElement("div");
+    cabecalho.className = "category-head" + (fechada ? " fechada" : "");
+
+    const abrir = document.createElement("button");
+    abrir.className = "category-name";
+    abrir.type = "button";
+    abrir.append(icon(fechada ? "plus" : "minus", "ic-sm"), document.createTextNode(categoria.name));
+    abrir.title = fechada ? "Mostrar os canais" : "Esconder os canais";
+    abrir.onclick = () => {
+      const atual = fechadas();
+      if (atual.has(categoria.id)) atual.delete(categoria.id); else atual.add(categoria.id);
+      guardarFechadas(atual);
+      renderNavigation();
+    };
+    cabecalho.append(abrir);
+
+    if (podeOrganizar()) {
+      const ajustes = document.createElement("button");
+      ajustes.className = "add-room";
+      ajustes.type = "button";
+      ajustes.title = "Ajustar esta categoria";
+      ajustes.append(icon("gear", "ic-sm"));
+      ajustes.onclick = evento => { evento.stopPropagation(); menuDaCategoria(categoria, ajustes); };
+      cabecalho.append(ajustes);
+    }
+    cabecalho.oncontextmenu = evento => {
+      if (!podeOrganizar()) return;
+      evento.preventDefault();
+      evento.stopPropagation();
+      menuDaCategoria(categoria, cabecalho, { x: evento.clientX, y: evento.clientY });
+    };
+
+    if (fechada) {
+      tornarArrastavel(cabecalho, { tipo: "categoria", id: categoria.id });
+      alvoDeCategoria(cabecalho, null, categoria);
+      return [cabecalho];
+    }
+
+    const corpo = document.createElement("div");
+    corpo.className = "category-body";
+    // Texto antes de voz dentro do grupo: e a ordem em que as pessoas procuram,
+    // e a lista de quem esta na chamada fica embaixo, onde ja estava.
+    for (const item of dentro.filter(canal => canal.kind === "text")) corpo.append(botaoDeTexto(item));
+    for (const item of dentro.filter(canal => canal.kind === "voice")) corpo.append(...linhasDeVoz(item));
+    if (!dentro.length) corpo.append(emptyLine("Arraste um canal para cá."));
+    tornarArrastavel(cabecalho, { tipo: "categoria", id: categoria.id });
+    alvoDeCategoria(cabecalho, corpo, categoria);
+    return [cabecalho, corpo];
+  }));
+
+  // O botao de criar grupo so existe para quem pode organizar, e so dentro de
+  // um servidor: na aba de amigos nao ha o que agrupar.
+  byId("add-category").classList.toggle("hidden", !(view === "server" && podeOrganizar()));
+  // A secao inteira some num servidor que nao conhece categorias: rotulo sem
+  // nada embaixo e sem botao so ocupa espaco e levanta duvida.
+  const secao = byId("add-category").closest(".section-title") as HTMLElement | null;
+  secao?.classList.toggle("hidden", !temCategorias || !minhas.length && !podeOrganizar());
+}
+
+function menuDaCategoria(categoria: Categoria, ancora: HTMLElement, ponto?: { x: number; y: number }) {
+  closeUserMenu();
+  const menu = document.createElement("div");
+  menu.className = "user-menu";
+
+  const opcao = (rotulo: string, aoClicar: () => void, perigo = false) => {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.textContent = rotulo;
+    if (perigo) botao.className = "perigo";
+    botao.onclick = () => { closeUserMenu(); aoClicar(); };
+    menu.append(botao);
+  };
+
+  opcao("Renomear", () => void renomearCategoria(categoria));
+  opcao("Mover para cima", () => void moverCategoria(categoria, true));
+  opcao("Mover para baixo", () => void moverCategoria(categoria, false));
+  // O texto diz o que acontece com os canais: sem isso ninguem clica, com medo
+  // de perder a conversa de meses de campanha.
+  opcao("Apagar (os canais ficam)", () => void apagarCategoria(categoria), true);
+
+  acoesDeCriar(menu);
+  montarMenu(menu, ancora, ponto);
+}
+
+async function renomearCategoria(categoria: Categoria) {
+  const nome = await askInput({
+    title: "Renomear categoria", label: "Nome", value: categoria.name,
+    submit: "Renomear", maxLength: 24,
+  });
+  if (!nome || nome === categoria.name) return;
+  try {
+    await api<void>("/api/categorias/" + encodeURIComponent(categoria.id), {
+      method: "PUT", body: JSON.stringify({ name: nome }),
+    });
+    await recarregarOrganizacao();
+  } catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível renomear."); }
+}
+
+async function moverCategoria(categoria: Categoria, acima: boolean) {
+  try {
+    await api<void>("/api/categorias/" + encodeURIComponent(categoria.id) + "/mover", {
+      method: "POST", body: JSON.stringify({ acima }),
+    });
+    await recarregarOrganizacao();
+  } catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível mover."); }
+}
+
+async function apagarCategoria(categoria: Categoria) {
+  const quantos = rooms.filter(item => item.categoryId === categoria.id).length;
+  const detalhe = quantos === 0 ? "Ela está vazia."
+    : quantos === 1 ? "O canal dela continua existindo, fora de categoria."
+    : "Os " + quantos + " canais dela continuam existindo, fora de categoria.";
+  if (!await confirmAction("Apagar categoria", "Apagar " + categoria.name + "?", detalhe, "Apagar")) return;
+  try {
+    await api<void>("/api/categorias/" + encodeURIComponent(categoria.id), { method: "DELETE" });
+    await recarregarOrganizacao();
+  } catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível apagar."); }
+}
+
+/// Acrescenta "Criar canal de texto / de voz / categoria" ao fim de um menu.
+///
+/// Vai em **todos** os menus da barra lateral, e nao so no do vazio: mirar o
+/// espaco entre dois canais para poder criar um terceiro e um alvo que a pessoa
+/// nao deveria precisar acertar. Fica no fim porque o que e sobre o item
+/// clicado vem primeiro.
+function acoesDeCriar(menu: HTMLElement) {
+  if (!podeCriarCanal()) return;
+  const titulo = document.createElement("p");
+  titulo.className = "menu-title";
+  titulo.textContent = "Criar";
+  menu.append(titulo);
+
+  const acao = (rotulo: string, aoClicar: () => void) => {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.textContent = rotulo;
+    botao.onclick = () => { closeUserMenu(); aoClicar(); };
+    menu.append(botao);
+  };
+  acao("Canal de texto", () => void createChannel("text"));
+  acao("Canal de voz", () => void createChannel("voice"));
+  if (temCategorias) acao("Categoria", () => void criarCategoria());
+}
+
+/// Menu do canal: renomear, apagar e trocar de grupo.
+function menuDoCanal(item: RoomInfo, ancora: HTMLElement, evento: MouseEvent) {
+  // `podeCriarCanal`, e nao `podeOrganizar`: este ultimo exige que o servidor
+  // conheca categorias, e renomear e apagar canal nao tem nada com isso.
+  if (!podeCriarCanal()) return;
+  evento.preventDefault();
+  evento.stopPropagation();
+  closeUserMenu();
+
+  const menu = document.createElement("div");
+  menu.className = "user-menu";
+
+  const acao = (rotulo: string, aoClicar: () => void, perigo = false) => {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.textContent = rotulo;
+    if (perigo) botao.className = "perigo";
+    botao.onclick = () => { closeUserMenu(); aoClicar(); };
+    menu.append(botao);
+  };
+  acao("Renomear canal", () => void renomearCanal(item));
+  acao("Apagar canal", () => void apagarCanal(item), true);
+
+  // A secao de mover so faz sentido onde ha grupos para onde mover.
+  if (temCategorias) {
+    const titulo = document.createElement("p");
+    titulo.className = "menu-title";
+    titulo.textContent = "Mover para";
+    menu.append(titulo);
+
+    const destino = (rotulo: string, id: string | null, atual: boolean) => {
+      const botao = document.createElement("button");
+      botao.type = "button";
+      botao.textContent = (atual ? "• " : "") + rotulo;
+      botao.disabled = atual;
+      botao.onclick = () => { closeUserMenu(); void moverCanal(item, id); };
+      menu.append(botao);
+    };
+
+    destino("Fora de categoria", null, !item.categoryId);
+    for (const categoria of categorias.filter(c => c.serverId === currentServerId)) {
+      destino(categoria.name, categoria.id, item.categoryId === categoria.id);
+    }
+  }
+
+  acoesDeCriar(menu);
+  montarMenu(menu, ancora, { x: evento.clientX, y: evento.clientY });
+}
+
+async function renomearCanal(item: RoomInfo) {
+  const nome = await askInput({
+    title: "Renomear canal", label: "Nome", value: item.name,
+    submit: "Renomear", maxLength: 24,
+  });
+  if (!nome || nome === item.name) return;
+  try {
+    await api<void>("/api/rooms/" + encodeURIComponent(item.id), {
+      method: "PUT", body: JSON.stringify({ name: nome }),
+    });
+    await recarregarOrganizacao();
+  } catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível renomear."); }
+}
+
+async function apagarCanal(item: RoomInfo) {
+  // O aviso diz o que se perde. Canal de voz nao guarda nada; o de texto guarda
+  // a conversa inteira, e ela some junto.
+  //
+  // O numero exato so aparece para o canal **aberto**: `history` guarda as
+  // mensagens de um canal por vez, entao contar as de outro daria zero e o aviso
+  // diria "esta vazio" sobre uma conversa de meses. Aviso que mente e pior do
+  // que aviso sem numero.
+  const aberto = item.id === currentRoomId;
+  const quantas = aberto ? history.filter(m => m.roomId === item.id).length : 0;
+  const detalhe = item.kind === "voice"
+    ? "Quem estiver na chamada dele sai."
+    : aberto
+      ? (quantas
+        ? "As " + quantas + " mensagens dele somem junto, e não dá para recuperar."
+        : "Ele está vazio.")
+      : "As mensagens dele somem junto, e não dá para recuperar.";
+  if (!await confirmAction("Apagar canal", "Apagar " + item.name + "?", detalhe, "Apagar")) return;
+  try {
+    await api<void>("/api/rooms/" + encodeURIComponent(item.id), { method: "DELETE" });
+    await recarregarOrganizacao();
+  } catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível apagar."); }
+}
+
+/// Menu de criar, no vazio da barra lateral.
+///
+/// Ele existe porque as secoes vazias deixaram de aparecer: sem canal de voz
+/// nenhum, o rotulo "CANAIS DE VOZ" e o "+" dele sumiam junto, e nao sobrava por
+/// onde criar o primeiro.
+function menuDeCriar(evento: MouseEvent) {
+  if (view !== "server" || !currentServerId) return;
+  if (!podeCriarCanal()) return;
+  // Em cima de um canal ou de uma categoria manda o menu daquele item, que ja
+  // carrega as mesmas acoes de criar no fim dele.
+  if ((evento.target as HTMLElement).closest(".channel, .category-head")) return;
+  evento.preventDefault();
+  closeUserMenu();
+
+  const menu = document.createElement("div");
+  menu.className = "user-menu";
+  acoesDeCriar(menu);
+  montarMenu(menu, byId("channels-pane"), { x: evento.clientX, y: evento.clientY });
+}
+
+/// Criar canal e do dono e do moderador, mesma regra de organizar — mas sem
+/// depender de o servidor conhecer categorias.
+const podeCriarCanal = () =>
+  roles[currentServerId] === "owner" || roles[currentServerId] === "mod";
+
+// Na barra inteira, e nao so na lista: o espaco vazio embaixo dos canais fica
+// **fora** de `#channels-pane`, e e justamente onde a mao vai. A aba de amigos
+// entra no mesmo elemento, mas `menuDeCriar` sai fora quando nao ha servidor
+// aberto.
+document.querySelector("aside.sidebar nav")?.addEventListener("contextmenu", evento => {
+  menuDeCriar(evento as MouseEvent);
+});
+
+async function moverCanal(item: RoomInfo, categoryId: string | null) {
+  try {
+    await api<void>("/api/rooms/" + encodeURIComponent(item.id) + "/categoria", {
+      method: "PUT", body: JSON.stringify({ categoryId }),
+    });
+    await recarregarOrganizacao();
+  } catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível mover o canal."); }
+}
+
+async function criarCategoria() {
+  if (!currentServerId) { showToast("Entre num servidor primeiro."); return; }
+  const nome = await askInput({
+    title: "Nova categoria", label: "Nome", placeholder: "Ex.: Campanha 1",
+    submit: "Criar", maxLength: 24,
+  });
+  if (!nome) return;
+  try {
+    await api<Categoria>("/api/categorias", {
+      method: "POST", body: JSON.stringify({ serverId: currentServerId, name: nome }),
+    });
+    await recarregarOrganizacao();
+  } catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível criar."); }
+}
+
+byId("add-category").addEventListener("click", () => void criarCategoria());
+
+/// Mostra ou esconde o rotulo de uma secao conforme ela tenha conteudo.
+function esconderSecaoVazia(listaId: string, tem: boolean) {
+  const lista = byId(listaId);
+  lista.classList.toggle("hidden", !tem);
+  // O rotulo e o irmao logo acima da lista.
+  const titulo = lista.previousElementSibling as HTMLElement | null;
+  if (titulo?.classList.contains("section-title")) titulo.classList.toggle("hidden", !tem);
+}
+
+/// Um canal de texto na barra lateral.
+///
+/// Separado de `renderNavigation` porque as categorias desenham os mesmos
+/// canais: duas copias divergiriam na primeira mudanca, e o selo de nao lido
+/// pararia de aparecer dentro dos grupos sem ninguem entender por que.
+function botaoDeTexto(item: RoomInfo) {
+    const button = document.createElement("button");
+    button.className = "channel" + (mode === "room" && item.id === currentRoomId ? " active" : "");
+    button.append(icon("hash", "room-dot"), document.createTextNode(item.name));
+    const pendentes = unreadRooms.get(item.id) || 0;
+    const citacoes = mencoesPorSala.get(item.id) || 0;
+    if (pendentes || citacoes) {
+      button.classList.add("unread");
+      const badge = document.createElement("span");
+      // Selo de mencao ganha da contagem: o que importa e "falaram com voce",
+      // nao quantas mensagens passaram.
+      badge.className = "unread-badge" + (citacoes ? " mencionado" : "");
+      badge.textContent = citacoes ? "@" : (pendentes > 99 ? "99+" : String(pendentes));
+      button.append(badge);
+    }
+    button.onclick = () => selectRoom(item.id);
+  button.oncontextmenu = evento => menuDoCanal(item, button, evento);
+  tornarArrastavel(button, { tipo: "canal", id: item.id });
+  alvoDeCanal(button, item);
+  return button;
+}
+
+/// Um canal de voz, mais a lista de quem esta dentro dele.
+function linhasDeVoz(item: RoomInfo): HTMLElement[] {
+    const button = document.createElement("button");
+    button.className = "channel voice" + (item.id === voiceRoomId ? " active" : "");
+    button.append(icon("speaker", "room-dot"), document.createTextNode(item.name));
+    // Clicar no canal em que voce ja esta **nao** desconecta: mostra ou esconde
+    // o palco da chamada. Sair e o botao de desligar, que existe para isso e
+    // nao se aperta sem querer ao procurar quem esta na sala.
+    button.onclick = () => {
+      if (item.id === voiceRoomId && (room?.state === "connected" || room?.state === "connecting")) {
+        palcoDaChamada = !palcoDaChamada;
+        void selectServer(item.serverId);
+        renderCameras();
+        return;
+      }
+      void toggleVoice(item.id);
+    };
+    // Mesmo menu do canal de texto: sem isto, so metade dos canais entraria
+    // numa categoria, e a mesa de voz da campanha ficaria de fora dela.
+    button.oncontextmenu = evento => menuDoCanal(item, button, evento);
+    tornarArrastavel(button, { tipo: "canal", id: item.id });
+    alvoDeCanal(button, item);
+    const nodes: HTMLElement[] = [button];
+    // Quem esta na chamada aparece embaixo do canal, como no Discord — em
+    // qualquer canal, nao so no seu: dava para entrar numa sala vazia sem
+    // saber que a conversa estava na do lado.
+    const naSala = peopleInVoice(item.id);
+    if (naSala.length) {
+      const box = document.createElement("div"); box.className = "voice-members";
+      for (const name of naSala) {
+        const row = document.createElement("div"); row.className = "voice-member"; row.dataset.who = name;
+        const avatar = document.createElement("div"); avatar.className = "avatar"; paintAvatar(avatar, name);
+        const label = document.createElement("span"); label.textContent = name;
+        row.append(avatar, label);
+        // Mesmas marcas do painel da direita: quem esta na chamada mostra aqui
+        // se esta com o microfone ou o audio desligado.
+        const marks = document.createElement("span"); marks.className = "person-marks";
+        if (micMuted(name)) marks.append(icon("mic-off", "ic-sm"));
+        if (audioMuted(name)) marks.append(icon("audio-off", "ic-sm"));
+        if (silencedByMe(name)) marks.append(icon("silenced", "ic-sm silenced-mark"));
+        const selo = liveBadge(name);
+        if (selo) marks.append(selo);
+        if (marks.childNodes.length) row.append(marks);
+        row.classList.add("clickable");
+        // Em si mesmo nao ha volume nem silenciar para ajustar, entao o clique
+        // vai direto ao cartao de perfil em vez de abrir um menu vazio.
+        row.onclick = key(name) === key(session?.username || "")
+          ? event => { event.stopPropagation(); abrirPerfil(name); }
+          : event => { event.stopPropagation(); openUserMenu(name, row); };
+        row.oncontextmenu = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          openUserMenu(name, row, { x: event.clientX, y: event.clientY });
+        };
+        box.append(row);
+      }
+      nodes.push(box);
+    }
+    return nodes;
+}
+
 function montarMenu(menu: HTMLElement, anchor: HTMLElement, ponto?: { x: number; y: number }) {
   (document.fullscreenElement || document.body).append(menu);
   // Posiciona depois de medir: fora da tela, o menu abriria cortado.
@@ -6544,6 +7397,7 @@ function initials(name: string) { return name.split(/\s+/).slice(0, 2).map(part 
 async function resume() { if (!session) return; try { await api("/api/session"); await enterApp(); } catch { saveSession(null); } }
 void resume();
 void decidirAberturaInicial();
+bloquearRecarregar();
 byId("app-version").textContent = "v" + __APP_VERSION__;
 
 // ------------------------------------------------------ aviso de versao

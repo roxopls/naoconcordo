@@ -546,6 +546,20 @@ struct Mft {
     /// O MFT de hardware entrega as amostras de saida dele. Guardado porque um
     /// MFT que nao entrega exige buffer nosso a cada `ProcessOutput`.
     entrega_amostras: bool,
+    /// SPS e PPS do H.264 — o "manual" que o decodificador precisa ler antes de
+    /// entender qualquer quadro.
+    ///
+    /// O codificador de hardware costuma manda-los junto do primeiro
+    /// quadro-chave e nao repetir. Quem estava assistindo desde o comeco tem o
+    /// manual guardado; quem chegou depois, ou quem perdeu justamente aqueles
+    /// pacotes, nao tem — e nenhum quadro-chave posterior o traz de volta. A
+    /// imagem fica esfarelada e **nao se recupera sozinha**, por mais chaves que
+    /// venham.
+    ///
+    /// Guardado uma vez, na configuracao da saida, e reposto na frente de todo
+    /// quadro-chave. Repetir e barato (algumas dezenas de bytes) e legal: o
+    /// padrao permite parametros repetidos, e todo decodificador aceita.
+    cabecalho: Vec<u8>,
     /// MFT assincrono avisa por evento quando quer quadro e quando tem saida.
     /// O sincrono nao avisa nada: e chamar `ProcessInput` e depois puxar a
     /// saida ate ela acabar. Os dois existem em hardware, e tratar so o
@@ -697,6 +711,7 @@ impl Mft {
             largura,
             altura,
             entrega_amostras: true,
+            cabecalho: Vec::new(),
             assincrono,
         };
         unsafe { mft.configurar(largura, altura, fps, bitrate) }?;
@@ -739,6 +754,23 @@ impl Mft {
             self.transform
                 .SetOutputType(0, &saida, 0)
                 .map_err(|e| format!("saida recusada ({}): {e}", self.nome))?;
+
+            // Lido **depois** de a saida ser aceita: e nesse momento que o
+            // codificador preenche o cabecalho, com os valores que ele mesmo
+            // escolheu.
+            self.cabecalho.clear();
+            if self.codec == HwCodec::H264 {
+                if let Ok(atual) = self.transform.GetOutputCurrentType(0) {
+                    if let Ok(tamanho) = atual.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) {
+                        let mut bytes = vec![0u8; tamanho as usize];
+                        let mut escritos = 0u32;
+                        if atual.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut bytes, Some(&mut escritos)).is_ok() {
+                            bytes.truncate(escritos as usize);
+                            self.cabecalho = bytes;
+                        }
+                    }
+                }
+            }
         }
 
         let entrada = unsafe { MFCreateMediaType() }.map_err(|e| e.to_string())?;
@@ -774,12 +806,23 @@ impl Mft {
                     &CODECAPI_AVEncCommonMeanBitRate,
                     &variante_u32(bitrate.min(u64::from(u32::MAX)) as u32),
                 );
-                // Grupo de imagens longo: quem pede quadro-chave aqui e o
-                // WebRTC, quando alguem novo comeca a assistir ou a rede perdeu
-                // pacote. Chave periodica sem pedido so gastaria banda.
+                // Dois segundos entre quadros-chave, e nao dez.
+                //
+                // O raciocinio antigo era: chave so quando o WebRTC pedir, e
+                // chave periodica sem pedido gasta banda. Vale numa rede que nao
+                // perde pacote. Numa que perde, o pedido tambem se perde ou
+                // chega atrasado — o LiveKit ainda limita quantos passa por
+                // segundo — e ate a chave chegar o decodificador do outro lado
+                // mostra lixo. Com dez segundos de intervalo, "lixo ate a
+                // proxima chave" e ate dez segundos de imagem esfarelada.
+                //
+                // Dois segundos poem um teto no estrago que independe de pedido
+                // nenhum chegar. Custa banda: quadro-chave e caro. Mas imagem
+                // que se remonta sozinha em dois segundos e melhor do que imagem
+                // limpa que, quando quebra, fica quebrada.
                 let _ = api.SetValue(
                     &CODECAPI_AVEncMPVGOPSize,
-                    &variante_u32((fps.max(1.0) * 10.0) as u32),
+                    &variante_u32((fps.max(1.0) * 2.0) as u32),
                 );
             }
         }
@@ -963,7 +1006,12 @@ impl Mft {
         amostra
     }
 
-    /// Tira uma unidade comprimida do codificador e entrega ao LiveKit.
+    /// O comeco de `todo` e exatamente `prefixo`?
+fn comeca_com(todo: &[u8], prefixo: &[u8]) -> bool {
+    todo.len() >= prefixo.len() && &todo[..prefixo.len()] == prefixo
+}
+
+/// Tira uma unidade comprimida do codificador e entrega ao LiveKit.
     unsafe fn drenar_saida(&self, source: &NativeVideoSource) {
         let Some(amostra) = (unsafe { self.puxar_saida() }) else { return };
         unsafe { self.entregar_amostra(source, amostra) };
@@ -982,7 +1030,19 @@ impl Mft {
                 return;
             }
             if tamanho > 0 {
-                let payload = std::slice::from_raw_parts(dados, tamanho as usize);
+                let bruto = std::slice::from_raw_parts(dados, tamanho as usize);
+                // O cabecalho vai na frente de todo quadro-chave, mas so quando
+                // o codificador ja nao o mandou: repetir e legal, mas procurar
+                // antes evita crescer a unidade a toa em placa que ja faz certo.
+                let mut com_cabecalho;
+                let payload = if chave && !self.cabecalho.is_empty() && !Self::comeca_com(bruto, &self.cabecalho) {
+                    com_cabecalho = Vec::with_capacity(self.cabecalho.len() + bruto.len());
+                    com_cabecalho.extend_from_slice(&self.cabecalho);
+                    com_cabecalho.extend_from_slice(bruto);
+                    &com_cabecalho[..]
+                } else {
+                    bruto
+                };
                 source.capture_encoded_frame(&EncodedVideoFrame {
                     codec: self.codec.para_livekit(),
                     payload,

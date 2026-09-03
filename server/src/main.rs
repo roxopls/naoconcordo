@@ -1,7 +1,7 @@
 use std::{collections::{BTreeMap, HashMap}, env, net::SocketAddr, path::{Path, PathBuf}, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 
 use axum::{
-    extract::{ConnectInfo, Query, State, WebSocketUpgrade, ws::{Message as WsMessage, WebSocket}},
+    extract::{ConnectInfo, Path as Caminho, Query, State, WebSocketUpgrade, ws::{Message as WsMessage, WebSocket}},
     http::{HeaderMap, Method, StatusCode}, response::{IntoResponse, Response},
     routing::{get, post, put}, Json, Router,
 };
@@ -28,6 +28,12 @@ const MAX_ENVELOPES: usize = 5_000;
 const MAX_UPLOAD: usize = 50 * 1024 * 1024;
 const SESSION_SECONDS: u64 = 7 * 24 * 60 * 60;
 const PASSWORD_ITERATIONS: u32 = 210_000;
+/// Teto das preferencias de uma conta. Elas seguem a pessoa entre computadores,
+/// entao viajam em toda entrada; sem teto viravam um lugar barato de guardar
+/// qualquer coisa no servidor dos outros.
+const MAX_PREFERENCIAS: usize = 60;
+const MAX_PREF_CHAVE: usize = 80;
+const MAX_PREF_VALOR: usize = 8 * 1024;
 
 #[derive(Clone)]
 struct Config { auth_salt: String, owner_password: String, admin_username: String, livekit_key: String, livekit_secret: String, livekit_url: String, data_dir: PathBuf, upload_dir: PathBuf, upload_fallback_dir: PathBuf, upload_primary_cap: u64,
@@ -65,6 +71,12 @@ struct AppState {
     // A identidade privada de cada conta, cifrada pelo proprio dono. O servidor
     // guarda e devolve; abrir, nao abre.
     cofres: Arc<RwLock<HashMap<String, Cofre>>>,
+    // Ajustes que seguem a conta, e nao a maquina: volume de cada pessoa,
+    // atalhos, notificacoes. O que descreve **este computador** — microfone,
+    // placa de video, canal de atualizacao — fica no proprio computador, porque
+    // levar isso junto escolheria um microfone que nao existe do outro lado.
+    preferencias: Arc<RwLock<HashMap<String, BTreeMap<String, String>>>>,
+    categorias: Arc<RwLock<Vec<Categoria>>>,
     friendships: Arc<RwLock<Vec<Friendship>>>,
     envelopes: Arc<RwLock<Vec<Envelope>>>,
     events: broadcast::Sender<Broadcast>,
@@ -102,6 +114,32 @@ struct RoomInfo {
     #[serde(default = "default_server_id")] server_id: String,
     // Salas antigas nao tinham tipo: viram canal de texto.
     #[serde(default = "default_room_kind")] kind: RoomKind,
+    /// Em qual grupo o canal aparece. Ausente e o normal: canal sem categoria
+    /// fica em cima, solto, como sempre esteve.
+    #[serde(default)] category_id: Option<String>,
+    /// Onde o canal fica na lista.
+    ///
+    /// Canais antigos vem todos com zero, e o desempate por data de criacao
+    /// mantem exatamente a ordem que eles ja tinham — ninguem ve a lista mudar
+    /// sozinha por causa desta atualizacao.
+    #[serde(default)] posicao: i32,
+}
+
+/// Um grupo de canais dentro de um servidor.
+///
+/// Vale para os dois tipos ao mesmo tempo — uma campanha de RPG tem a mesa de
+/// voz e os canais de texto dela, e separar isso em dois grupos de mesmo nome so
+/// daria trabalho a quem organiza.
+///
+/// `posicao` existe porque ordem alfabetica nao serve: "Campanha 2" antes de
+/// "Campanha 10" e o tipo de coisa que so incomoda depois de pronto.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Categoria {
+    id: String,
+    server_id: String,
+    name: String,
+    posicao: i32,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -276,6 +314,12 @@ enum ServerEvent {
     ServerLeft { server_id: String },
     ServerUpdated { server: ServerInfo },
     MembersChanged { server_id: String },
+    /// Categorias criadas, renomeadas, reordenadas, ou canal trocado de grupo.
+    ///
+    /// Sem detalhe do que mudou de proposito: sao quatro operacoes que mexem em
+    /// duas listas, e mandar o estado inteiro de volta pelo `bootstrap` custa
+    /// menos do que quatro eventos que precisam ser aplicados na ordem certa.
+    CanaisOrganizados { server_id: String },
     RoleChanged { server_id: String, role: ServerRole },
     PresenceChanged { username: String, online: bool },
     VoiceChanged { room_id: String, users: Vec<String> },
@@ -348,7 +392,13 @@ async fn set_voice(state: &AppState, username: &str, anterior: &mut Option<Strin
     }
 }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")]
-struct CreateRoomInput { name: String, server_id: String, #[serde(default = "default_room_kind")] kind: RoomKind }
+struct CreateRoomInput {
+    name: String, server_id: String,
+    #[serde(default = "default_room_kind")] kind: RoomKind,
+    /// Ja nascer dentro de um grupo: criar o canal e depois arrasta-lo para a
+    /// categoria certa e um passo a mais toda vez.
+    #[serde(default)] category_id: Option<String>,
+}
 #[derive(Deserialize)] struct CreateServerInput { name: String }
 #[derive(Deserialize)] struct OwnerInput { code: String }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")] struct CreateInviteInput { #[serde(default)] label: String }
@@ -429,6 +479,7 @@ struct ChallengeOutput {
 #[derive(Serialize)] struct LivekitOutput { token: String, url: String, room: String }
 #[derive(Serialize)] struct WelcomeOutput { #[serde(rename = "type")] kind: &'static str, messages: Vec<ChatMessage> }
 #[derive(Serialize)] #[serde(rename_all = "camelCase")] struct BootstrapOutput { servers: Vec<ServerInfo>, rooms: Vec<RoomInfo>, profiles: Vec<Profile>, is_owner: bool, is_admin: bool, roles: HashMap<String, ServerRole>, online: Vec<String>, voice: HashMap<String, Vec<String>>,
+    categorias: Vec<Categoria>,
     /// Se este servidor tem busca de GIF. Sem isso o cliente mostraria um botao
     /// que so sabe dar erro.
     gifs: bool }
@@ -495,6 +546,8 @@ async fn main() {
         files: Arc::new(RwLock::new(load_json(&config.data_dir, "files.json").await)),
         keys: Arc::new(RwLock::new(load_json(&config.data_dir, "keys.json").await)),
         cofres: Arc::new(RwLock::new(load_json(&config.data_dir, "cofres.json").await)),
+        preferencias: Arc::new(RwLock::new(load_json(&config.data_dir, "preferencias.json").await)),
+        categorias: Arc::new(RwLock::new(load_json(&config.data_dir, "categorias.json").await)),
         friendships: Arc::new(RwLock::new(load_json(&config.data_dir, "friends.json").await)),
         envelopes: Arc::new(RwLock::new(load_envelopes(&config.data_dir).await)),
         config, auth_key, sessions: Default::default(), challenges: Default::default(), events,
@@ -524,9 +577,16 @@ async fn main() {
         .route("/api/admin/invites/revoke", post(revoke_invite))
         .route("/api/servers", post(create_server))
         .route("/api/rooms", post(create_room))
+        .route("/api/rooms/{id}", put(renomear_canal).delete(apagar_canal))
+        .route("/api/rooms/{id}/categoria", put(mover_canal))
+        .route("/api/categorias", post(criar_categoria))
+        .route("/api/categorias/{id}", put(renomear_categoria).delete(apagar_categoria))
+        .route("/api/categorias/{id}/mover", post(mover_categoria))
+        .route("/api/servers/{id}/organizacao", put(reorganizar))
         .route("/api/profile/avatar", put(update_avatar))
         .route("/api/profile", put(update_profile))
         .route("/api/messages/{id}", put(edit_message).delete(delete_message))
+        .route("/api/preferencias", get(ler_preferencias).put(guardar_preferencias))
         .route("/api/gifs", get(buscar_gifs))
         .route("/api/gifs/midia", get(midia_de_gif))
         .route("/api/gifs/guardar", post(guardar_gif))
@@ -751,8 +811,17 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Respons
         .filter(|server| is_member(&memberships, &server.id, &session.username))
         .cloned().collect();
     let visible: Vec<String> = servers.iter().map(|server| server.id.clone()).collect();
-    let rooms: Vec<RoomInfo> = state.rooms.read().await.iter()
+    let mut rooms: Vec<RoomInfo> = state.rooms.read().await.iter()
         .filter(|room| visible.contains(&room.server_id)).cloned().collect();
+    // Ordenado aqui para todo cliente desenhar igual. O desempate por data e o
+    // que preserva a ordem antiga de quem nunca arrastou nada: aqueles canais
+    // tem todos `posicao` zero.
+    rooms.sort_by(|a, b| a.posicao.cmp(&b.posicao).then_with(|| a.created_at.cmp(&b.created_at)));
+    let mut categorias: Vec<Categoria> = state.categorias.read().await.iter()
+        .filter(|categoria| visible.contains(&categoria.server_id)).cloned().collect();
+    // Ordenadas aqui para todo cliente desenhar igual, sem cada um inventar a
+    // sua regra de desempate.
+    categorias.sort_by(|a, b| a.posicao.cmp(&b.posicao).then_with(|| a.name.cmp(&b.name)));
     let roles: HashMap<String, ServerRole> = servers.iter()
         .filter_map(|server| role_of(&memberships, &server.id, &session.username).map(|role| (server.id.clone(), role)))
         .collect();
@@ -771,6 +840,7 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Respons
         servers, rooms,
         profiles: state.profiles.read().await.values().cloned().collect(),
         is_owner: session.is_owner, is_admin: is_admin(&state, &session.username), roles, online, voice,
+        categorias,
         gifs: state.config.gif_key.is_some(),
     }).into_response()
 }
@@ -846,8 +916,8 @@ async fn create_server(State(state): State<AppState>, headers: HeaderMap, Json(b
     drop(memberships);
     // Servidor novo nasce com um canal de texto e um de voz, como no Discord.
     let mut rooms = state.rooms.write().await;
-    rooms.push(RoomInfo { id: format!("{id}-geral"), name: "geral".into(), created_at: Utc::now(), server_id: id.clone(), kind: RoomKind::Text });
-    rooms.push(RoomInfo { id: format!("{id}-voz-geral"), name: "Geral".into(), created_at: Utc::now(), server_id: id, kind: RoomKind::Voice });
+    rooms.push(RoomInfo { id: format!("{id}-geral"), name: "geral".into(), created_at: Utc::now(), server_id: id.clone(), kind: RoomKind::Text, category_id: None, posicao: 0 });
+    rooms.push(RoomInfo { id: format!("{id}-voz-geral"), name: "Geral".into(), created_at: Utc::now(), server_id: id, kind: RoomKind::Voice, category_id: None, posicao: 0 });
     persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
     Json(server).into_response()
 }
@@ -872,7 +942,16 @@ async fn create_room(State(state): State<AppState>, headers: HeaderMap, Json(bod
     if rooms.len() >= 60 { return error(StatusCode::BAD_REQUEST, "Limite de 60 canais atingido."); }
     let mut id = base.clone(); let mut suffix = 2;
     while rooms.iter().any(|r| r.id == id) { id = format!("{base}-{suffix}"); suffix += 1; }
-    let room = RoomInfo { id, name, created_at: Utc::now(), server_id: body.server_id, kind: body.kind };
+    // No fim da lista daquele servidor: canal novo aparece embaixo, que e onde
+    // quem acabou de criar vai procurar.
+    let posicao = rooms.iter()
+        .filter(|outro| outro.server_id == body.server_id)
+        .map(|outro| outro.posicao).max().unwrap_or(-1) + 1;
+    let room = RoomInfo {
+        id, name, created_at: Utc::now(), server_id: body.server_id, kind: body.kind,
+        category_id: body.category_id.filter(|valor| !valor.is_empty()),
+        posicao,
+    };
     rooms.push(room.clone()); persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
     let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &room.server_id) };
     let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::RoomCreated { room: room.clone() }));
@@ -1397,6 +1476,395 @@ async fn guardar_bytes(
     files.insert(id, stored.clone());
     persist_json(&state.config.data_dir, "files.json", &*files).await;
     Ok((stored, true))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CanalOrganizado { id: String, #[serde(default)] category_id: Option<String> }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Organizacao {
+    #[serde(default)] categorias: Vec<String>,
+    #[serde(default)] canais: Vec<CanalOrganizado>,
+}
+
+/// Grava de uma vez o arranjo inteiro de um servidor: ordem das categorias,
+/// ordem dos canais e em que grupo cada um esta.
+///
+/// Uma rota so, e nao uma por movimento, porque arrastar um canal para outro
+/// grupo muda tres coisas ao mesmo tempo — a categoria dele, a posicao dele e a
+/// posicao de todos os que se deslocaram. Em chamadas separadas existiria um
+/// instante com a lista pela metade, e duas pessoas arrastando junto veriam
+/// resultados diferentes.
+///
+/// A posicao e o **indice** na lista que chegou. Quem envia ja sabe como quer
+/// que fique; renumerar aqui evita que buracos e empates de posicoes antigas
+/// sobrevivam.
+async fn reorganizar(
+    State(state): State<AppState>,
+    Caminho(server_id): Caminho<String>,
+    headers: HeaderMap,
+    Json(body): Json<Organizacao>,
+) -> Response {
+    if let Err(resposta) = pode_organizar(&state, &headers, &server_id).await { return resposta; }
+
+    // Tudo conferido antes de gravar qualquer coisa: aplicar metade e recusar o
+    // resto deixaria a lista num estado que ninguem pediu.
+    let mut categorias = state.categorias.write().await;
+    let daqui: Vec<&Categoria> = categorias.iter().filter(|c| c.server_id == server_id).collect();
+    if body.categorias.len() != daqui.len()
+        || !body.categorias.iter().all(|id| daqui.iter().any(|c| &c.id == id))
+    {
+        return error(StatusCode::BAD_REQUEST, "A lista de categorias nao confere com a do servidor.");
+    }
+
+    let mut rooms = state.rooms.write().await;
+    let conhecidos: Vec<String> = body.categorias.clone();
+    for canal in &body.canais {
+        let Some(room) = rooms.iter().find(|r| r.id == canal.id) else {
+            return error(StatusCode::NOT_FOUND, "Canal nao encontrado.");
+        };
+        if room.server_id != server_id {
+            return error(StatusCode::FORBIDDEN, "Canal de outro servidor.");
+        }
+        // Categoria de fora esconderia o canal num grupo que ninguem daqui ve.
+        if let Some(alvo) = canal.category_id.as_deref().filter(|valor| !valor.is_empty()) {
+            if !conhecidos.iter().any(|id| id == alvo) {
+                return error(StatusCode::NOT_FOUND, "Categoria nao encontrada.");
+            }
+        }
+    }
+
+    for (indice, id) in body.categorias.iter().enumerate() {
+        if let Some(categoria) = categorias.iter_mut().find(|c| &c.id == id) {
+            categoria.posicao = indice as i32;
+        }
+    }
+    for (indice, canal) in body.canais.iter().enumerate() {
+        if let Some(room) = rooms.iter_mut().find(|r| r.id == canal.id) {
+            room.category_id = canal.category_id.clone().filter(|valor| !valor.is_empty());
+            room.posicao = indice as i32;
+        }
+    }
+    persist_json(&state.config.data_dir, "categorias.json", &*categorias).await;
+    persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
+    drop(categorias);
+    drop(rooms);
+
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+// ------------------------------------------------------------- categorias
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CriarCategoria { server_id: String, name: String }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenomearCategoria { name: String }
+
+#[derive(Deserialize)]
+struct MoverCategoria { acima: bool }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoverCanal {
+    /// Ausente ou nulo tira o canal de qualquer categoria.
+    #[serde(default)] category_id: Option<String>,
+}
+
+/// Quem pode mexer na organizacao do servidor, e o servidor existe?
+///
+/// Mesma regra de criar canal: dono ou moderador. Devolve a resposta de erro
+/// pronta, porque as quatro rotas abaixo fariam a mesma checagem palavra por
+/// palavra e uma delas acabaria esquecendo um pedaco.
+/// Ha sessao valida? Sem isto, as rotas abaixo procuram o canal **antes** de
+/// olhar quem esta chamando, e responder "nao encontrado" ou "encontrado" a quem
+/// nao entrou vira uma forma de descobrir quais canais existem no servidor dos
+/// outros, um id por tentativa.
+async fn tem_sessao(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    match authenticated(state, headers).await {
+        Some(_) => Ok(()),
+        None => Err(error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.")),
+    }
+}
+
+async fn pode_organizar(state: &AppState, headers: &HeaderMap, server_id: &str) -> Result<(), Response> {
+    let Some((_, session)) = authenticated(state, headers).await else {
+        return Err(error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."));
+    };
+    if !state.servers.read().await.iter().any(|server| server.id == server_id) {
+        return Err(error(StatusCode::NOT_FOUND, "Servidor nao encontrado."));
+    }
+    let memberships = state.memberships.read().await;
+    if !manages(&memberships, server_id, &session.username) {
+        return Err(error(StatusCode::FORBIDDEN, "Somente dono ou moderador organiza os canais."));
+    }
+    Ok(())
+}
+
+async fn criar_categoria(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<CriarCategoria>) -> Response {
+    if let Err(resposta) = pode_organizar(&state, &headers, &body.server_id).await { return resposta; }
+    let name = normalize_name(&body.name);
+    if name.chars().count() < 2 {
+        return error(StatusCode::BAD_REQUEST, "O nome da categoria precisa ter pelo menos 2 caracteres.");
+    }
+    let mut categorias = state.categorias.write().await;
+    let deste = categorias.iter().filter(|c| c.server_id == body.server_id).count();
+    if deste >= 20 { return error(StatusCode::BAD_REQUEST, "Limite de 20 categorias por servidor."); }
+    // Entra no fim: quem acabou de criar procura embaixo, nao no meio da lista.
+    let posicao = categorias.iter()
+        .filter(|c| c.server_id == body.server_id)
+        .map(|c| c.posicao).max().unwrap_or(-1) + 1;
+    let server_id = body.server_id;
+    let categoria = Categoria {
+        id: Uuid::new_v4().to_string(), server_id: server_id.clone(), name, posicao,
+    };
+    categorias.push(categoria.clone());
+    persist_json(&state.config.data_dir, "categorias.json", &*categorias).await;
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
+    (StatusCode::CREATED, Json(categoria)).into_response()
+}
+
+async fn renomear_categoria(State(state): State<AppState>, Caminho(id): Caminho<String>, headers: HeaderMap, Json(body): Json<RenomearCategoria>) -> Response {
+    if let Err(resposta) = tem_sessao(&state, &headers).await { return resposta; }
+    let server_id = match dono_da_categoria(&state, &id).await {
+        Some(valor) => valor,
+        None => return error(StatusCode::NOT_FOUND, "Categoria nao encontrada."),
+    };
+    if let Err(resposta) = pode_organizar(&state, &headers, &server_id).await { return resposta; }
+    let name = normalize_name(&body.name);
+    if name.chars().count() < 2 {
+        return error(StatusCode::BAD_REQUEST, "O nome da categoria precisa ter pelo menos 2 caracteres.");
+    }
+    let mut categorias = state.categorias.write().await;
+    let Some(categoria) = categorias.iter_mut().find(|c| c.id == id) else {
+        return error(StatusCode::NOT_FOUND, "Categoria nao encontrada.");
+    };
+    categoria.name = name;
+    persist_json(&state.config.data_dir, "categorias.json", &*categorias).await;
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Apaga a categoria. **Os canais dela continuam existindo**, soltos.
+///
+/// Apagar um grupo nao pode apagar o que estava dentro: a conversa de meses de
+/// campanha nao some porque alguem quis desfazer a organizacao.
+async fn apagar_categoria(State(state): State<AppState>, Caminho(id): Caminho<String>, headers: HeaderMap) -> Response {
+    if let Err(resposta) = tem_sessao(&state, &headers).await { return resposta; }
+    let server_id = match dono_da_categoria(&state, &id).await {
+        Some(valor) => valor,
+        None => return error(StatusCode::NOT_FOUND, "Categoria nao encontrada."),
+    };
+    if let Err(resposta) = pode_organizar(&state, &headers, &server_id).await { return resposta; }
+
+    {
+        let mut rooms = state.rooms.write().await;
+        let mut mexeu = false;
+        for room in rooms.iter_mut().filter(|r| r.category_id.as_deref() == Some(id.as_str())) {
+            room.category_id = None;
+            mexeu = true;
+        }
+        if mexeu { persist_json(&state.config.data_dir, "rooms.json", &*rooms).await; }
+    }
+    let mut categorias = state.categorias.write().await;
+    categorias.retain(|c| c.id != id);
+    persist_json(&state.config.data_dir, "categorias.json", &*categorias).await;
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Troca de lugar com a vizinha, para cima ou para baixo.
+///
+/// Trocar em vez de renumerar tudo: a lista e curta, e mexer so em duas deixa o
+/// resto exatamente onde estava mesmo se as posicoes tiverem buracos.
+async fn mover_categoria(State(state): State<AppState>, Caminho(id): Caminho<String>, headers: HeaderMap, Json(body): Json<MoverCategoria>) -> Response {
+    if let Err(resposta) = tem_sessao(&state, &headers).await { return resposta; }
+    let server_id = match dono_da_categoria(&state, &id).await {
+        Some(valor) => valor,
+        None => return error(StatusCode::NOT_FOUND, "Categoria nao encontrada."),
+    };
+    if let Err(resposta) = pode_organizar(&state, &headers, &server_id).await { return resposta; }
+
+    let mut categorias = state.categorias.write().await;
+    let mut deste: Vec<usize> = categorias.iter().enumerate()
+        .filter(|(_, c)| c.server_id == server_id)
+        .map(|(indice, _)| indice).collect();
+    deste.sort_by_key(|indice| (categorias[*indice].posicao, categorias[*indice].name.clone()));
+    let Some(lugar) = deste.iter().position(|indice| categorias[*indice].id == id) else {
+        return error(StatusCode::NOT_FOUND, "Categoria nao encontrada.");
+    };
+    let vizinho = if body.acima {
+        if lugar == 0 { return StatusCode::NO_CONTENT.into_response(); }
+        lugar - 1
+    } else {
+        if lugar + 1 >= deste.len() { return StatusCode::NO_CONTENT.into_response(); }
+        lugar + 1
+    };
+    let (a, b) = (deste[lugar], deste[vizinho]);
+    // Posicoes iguais entre vizinhas fariam a troca nao mudar nada; renumerar as
+    // duas pelo lugar que ocupam resolve isso sem tocar nas outras.
+    categorias[a].posicao = vizinho as i32;
+    categorias[b].posicao = lugar as i32;
+    persist_json(&state.config.data_dir, "categorias.json", &*categorias).await;
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn dono_da_categoria(state: &AppState, id: &str) -> Option<String> {
+    state.categorias.read().await.iter().find(|c| c.id == id).map(|c| c.server_id.clone())
+}
+
+#[derive(Deserialize)]
+struct RenomearCanal { name: String }
+
+/// Troca o nome do canal. O id nao muda: mensagem e convite apontam para ele.
+async fn renomear_canal(State(state): State<AppState>, Caminho(id): Caminho<String>, headers: HeaderMap, Json(body): Json<RenomearCanal>) -> Response {
+    if let Err(resposta) = tem_sessao(&state, &headers).await { return resposta; }
+    let server_id = match state.rooms.read().await.iter().find(|r| r.id == id).map(|r| r.server_id.clone()) {
+        Some(valor) => valor,
+        None => return error(StatusCode::NOT_FOUND, "Canal nao encontrado."),
+    };
+    if let Err(resposta) = pode_organizar(&state, &headers, &server_id).await { return resposta; }
+
+    let name = normalize_name(&body.name);
+    if name.chars().count() < 2 {
+        return error(StatusCode::BAD_REQUEST, "O nome do canal precisa ter pelo menos 2 caracteres.");
+    }
+    {
+        let mut rooms = state.rooms.write().await;
+        let Some(room) = rooms.iter_mut().find(|r| r.id == id) else {
+            return error(StatusCode::NOT_FOUND, "Canal nao encontrado.");
+        };
+        room.name = name;
+        persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
+    }
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Apaga o canal e **as mensagens dele**.
+///
+/// As mensagens vao junto de proposito: deixa-las orfas guardaria para sempre
+/// uma conversa que ninguem consegue mais abrir, e o arquivo so cresceria. Quem
+/// apaga precisa saber disso, e quem chama esta rota avisa antes.
+///
+/// O servidor nao impede apagar o ultimo canal. Um servidor sem canal nenhum e
+/// estranho, mas e escolha de quem manda nele — e inventar uma regra aqui
+/// deixaria alguem preso com um canal que nao quer.
+async fn apagar_canal(State(state): State<AppState>, Caminho(id): Caminho<String>, headers: HeaderMap) -> Response {
+    if let Err(resposta) = tem_sessao(&state, &headers).await { return resposta; }
+    let server_id = match state.rooms.read().await.iter().find(|r| r.id == id).map(|r| r.server_id.clone()) {
+        Some(valor) => valor,
+        None => return error(StatusCode::NOT_FOUND, "Canal nao encontrado."),
+    };
+    if let Err(resposta) = pode_organizar(&state, &headers, &server_id).await { return resposta; }
+
+    {
+        let mut rooms = state.rooms.write().await;
+        let antes = rooms.len();
+        rooms.retain(|r| r.id != id);
+        if rooms.len() == antes { return error(StatusCode::NOT_FOUND, "Canal nao encontrado."); }
+        persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
+    }
+    {
+        let mut messages = state.messages.write().await;
+        let antes = messages.len();
+        messages.retain(|m| m.room_id != id);
+        if messages.len() != antes {
+            persist_json(&state.config.data_dir, "messages.json", &*messages).await;
+        }
+    }
+    // Ninguem fica preso numa sala de voz que deixou de existir.
+    {
+        let mut voice = state.voice.write().await;
+        voice.remove(&id);
+    }
+
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Poe o canal numa categoria, ou o tira de todas.
+async fn mover_canal(State(state): State<AppState>, Caminho(id): Caminho<String>, headers: HeaderMap, Json(body): Json<MoverCanal>) -> Response {
+    if let Err(resposta) = tem_sessao(&state, &headers).await { return resposta; }
+    let server_id = match state.rooms.read().await.iter().find(|r| r.id == id).map(|r| r.server_id.clone()) {
+        Some(valor) => valor,
+        None => return error(StatusCode::NOT_FOUND, "Canal nao encontrado."),
+    };
+    if let Err(resposta) = pode_organizar(&state, &headers, &server_id).await { return resposta; }
+
+    let destino = body.category_id.filter(|valor| !valor.is_empty());
+    // Categoria de outro servidor nao serve: sem esta checagem daria para
+    // esconder um canal dentro de um grupo que ninguem daquele servidor ve.
+    if let Some(alvo) = destino.as_deref() {
+        let existe = state.categorias.read().await.iter()
+            .any(|c| c.id == alvo && c.server_id == server_id);
+        if !existe { return error(StatusCode::NOT_FOUND, "Categoria nao encontrada."); }
+    }
+
+    let mut rooms = state.rooms.write().await;
+    let Some(room) = rooms.iter_mut().find(|r| r.id == id) else {
+        return error(StatusCode::NOT_FOUND, "Canal nao encontrado.");
+    };
+    room.category_id = destino;
+    persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Os ajustes desta conta, ou um mapa vazio se ela ainda nao guardou nenhum.
+///
+/// Vazio em vez de 404 porque conta nova e o caso normal, nao um erro: o cliente
+/// so precisa saber o que aplicar, e "nada" e uma resposta legitima.
+async fn ler_preferencias(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some((_, session)) = authenticated(&state, &headers).await else {
+        return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
+    };
+    let guardadas = state.preferencias.read().await;
+    let minhas = guardadas.get(&profile_key(&session.username)).cloned().unwrap_or_default();
+    Json(minhas).into_response()
+}
+
+/// Substitui os ajustes desta conta pelos que chegaram.
+///
+/// Substitui em vez de mesclar de proposito: desligar uma notificacao e apagar a
+/// chave dela, e uma mesclagem nunca deixaria nada ser desligado. Duas maquinas
+/// ligadas ao mesmo tempo terminam com a ultima que escreveu — e o que se espera
+/// de ajuste pessoal, e o preco de nao inventar resolucao de conflito para algo
+/// que ninguem edita dos dois lados ao mesmo tempo.
+async fn guardar_preferencias(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(recebidas): Json<BTreeMap<String, String>>,
+) -> Response {
+    let Some((_, session)) = authenticated(&state, &headers).await else {
+        return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
+    };
+    if recebidas.len() > MAX_PREFERENCIAS {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "Ajustes demais.");
+    }
+    if recebidas.iter().any(|(chave, valor)| {
+        chave.len() > MAX_PREF_CHAVE || valor.len() > MAX_PREF_VALOR
+    }) {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "Ajuste grande demais.");
+    }
+
+    let mut guardadas = state.preferencias.write().await;
+    guardadas.insert(profile_key(&session.username), recebidas);
+    persist_json(&state.config.data_dir, "preferencias.json", &*guardadas).await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize)]

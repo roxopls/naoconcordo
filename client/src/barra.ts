@@ -7,7 +7,7 @@
 // Aqui mora a versão simples, só com o nome e os três botões. A janela principal
 // continua com a dela, que carrega o ícone e o nome do servidor.
 
-import { ehTauri } from "./ambiente";
+import { bloquearRecarregar, ehTauri } from "./ambiente";
 
 /// Desenha a barra no topo da janela e liga os botões.
 ///
@@ -15,6 +15,8 @@ import { ehTauri } from "./ambiente";
 /// barra falsa com botões que não fecham nada seria pior do que não ter.
 export async function instalarBarra(titulo: string) {
   if (!ehTauri()) return;
+  // Estas janelas passam por aqui na abertura, entao e o lugar natural.
+  bloquearRecarregar();
 
   const barra = document.createElement("header");
   barra.className = "titlebar";

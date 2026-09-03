@@ -49,3 +49,24 @@ export async function abrirJanela(
   });
   return true;
 }
+
+/// Tira do WebView2 os atalhos de navegador que não fazem sentido aqui.
+///
+/// F5 e Ctrl+R recarregam a página. Num site isso é esperado; num aplicativo de
+/// conversa é sair da chamada, refazer a sessão e perder o que estava escrito —
+/// e ninguém aperta F5 querendo isso, aperta por reflexo de navegador.
+///
+/// Só dentro do Tauri. No navegador, durante o desenvolvimento, recarregar é
+/// justamente o que se quer.
+///
+/// Vale para as três janelas: a principal, Telas e Câmeras. O `capture: true`
+/// existe porque quem pegar a tecla primeiro decide, e há campos de texto na
+/// tela que também escutam teclado.
+export function bloquearRecarregar() {
+  if (!ehTauri()) return;
+  window.addEventListener("keydown", evento => {
+    const recarregar = evento.key === "F5"
+      || ((evento.ctrlKey || evento.metaKey) && (evento.key === "r" || evento.key === "R"));
+    if (recarregar) evento.preventDefault();
+  }, { capture: true });
+}
