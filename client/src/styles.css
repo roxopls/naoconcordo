@@ -516,6 +516,20 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
   0%, 40% { background: rgba(255,122,69,.16); }
   100% { background: transparent; }
 }
+/* Cartao de previa de link (YouTube, Twitter).
+   Substituiu o `iframe` do YouTube: o player recusava tocar dentro do
+   aplicativo, e um cartao funciona igual em qualquer lugar. */
+.cartao-link { margin-top: 6px; display: block; width: min(420px, 100%); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 10px; overflow: hidden; background: var(--panel-2); color: inherit; text-decoration: none; cursor: pointer; }
+.cartao-link:hover { border-color: var(--accent); }
+.cartao-link img { width: 100%; display: block; aspect-ratio: 16 / 9; object-fit: cover; background: #000; }
+/* Foto de tuite nao e 16:9, e cortar tudo no mesmo quadro decapitaria metade
+   das imagens. */
+.cartao-twitter img { aspect-ratio: auto; max-height: 320px; object-fit: contain; }
+.cartao-texto { padding: 8px 10px; display: grid; gap: 2px; }
+.cartao-texto strong { font-size: 13px; line-height: 1.3; }
+.cartao-autor { color: var(--muted); font-size: 11px; }
+.cartao-texto p { margin: 4px 0 0; font-size: 12px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 .embed-fora { display: block; margin-top: 4px; padding: 0; border: 0; background: none; color: var(--muted); font-size: 11px; text-decoration: underline; cursor: pointer; }
 .embed-fora:hover { color: var(--accent); }
 

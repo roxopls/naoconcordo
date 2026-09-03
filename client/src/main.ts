@@ -3087,6 +3087,9 @@ async function openCameraWindow() {
       url: "cameras.html?room=" + encodeURIComponent(voiceRoomId),
       title: "Câmeras — naoconcordo",
       width: 640, height: 420, resizable: true, alwaysOnTop: true,
+      // Mesmo motivo da janela de telas: `instalarBarra` ja desenha a barra
+      // daqui, e a moldura do Windows por cima dava dois botoes de fechar.
+      decorations: false,
     });
     // Nao espera "tauri://created": o estado passa a valer ja, e o sinal de vida
     // e quem confirma. Se a janela nem chegar a abrir, o timeout devolve tudo.
@@ -3194,6 +3197,9 @@ async function openScreenWindow() {
       url: "telas.html?room=" + encodeURIComponent(voiceRoomId) + "&sharing=" + (screenEnabled ? "1" : "0"),
       title: "Telas — naoconcordo",
       width: 960, height: 600, resizable: true,
+      // Sem a moldura do Windows: `instalarBarra` desenha a barra do proprio
+      // aplicativo nesta pagina, e as duas juntas davam dois botoes de fechar.
+      decorations: false,
     });
     screenWindowOpen = true;
     lastScreenBeat = Date.now();
@@ -5007,6 +5013,74 @@ const ehImagem = (url: string) => /\.(png|jpe?g|gif|webp|avif)(\?|#|$)/i.test(ur
 const ehVideo = (url: string) => /\.(mp4|webm|mov)(\?|#|$)/i.test(url);
 const ehAudio = (url: string) => /\.(mp3|ogg|wav|m4a)(\?|#|$)/i.test(url);
 
+/// Cartao de previa de um link, montado pelo servidor.
+///
+/// O servidor busca titulo, autor e miniatura e devolve enderecos **nossos**
+/// para a midia; nada aqui fala com o YouTube nem com o Twitter. Isso mantem a
+/// politica de conteudo da janela fechada na propria origem e evita avisar
+/// aqueles sites de que alguem leu a conversa.
+type CartaoDeLink = {
+  fonte: "youtube" | "twitter";
+  titulo: string; autor: string; texto: string;
+  imagem: string; video: string; link: string;
+};
+
+/// O que o servidor ja respondeu, por endereco.
+///
+/// Uma mensagem e redesenhada muitas vezes — alguem entra na chamada, alguem
+/// muda de mudo — e sem isto cada redesenho pediria o cartao de novo.
+const cartoesVistos = new Map<string, CartaoDeLink | null>();
+
+async function montarCartao(url: string, into: HTMLElement) {
+  let dados = cartoesVistos.get(url);
+  if (dados === undefined) {
+    try {
+      dados = await api<CartaoDeLink | undefined>("/api/previa?url=" + encodeURIComponent(url)) || null;
+    } catch { dados = null; }
+    cartoesVistos.set(url, dados);
+  }
+  if (!dados) return;
+  // A mensagem pode ter sido redesenhada enquanto a resposta vinha; sem isto o
+  // cartao entraria num pedaco de tela que ja saiu.
+  if (!into.isConnected) return;
+
+  const cartao = document.createElement("a");
+  cartao.className = "cartao-link cartao-" + dados.fonte;
+  cartao.href = dados.link;
+  cartao.onclick = evento => {
+    evento.preventDefault();
+    void abrirExterno(dados!.link).catch(() => showToast("Não foi possível abrir o link."));
+  };
+
+  if (dados.imagem) {
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.alt = "";
+    // A imagem vem autenticada, como os anexos: `<img src>` nao manda cabecalho.
+    void previaDeGif(dados.imagem).then(endereco => { img.src = endereco; }).catch(() => img.remove());
+    cartao.append(img);
+  }
+
+  const texto = document.createElement("div");
+  texto.className = "cartao-texto";
+  const titulo = document.createElement("strong");
+  titulo.textContent = dados.titulo;
+  texto.append(titulo);
+  if (dados.autor) {
+    const autor = document.createElement("span");
+    autor.className = "cartao-autor";
+    autor.textContent = dados.autor;
+    texto.append(autor);
+  }
+  if (dados.texto) {
+    const corpo = document.createElement("p");
+    corpo.textContent = dados.texto;
+    texto.append(corpo);
+  }
+  cartao.append(texto);
+  into.append(cartao);
+}
+
 /// Endereco de player para links que sao pagina, nao arquivo.
 ///
 /// YouTube e Twitch nao terminam em `.mp4`, entao o teste por extensao nunca
@@ -5023,16 +5097,16 @@ function playerDoLink(url: string): string | null {
 
   // `youtube-nocookie` para o player nao plantar cookie de rastreio de quem
   // so passou os olhos na mensagem.
-  if (host === "youtu.be") {
-    const id = endereco.pathname.slice(1);
-    return ID_YOUTUBE.test(id) ? "https://www.youtube-nocookie.com/embed/" + id : null;
-  }
-  if (host === "youtube.com" || host === "m.youtube.com" || host === "youtube-nocookie.com") {
-    const id = endereco.pathname.startsWith("/shorts/")
-      ? endereco.pathname.slice("/shorts/".length)
-      : endereco.searchParams.get("v") || "";
-    return ID_YOUTUBE.test(id) ? "https://www.youtube-nocookie.com/embed/" + id : null;
-  }
+  // O YouTube saiu daqui de proposito.
+  //
+  // O player recusava tocar dentro do aplicativo — "Erro de configuracao do
+  // player, Erro 153", que e o codigo dele para nao reconhecer quem embute, e a
+  // janela se apresenta como `tauri.localhost`. Em vez de brigar com isso, o
+  // link vira cartao, montado em `montarCartao`: funciona igual no aplicativo e
+  // no navegador, e tira um `iframe` de terceiro de dentro da janela.
+  //
+  // A Twitch continua aqui porque assistir ao vivo dentro da conversa e o
+  // sentido dela; um cartao de canal ao vivo nao substitui.
   if (host === "twitch.tv") {
     const partes = endereco.pathname.split("/").filter(Boolean);
     // O player da Twitch exige o dominio de quem embute na propria URL.
@@ -5045,7 +5119,6 @@ function playerDoLink(url: string): string | null {
   }
   return null;
 }
-const ID_YOUTUBE = /^[\w-]{11}$/;
 // Caminhos de um segmento que sao pagina do site, nao canal de alguem.
 const PAGINAS_TWITCH = new Set(["directory", "settings", "downloads", "store", "subscriptions", "wallet", "p"]);
 // O aplicativo roda em `tauri.localhost`, e e esse nome que a Twitch confere.
@@ -5355,23 +5428,28 @@ function renderLinkEmbeds(texto: string, into: HTMLElement) {
       box.append(audio);
     } else {
       const player = playerDoLink(url);
-      if (!player) continue;
-      box.classList.add("embed-player");
-      const quadro = document.createElement("iframe");
-      quadro.src = player;
-      quadro.loading = "lazy";
-      quadro.allow = "encrypted-media; picture-in-picture; fullscreen";
-      // Sem `allow-same-origin`: o player nao enxerga nada desta janela.
-      quadro.referrerPolicy = "no-referrer";
-      // Escape: quando o player recusa carregar — a Twitch confere o dominio de
-      // quem embute, e `tauri.localhost` nao e um que ela aceite — sobra pelo
-      // menos um jeito de assistir.
-      const fora = document.createElement("button");
-      fora.type = "button";
-      fora.className = "embed-fora";
-      fora.textContent = "abrir no navegador";
-      fora.onclick = () => void abrirExterno(url).catch(() => showToast("Nao foi possivel abrir o link."));
-      box.append(quadro, fora);
+      if (player) {
+        box.classList.add("embed-player");
+        const quadro = document.createElement("iframe");
+        quadro.src = player;
+        quadro.loading = "lazy";
+        quadro.allow = "encrypted-media; picture-in-picture; fullscreen";
+        quadro.referrerPolicy = "origin";
+        // Escape: a Twitch confere o dominio de quem embute, e
+        // `tauri.localhost` nao e um que ela aceite.
+        const fora = document.createElement("button");
+        fora.type = "button";
+        fora.className = "embed-fora";
+        fora.textContent = "abrir no navegador";
+        fora.onclick = () => void abrirExterno(url).catch(() => showToast("Nao foi possivel abrir o link."));
+        box.append(quadro, fora);
+      } else {
+        // Sem player conhecido: pede o cartao ao servidor. Ele responde vazio
+        // para link que nao tem previa, que e a maioria — por isso a caixa so
+        // entra na tela depois da resposta.
+        void montarCartao(url, into);
+        continue;
+      }
     }
     into.append(box);
   }

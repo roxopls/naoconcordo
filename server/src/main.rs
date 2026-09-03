@@ -19,6 +19,7 @@ use tower_http::{cors::{Any, CorsLayer}, limit::RequestBodyLimitLayer, services:
 use uuid::Uuid;
 
 mod gifs;
+mod previa;
 
 type HmacSha256 = Hmac<Sha256>;
 const DEFAULT_ROOM: &str = "geral";
@@ -587,6 +588,8 @@ async fn main() {
         .route("/api/profile", put(update_profile))
         .route("/api/messages/{id}", put(edit_message).delete(delete_message))
         .route("/api/preferencias", get(ler_preferencias).put(guardar_preferencias))
+        .route("/api/previa", get(previa_de_link))
+        .route("/api/previa/midia", get(midia_de_previa))
         .route("/api/gifs", get(buscar_gifs))
         .route("/api/gifs/midia", get(midia_de_gif))
         .route("/api/gifs/guardar", post(guardar_gif))
@@ -1865,6 +1868,58 @@ async fn guardar_preferencias(
     guardadas.insert(profile_key(&session.username), recebidas);
     persist_json(&state.config.data_dir, "preferencias.json", &*guardadas).await;
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct PedidoDePrevia { #[serde(default)] url: String }
+
+/// Cartao de previa de um link do YouTube ou do Twitter.
+///
+/// **204 quando o link nao tem cartao**, e nao um erro: canal, playlist, perfil e
+/// qualquer outro endereco sao casos normais, nao falhas. O cliente pede a previa
+/// de todo link que aparece numa mensagem, entao "nao tem" precisa ser barato de
+/// dizer e barato de tratar.
+async fn previa_de_link(State(state): State<AppState>, headers: HeaderMap, Query(pedido): Query<PedidoDePrevia>) -> Response {
+    if authenticated(&state, &headers).await.is_none() {
+        return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
+    }
+    // Endereco enorme so gasta tempo: nenhum link de video ou tuite chega perto.
+    if pedido.url.len() > 500 {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let Some((fonte, alvo)) = previa::reconhecer(&pedido.url) else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    match previa::montar(&state.auth_key, fonte, &alvo).await {
+        Ok(cartao) => Json(cartao).into_response(),
+        Err(motivo) => {
+            eprintln!("[previa] {motivo}");
+            // Tambem 204: video apagado ou tuite privado nao e erro de quem le a
+            // conversa, e mostrar aviso vermelho por isso seria ruido.
+            StatusCode::NO_CONTENT.into_response()
+        }
+    }
+}
+
+/// Repassa a imagem ou o video do cartao, para o cliente nao falar com o site.
+async fn midia_de_previa(State(state): State<AppState>, headers: HeaderMap, Query(pedido): Query<MidiaDeGif>) -> Response {
+    if authenticated(&state, &headers).await.is_none() {
+        return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
+    }
+    let Some(url) = previa::abrir_midia(&state.auth_key, &pedido.f) else {
+        return error(StatusCode::NOT_FOUND, "Nao encontrado.");
+    };
+    match previa::baixar(&url).await {
+        Ok((bytes, tipo)) => {
+            let mut cabecalhos = HeaderMap::new();
+            if let Ok(valor) = tipo.parse() { cabecalhos.insert("content-type", valor); }
+            // O endereco carrega o conteudo dentro da assinatura, entao guardar
+            // em cache nunca serve imagem velha.
+            if let Ok(valor) = "public, max-age=86400".parse() { cabecalhos.insert("cache-control", valor); }
+            (StatusCode::OK, cabecalhos, bytes).into_response()
+        }
+        Err(_) => error(StatusCode::NOT_FOUND, "Nao encontrado."),
+    }
 }
 
 #[derive(Deserialize)]

@@ -160,14 +160,18 @@ struct ImagemGiphy {
 }
 
 /// Assina um endereco para ele poder voltar por `midia`.
-fn assinar(chave: &[u8; 32], url: &str) -> String {
+///
+/// `pub(crate)` porque as previas de link usam a mesma tecnica com outra lista
+/// de dominios: assinar o endereco de fora e devolve-lo dentro de um endereco
+/// nosso e o que impede a rota de proxy de virar buscador de qualquer URL.
+pub(crate) fn assinar(chave: &[u8; 32], url: &str) -> String {
     let mut mac = <HmacSha256 as Mac>::new_from_slice(chave).expect("HMAC aceita qualquer tamanho");
     mac.update(url.as_bytes());
     URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
 }
 
 /// Uma credencial e o endereco mais a assinatura dele, num pedaco so.
-fn empacotar(chave: &[u8; 32], url: &str) -> String {
+pub(crate) fn empacotar(chave: &[u8; 32], url: &str) -> String {
     format!("{}.{}", URL_SAFE_NO_PAD.encode(url.as_bytes()), assinar(chave, url))
 }
 
@@ -190,7 +194,7 @@ pub fn abrir(chave: &[u8; 32], provedor: Provedor, ficha: &str) -> Option<String
     Some(url)
 }
 
-fn constante(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constante(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -399,7 +403,7 @@ pub async fn baixar(url: &str) -> Result<(Vec<u8>, String), String> {
 }
 
 /// Escapa o que vai num parametro de consulta.
-fn url_escape(valor: &str) -> String {
+pub(crate) fn url_escape(valor: &str) -> String {
     let mut saida = String::with_capacity(valor.len());
     for byte in valor.as_bytes() {
         match byte {
