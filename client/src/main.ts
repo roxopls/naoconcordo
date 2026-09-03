@@ -608,7 +608,11 @@ async function selectServer(id: string) {
   currentRoomId = first?.id || "";
   view = servers.length && currentServerId ? view : "home";
   mode = "room"; currentFriend = ""; setMode(); renderFriends();
-  persistNavigation(); restoreComposerDraft(); renderNavigation(); renderMessages(); void loadServerMembers();
+  persistNavigation(); restoreComposerDraft(); renderNavigation(); renderMessages();
+  // Desenha ja com a lista vazia: mostrar por um instante a gente do servidor
+  // anterior e pior do que mostrar o painel enchendo.
+  renderPeople();
+  void loadServerMembers();
   void refreshCatalog();
 }
 /// Recarrega servidores e canais. Servidores e canais so vinham do
@@ -1216,11 +1220,55 @@ function forgetFriend(name: string) {
   if (mode === "dm" && key(name) === key(currentFriend)) { mode = "room"; currentFriend = ""; persistNavigation(); setMode(); renderNavigation(); renderMessages(); }
 }
 
+/// Quantas tentativas seguidas de abrir o socket falharam.
+///
+/// Zera assim que uma abre. Serve para duas coisas: espacar as tentativas
+/// quando a rede esta fora, e desconfiar da sessao quando falha demais.
+let tentativasDeSocket = 0;
+
+/// Quanto esperar antes da proxima tentativa.
+///
+/// Antes era 2,5 s fixo, para sempre. Com a sessao vencida isso vira 24 pedidos
+/// por minuto sem fim, todos recusados — e ninguem avisa a pessoa, que fica com
+/// um aplicativo aberto que nunca mais recebe mensagem. Com a rede fora, e a
+/// mesma insistencia gastando bateria a toa.
+///
+/// Dobra ate meio minuto: reconexao rapida quando e um solucinho, e espera
+/// civilizada quando o problema e longo.
+function esperaDoSocket(): number {
+  return Math.min(2500 * 2 ** Math.max(0, tentativasDeSocket - 1), 30000);
+}
+
+/// A sessao ainda vale?
+///
+/// O socket fechado nao diz **por que** — o navegador nao entrega o codigo HTTP
+/// de um upgrade recusado. Perguntar aqui e o unico jeito de separar "a rede
+/// caiu" de "sua sessao venceu", e as duas pedem respostas opostas: uma quer
+/// insistir, a outra quer parar e mandar entrar de novo.
+async function sessaoAindaVale(): Promise<boolean> {
+  try {
+    // `fetch` cru, e nao o ajudante `api`: ele transforma a resposta em Error
+    // com o texto da mensagem, e ai so sobraria casar palavra — que quebra no
+    // dia em que alguem reescrever a frase. O numero e estavel.
+    const resposta = await fetch(API + "/api/session", {
+      headers: { Authorization: "Bearer " + (session?.token || "") },
+    });
+    // So o 401 e recusa da sessao. Servidor fora do ar, 502 do proxy ou queda de
+    // rede nao dizem nada sobre ela — nesses casos vale insistir.
+    return resposta.status !== 401;
+  } catch {
+    return true;
+  }
+}
+
 function connectChat() {
   if (!session) return; chat?.close(); const token = session.token; chat = new WebSocket(WS + "/ws?token=" + encodeURIComponent(token));
   // O bootstrap acontece antes do socket abrir, entao a propria pessoa nao
   // aparecia na lista de online ate reiniciar o app.
   chat.onopen = () => {
+    // Abriu: a contagem de falhas volta ao zero, e a proxima queda tenta rapido
+    // de novo em vez de herdar a espera longa da vez passada.
+    tentativasDeSocket = 0;
     if (session) onlineUsers.add(key(session.username));
     // Socket novo (reconexao, por exemplo) nao sabe da chamada em andamento:
     // sem reanunciar, os outros veem o canal esvaziar enquanto voce continua
@@ -1341,7 +1389,22 @@ function connectChat() {
       forgetDirect(payload.messageId);
     }
   };
-  chat.onclose = () => { if (session?.token === token) window.setTimeout(connectChat, 2500); };
+  chat.onclose = () => {
+    if (session?.token !== token) return;
+    tentativasDeSocket += 1;
+    // Depois de algumas falhas seguidas, para de adivinhar e pergunta.
+    if (tentativasDeSocket === 3) {
+      void sessaoAindaVale().then(vale => {
+        if (vale || session?.token !== token) return;
+        saveSession(null);
+        showToast("Sua sessão expirou. Entre de novo.");
+        // Recarregar leva de volta a tela de entrada sem precisar desmontar a
+        // tela inteira na mao. Sem sessao guardada, `resume` nao tenta voltar.
+        location.reload();
+      });
+    }
+    window.setTimeout(connectChat, esperaDoSocket());
+  };
 }
 messageForm.addEventListener("submit", event => {
   event.preventDefault();
@@ -7169,6 +7232,21 @@ function montarMenu(menu: HTMLElement, anchor: HTMLElement, ponto?: { x: number;
 }
 
 /// Uma linha do painel. Só quem está na chamada ganha controle de volume.
+/// Qual imagem esta valendo para esta pessoa agora, como texto curto.
+///
+/// Serve so para a assinatura de `renderPeople` perceber que a foto mudou. Segue
+/// a mesma ordem de `paintAvatar`: a do servidor aberto ganha da global.
+function retratoDe(name: string): string {
+  if (view === "server" && currentServerId) {
+    const mem = serverMemberProfiles.get(key(name));
+    if (mem?.avatarFile) return mem.avatarFile;
+  }
+  const perfil = profiles.get(key(name));
+  // A antiga vinha embutida na propria resposta e pode ser enorme: o tamanho ja
+  // distingue uma troca sem carregar a imagem inteira para dentro do texto.
+  return perfil?.avatarFile || (perfil?.avatar ? "d" + perfil.avatar.length : "");
+}
+
 function personRow(name: string, online: boolean, naChamada: boolean) {
   const box = document.createElement("div");
   box.className = "person-box" + (online ? "" : " offline");
@@ -7269,7 +7347,18 @@ function renderPeople() {
   const unique = online;
   // So redesenha quando a lista muda: recriar a cada evento faria o controle de
   // volume escapar do dedo no meio do arrasto.
-  const assinatura = unique.map(name => name
+  //
+  // A assinatura tem de conter **tudo o que aparece desenhado**, e nao so quem
+  // esta na lista. Ela levava o nome de usuario cru e o estado de chamada; o
+  // apelido e a foto sao por servidor, entao dois servidores com a mesma gente
+  // online davam a mesma assinatura e a lista nao era redesenhada — os apelidos
+  // e as fotos do servidor anterior ficavam na tela.
+  //
+  // O id do servidor entra junto porque e mais barato que comparar cada campo e
+  // pega tambem o que eu nao lembrar de incluir aqui.
+  const assinatura = currentServerId + "@" + view + "|" + unique.map(name => name
+    + "~" + getDisplayName(name)
+    + "~" + retratoDe(name)
     + (naChamada.has(key(name)) ? "!" : "")
     + (sharesAudio(name) ? "+t" : "")
     + (micMuted(name) ? "+m" : "")
