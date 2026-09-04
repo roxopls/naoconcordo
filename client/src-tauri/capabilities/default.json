@@ -4,7 +4,8 @@
   "description": "Permissões mínimas da janela principal do naoconcordo",
   "windows": [
     "main",
-    "cameras"
+    "cameras",
+    "telas"
   ],
   "permissions": [
     "core:default",

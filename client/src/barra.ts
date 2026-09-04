@@ -39,9 +39,9 @@ export async function instalarBarra(titulo: string) {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     const janela = getCurrentWindow();
     botoes.append(
-      botao("Minimizar", "M2 6h8", () => void janela.minimize()),
-      botao("Maximizar", null, () => void janela.toggleMaximize()),
-      botao("Fechar", "M3 3l6 6M9 3l-6 6", () => void janela.close(), true),
+      botao("Minimizar", "M2 6h8", () => tentar("minimizar", janela.minimize())),
+      botao("Maximizar", null, () => tentar("maximizar", janela.toggleMaximize())),
+      botao("Fechar", "M3 3l6 6M9 3l-6 6", () => tentar("fechar", janela.close()), true),
     );
   } catch (erro) {
     // Sem os controles da janela a barra não tem função, e uma faixa sem botões
@@ -53,6 +53,19 @@ export async function instalarBarra(titulo: string) {
   barra.append(nome, botoes);
   document.body.prepend(barra);
   document.body.classList.add("com-barra");
+}
+
+/// Executa a ação da janela e **grita** se ela for recusada.
+///
+/// O Tauri concede permissão de janela por rótulo, em `capabilities`. Uma janela
+/// que não esteja na lista tem `close`, `minimize`, `toggleMaximize` e o arrastar
+/// negados — e a promessa recusada, sem ninguém escutando, desaparece. Foi
+/// exatamente assim que a janela de Telas ficou com a barra inteira inerte sem
+/// deixar rastro nenhum.
+function tentar(acao: string, promessa: Promise<unknown>) {
+  void promessa.catch(erro => {
+    console.error("[janela] " + acao + " recusado — falta permissão para este rótulo?", erro);
+  });
 }
 
 /// Um botão da barra. `desenho` nulo usa o quadrado de maximizar.
