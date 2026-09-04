@@ -283,7 +283,11 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
    abre com 640 de largura e a pessoa a encolhe mais: sem zerar o piso, o corpo
    continua com 900px dentro de uma janela menor e o conteudo e cortado. */
 .cameras-body { margin: 0; min-width: 0; min-height: 0; height: 100vh; background: #0d0d10; color: #e6e6ea; overflow: hidden; }
-.cameras-status { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; color: var(--muted); font-size: 13px; text-align: center; }
+/* `pointer-events: none` porque este aviso cobre a janela inteira (`inset: 0`)
+   e, com ele visivel — "Ninguem transmitindo agora", que e o estado normal ao
+   abrir —, engolia todo clique: nao dava para apertar Compartilhar, trocar nem
+   fechar. Aviso e para ler, nao para clicar. */
+.cameras-status { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; color: var(--muted); font-size: 13px; text-align: center; pointer-events: none; }
 /* Grade calculada no JS, igual a do painel. `height: 100vh` sem rolagem: as
    tiles encolhem para caber, em vez de escorrer para fora da janela. */
 .cameras-window-grid { height: 100vh; padding: 8px; display: grid; gap: 8px; overflow: hidden; }

@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 mod gifs;
 mod previa;
+mod registro;
 
 type HmacSha256 = Hmac<Sha256>;
 const DEFAULT_ROOM: &str = "geral";
@@ -575,6 +576,7 @@ async fn main() {
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/owner/unlock", post(unlock_owner))
         .route("/api/admin/invites", get(list_invites).post(create_invite))
+        .route("/api/admin/chamadas", get(ler_chamadas))
         .route("/api/admin/invites/revoke", post(revoke_invite))
         .route("/api/servers", post(create_server))
         .route("/api/rooms", post(create_room))
@@ -1003,11 +1005,35 @@ async fn update_profile(State(state): State<AppState>, headers: HeaderMap, Json(
 }
 async fn livekit_token(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<LivekitInput>) -> Response {
     let Some((_, s)) = authenticated(&state, &headers).await else { return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."); };
-    let Some(room) = state.rooms.read().await.iter().find(|r| r.id == body.room_id).cloned() else { return error(StatusCode::NOT_FOUND, "Canal nao encontrado."); };
-    if room.kind != RoomKind::Voice { return error(StatusCode::BAD_REQUEST, "Este canal e de texto."); }
+    // Toda tentativa de entrar em chamada e anotada daqui para baixo, dando
+    // certo ou nao. Chamada que nao conecta e o defeito mais dificil de
+    // investigar aqui: quem sofre esta longe, o sintoma e "nao entrou", e quando
+    // alguem avisa ja passou.
+    //
+    // Antes da sessao nao ha o que anotar: sem saber quem e, a linha nao ajuda
+    // ninguem e viraria alvo de quem quiser encher o arquivo.
+    let tipo = registro::sabor(body.screen, body.viewer);
+    // Copias proprias: o nome vai para dentro do token mais abaixo, e um fecho
+    // que o emprestasse impediria isso.
+    let quem = s.username.clone();
+    let onde = body.room_id.clone();
+    let pasta = state.config.data_dir.clone();
+    let anotar = |resultado: registro::Resultado<'_>| {
+        registro::anotar(&pasta, &quem, &onde, tipo, resultado);
+    };
+
+    let Some(room) = state.rooms.read().await.iter().find(|r| r.id == body.room_id).cloned() else {
+        anotar(registro::Resultado::Recusado("canal nao encontrado"));
+        return error(StatusCode::NOT_FOUND, "Canal nao encontrado.");
+    };
+    if room.kind != RoomKind::Voice {
+        anotar(registro::Resultado::Recusado("canal de texto"));
+        return error(StatusCode::BAD_REQUEST, "Este canal e de texto.");
+    }
     {
         let memberships = state.memberships.read().await;
         if !is_member(&memberships, &room.server_id, &s.username) {
+            anotar(registro::Resultado::Recusado("nao participa do servidor"));
             return error(StatusCode::FORBIDDEN, "Voce nao participa deste servidor.");
         }
     }
@@ -1052,8 +1078,16 @@ async fn livekit_token(State(state): State<AppState>, headers: HeaderMap, Json(b
         },
         metadata };
     match encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(state.config.livekit_secret.as_bytes())) {
-        Ok(token) => Json(LivekitOutput { token, url: state.config.livekit_url.clone(), room: livekit_room }).into_response(),
-        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Nao foi possivel entrar na sala."),
+        Ok(token) => {
+            anotar(registro::Resultado::Ok);
+            Json(LivekitOutput { token, url: state.config.livekit_url.clone(), room: livekit_room }).into_response()
+        }
+        Err(erro) => {
+            // Falha nossa, nao da pessoa: entra marcada como ERRO para saltar aos
+            // olhos de quem correr o arquivo.
+            anotar(registro::Resultado::Falha(&format!("token nao assinou: {erro}")));
+            error(StatusCode::INTERNAL_SERVER_ERROR, "Nao foi possivel entrar na sala.")
+        }
     }
 }
 /// Duas pessoas sao amigas quando existe um vinculo aceito, em qualquer direcao.
@@ -1868,6 +1902,28 @@ async fn guardar_preferencias(
     guardadas.insert(profile_key(&session.username), recebidas);
     persist_json(&state.config.data_dir, "preferencias.json", &*guardadas).await;
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct PedidoDeChamadas { #[serde(default)] linhas: usize }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChamadasOutput { linhas: Vec<String> }
+
+/// O registro de entradas em chamada, da mais nova para a mais velha.
+///
+/// So do admin: a lista diz quem esteve em qual canal e a que horas, e isso nao
+/// e da conta de todo mundo.
+async fn ler_chamadas(State(state): State<AppState>, headers: HeaderMap, Query(pedido): Query<PedidoDeChamadas>) -> Response {
+    let Some((_, session)) = authenticated(&state, &headers).await else {
+        return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
+    };
+    if !is_admin(&state, &session.username) {
+        return error(StatusCode::FORBIDDEN, "So o administrador ve o registro.");
+    }
+    let quantas = pedido.linhas.clamp(1, 500);
+    Json(ChamadasOutput { linhas: registro::ultimas(&state.config.data_dir, quantas) }).into_response()
 }
 
 #[derive(Deserialize)]
