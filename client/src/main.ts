@@ -1951,6 +1951,8 @@ function paintAvatar(el: HTMLElement, username: string) {
 
 async function connectVoice() {
   if (!session || !voiceRoomId || room?.state === "connected" || room?.state === "connecting") return;
+  // Sala nova, relogio novo: reconexao de uma sala que ja foi embora nao conta.
+  reconectandoDesde = 0;
   setStatus("conectando", false);
   try {
     const access = await api<LivekitAccess>("/api/livekit-token", { method: "POST", body: JSON.stringify({ roomId: voiceRoomId }) });
@@ -2295,7 +2297,10 @@ async function reiniciarPortao() {
   const parar = voz.medir(bruta, nivel => {
     const limiar = voz.lerLimiar();
     const agora = Date.now();
-    if (nivel >= limiar) {
+    // Negativo e "sem medicao" (audio do WebView suspenso, sem clique depois de
+    // uma reentrada automatica): nao da para saber se a pessoa fala, e fechado
+    // seria mudo. Fica aberto, como no modo "sempre", ate a medicao voltar.
+    if (nivel < 0 || nivel >= limiar) {
       fecharPortaoEm = agora + voz.CAUDA_MS;
       if (!portaoAberto) { portaoAberto = true; aplicarPortao(); }
     } else if (portaoAberto && agora >= fecharPortaoEm) {
@@ -2405,6 +2410,11 @@ function vigiaDeMidia() {
     console.warn("[vigia] reentrando:", motivo);
     showToast("A chamada travou. Reconectando.");
     await sairDaChamada();
+    // `sairDaChamada` zera `room` antes do `Disconnected` chegar, e o guarda de
+    // sala atrasada descarta o evento que zeraria isto. Sem esta linha a marca
+    // da reconexao antiga sobrevivia e o vigia reentrava a cada 90 s para sempre
+    // (0.7.33).
+    reconectandoDesde = 0;
     voiceRoomId = canal; announceVoice(canal); renderNavigation(); updateCallControls();
     await connectVoice();
   };
@@ -4739,7 +4749,7 @@ async function ligarMedidorDoDialogo() {
   }
   nota.textContent = "Fale para ver o nível. A marca clara é o ponto em que o microfone abre.";
   pararMedidorLocal = voz.medir(faixa, nivel => {
-    preenchimento.style.width = nivel + "%";
+    preenchimento.style.width = Math.max(0, nivel) + "%";
     // Fora da ativacao por voz nao ha "fechado": o microfone vai inteiro.
     const porVoz = voz.lerModo() === "voz";
     barra.classList.toggle("fechado", porVoz && nivel < voz.lerLimiar());

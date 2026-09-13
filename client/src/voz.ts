@@ -91,6 +91,8 @@ export function opcoesDeCaptura(deviceId?: string) {
 /// comeco da fala. Ele fica so como reserva, lendo o analisador enquanto o
 /// worklet nao responde (carregando, ou ambiente sem suporte).
 ///
+/// Nivel `-1` quer dizer "nao da para medir agora" (contexto de audio parado).
+///
 /// `aoFalhar` avisa quando a medicao morreu de vez (faixa encerrada, trocar ou
 /// tirar o microfone): quem usa decide o que fazer, e o portao abre.
 export function medir(
@@ -122,8 +124,13 @@ export function medir(
   const passo = () => {
     if (!vivo) return;
     if (track.readyState === "ended") { falhar(); return; }
-    // Contexto suspenso nao mede nada: com o portao, zero e mudo.
-    if (contexto.state === "suspended") void contexto.resume().catch(() => { /* proxima volta */ });
+    // Contexto parado nao mede nada, e ler zero ali fecharia o portao de vez.
+    // -1 diz "sem medicao" a quem usa, que decide (o portao abre).
+    if (contexto.state !== "running") {
+      void contexto.resume().catch(() => { /* proxima volta */ });
+      aoNivel(-1);
+      return;
+    }
     // Worklet respondendo ha pouco: ele manda, a reserva fica quieta.
     if (performance.now() - ultimaDoWorklet < 300) return;
     analisador.getFloatTimeDomainData(amostras);
