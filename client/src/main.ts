@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { abrirExterno, abrirJanela, bloquearRecarregar, ehTauri } from "./ambiente";
 import { baixarPreferencias, vigiarPreferencias } from "./preferencias";
 import {
-  LocalTrackPublication, RemoteAudioTrack, RemoteParticipant, RemoteTrack, Room, RoomEvent,
+  LocalTrackPublication, RemoteAudioTrack, RemoteParticipant, RemoteTrack, RemoteTrackPublication, Room, RoomEvent,
   Track, VideoPresets,
 } from "livekit-client";
 import "./styles.css";
@@ -2002,10 +2002,11 @@ async function connectVoice() {
         renderCameras();
       }, 60);
     };
-    next.on(RoomEvent.Connected, () => { if (!atual()) return; setStatus("online", true); playJoin(); silenciarAvisos(2000); announceDeafened(); refresh(); }).on(RoomEvent.Reconnecting, () => { if (atual()) setStatus("reconectando", false); })
-      .on(RoomEvent.Reconnected, () => { if (!atual()) return; setStatus("online", true); silenciarAvisos(2000); })
+    next.on(RoomEvent.Connected, () => { if (!atual()) return; setStatus("online", true); playJoin(); silenciarAvisos(2000); announceDeafened(); refresh(); }).on(RoomEvent.Reconnecting, () => { if (!atual()) return; setStatus("reconectando", false); reconectandoDesde ||= Date.now(); })
+      .on(RoomEvent.Reconnected, () => { if (!atual()) return; reconectandoDesde = 0; setStatus("online", true); silenciarAvisos(2000); })
       .on(RoomEvent.Disconnected, motivo => {
         if (!atual()) return;
+        reconectandoDesde = 0;
         setStatus("fora da chamada", false); playLeave(); voiceRoomId = ""; resetMediaState(); refresh();
         // 2 e `DUPLICATE_IDENTITY`: a mesma conta entrou na chamada de outro
         // lugar e o servidor de voz deixou a conexao nova no lugar desta. Sem
@@ -2197,6 +2198,11 @@ let usuariosDaMedicao = 0;
 
 async function pegarFaixaDeMedicao(): Promise<MediaStreamTrack | null> {
   usuariosDaMedicao += 1;
+  // Faixa encerrada (microfone desconectado) nao volta a medir: pede outra.
+  if (fluxoDeMedicao && fluxoDeMedicao.getAudioTracks()[0]?.readyState !== "live") {
+    fluxoDeMedicao.getTracks().forEach(faixa => faixa.stop());
+    fluxoDeMedicao = null;
+  }
   if (!fluxoDeMedicao) {
     try {
       fluxoDeMedicao = await navigator.mediaDevices.getUserMedia({
@@ -2296,6 +2302,13 @@ async function reiniciarPortao() {
       portaoAberto = false;
       aplicarPortao();
     }
+  }, () => {
+    // Medicao morta (microfone trocado ou tirado): aberto e melhor que mudo
+    // sem motivo. Tenta montar de novo com o microfone que houver agora.
+    portaoAberto = true;
+    aplicarPortao();
+    console.warn("[portao] medicao encerrou; reabrindo");
+    window.setTimeout(() => { if (room && voz.lerModo() === "voz") void reiniciarPortao(); }, 1000);
   });
   pararMedidorDoPortao = parar;
 }
@@ -2338,6 +2351,114 @@ function rondaDeAudio() {
   document.addEventListener("keydown", religar);
 }
 rondaDeAudio();
+
+/// Desde quando a sala esta em `Reconnecting`, ou 0.
+let reconectandoDesde = 0;
+/// Pessoas cuja voz parou de chegar, para o diagnostico.
+const vozesParadas = new Set<string>();
+
+/// Vigia de midia: faz sozinho o que "sair e entrar na call" fazia na mao.
+///
+/// Em 2026-09-12 o LINKZIN ficou 31 minutos na sala sem midia nenhuma: o
+/// servidor o mantinha la porque o SDK seguia tentando retomar a sessao, e
+/// ninguem ouvia ninguem entre ele e o resto ate ele reentrar. Outras reentradas
+/// do dia nao deixaram rastro no servidor — o transporte estava de pe e a voz
+/// nao chegava. A ronda de audio nao pega nenhum dos dois: o elemento estava
+/// tocando, so que sem pacote.
+///
+/// Por isso a medida e **pacote**, nao estado de elemento nem de conexao. Opus
+/// com DTX manda pacote mesmo em silencio (e com o portao de voz fechado), entao
+/// contador parado quer dizer midia parada, nao pessoa quieta.
+///
+/// Escada: faixa parada -> reassina so ela; continua parada, ou o proprio envio
+/// parou, ou a reconexao nao termina -> reentra na chamada. Leitura que falha
+/// conta como "nao sei", nunca como parada: vigia com falso positivo derrubaria
+/// a chamada de quem esta bem.
+function vigiaDeMidia() {
+  const PARADA_MS = 10_000;
+  const ultimo = new Map<string, { pacotes: number; desde: number }>();
+  const reassinadaEm = new Map<string, number>();
+  let reentrouEm = 0;
+
+  /// Contador lido agora e ha quanto tempo ele nao muda; `null` se nao deu para ler.
+  const parada = (chave: string, pacotes: number | null, agora: number) => {
+    if (pacotes === null) { ultimo.delete(chave); return 0; }
+    const antes = ultimo.get(chave);
+    if (!antes || antes.pacotes !== pacotes) { ultimo.set(chave, { pacotes, desde: agora }); return 0; }
+    return agora - antes.desde;
+  };
+  const contar = async (relatorio: RTCStatsReport | undefined, tipo: "inbound-rtp" | "outbound-rtp") => {
+    if (!relatorio) return null;
+    let total: number | null = null;
+    relatorio.forEach(item => {
+      if (item.type !== tipo || item.kind !== "audio") return;
+      const n = tipo === "inbound-rtp" ? item.packetsReceived : item.packetsSent;
+      if (typeof n === "number") total = (total ?? 0) + n;
+    });
+    return total;
+  };
+
+  const reentrar = async (motivo: string) => {
+    const canal = voiceRoomId;
+    if (!canal || Date.now() - reentrouEm < 90_000) return;
+    reentrouEm = Date.now();
+    console.warn("[vigia] reentrando:", motivo);
+    showToast("A chamada travou. Reconectando.");
+    await sairDaChamada();
+    voiceRoomId = canal; announceVoice(canal); renderNavigation(); updateCallControls();
+    await connectVoice();
+  };
+
+  window.setInterval(async () => {
+    const sala = room;
+    if (!sala || !voiceRoomId) { ultimo.clear(); vozesParadas.clear(); reconectandoDesde = 0; return; }
+    const agora = Date.now();
+    if (reconectandoDesde && agora - reconectandoDesde > 20_000) { await reentrar("reconexao sem fim"); return; }
+    if (sala.state !== "connected") return;
+
+    const vivas = new Set<string>();
+    let remotas = 0, remotasParadas = 0, precisaReentrar = "";
+    for (const participante of sala.remoteParticipants.values()) {
+      const pub = participante.getTrackPublication(Track.Source.Microphone) as RemoteTrackPublication | undefined;
+      if (!pub || pub.isMuted || !pub.isDesired) continue;
+      const chave = "in:" + pub.trackSid;
+      vivas.add(chave);
+      let pacotes: number | null = null;
+      try { pacotes = pub.track ? await contar(await pub.track.getRTCStatsReport(), "inbound-rtp") : 0; } catch { pacotes = null; }
+      // Sem faixa nenhuma o contador fica em zero, e zero parado tambem conta.
+      const ms = parada(chave, pacotes, agora);
+      remotas++;
+      const who = participante.name || participante.identity;
+      if (ms < PARADA_MS) { vozesParadas.delete(who); continue; }
+      remotasParadas++;
+      vozesParadas.add(who);
+      const tentou = reassinadaEm.get(pub.trackSid) || 0;
+      if (agora - tentou > 60_000) {
+        reassinadaEm.set(pub.trackSid, agora);
+        ultimo.delete(chave);
+        console.warn("[vigia] voz parada, reassinando:", who);
+        void pub.setSubscribed(false);
+        window.setTimeout(() => { if (room === sala) void pub.setSubscribed(true); }, 500);
+      } else if (agora - tentou > PARADA_MS * 2) {
+        precisaReentrar = "voz de " + who + " nao voltou ao reassinar";
+      }
+    }
+    for (const chave of ultimo.keys()) if (chave.startsWith("in:") && !vivas.has(chave)) ultimo.delete(chave);
+
+    const mic = sala.localParticipant.getTrackPublication(Track.Source.Microphone)?.track;
+    if (micEnabled && mic) {
+      let enviados: number | null = null;
+      try { enviados = await contar(await mic.getRTCStatsReport(), "outbound-rtp"); } catch { enviados = null; }
+      if (parada("out", enviados, agora) >= PARADA_MS) precisaReentrar ||= "microfone parou de enviar";
+    } else {
+      ultimo.delete("out");
+    }
+    if (remotas >= 2 && remotasParadas === remotas) precisaReentrar ||= "nenhuma voz chegando";
+    if (room !== sala) return;
+    if (precisaReentrar) await reentrar(precisaReentrar);
+  }, 4000);
+}
+vigiaDeMidia();
 
 /// Destrava a reproducao de som. Se o WebView recusar, tenta de novo no primeiro
 /// clique do usuario, que conta como interacao.
@@ -4226,6 +4347,9 @@ async function atualizarDiagnostico() {
       + (room && !room.canPlaybackAudio ? "  (som bloqueado pelo sistema)" : ""),
     );
   }
+  // Pausado e elemento; isto aqui e pacote. Elemento tocando sem pacote era o
+  // caso que so reentrar resolvia.
+  if (vozesParadas.size) linhas.push("SEM PACOTE  " + [...vozesParadas].join(", "));
   linhas.push(...await diagnosticoDeRecepcao());
 
   caixa.classList.toggle("hidden", linhas.length === 0);

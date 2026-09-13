@@ -6,6 +6,12 @@
 /// decide o limiar). Os tres leem o mesmo nivel de audio, entao dividir por
 /// arquivo evitaria repetir o `AnalyserNode` em cada um.
 
+// `no-inline` e obrigatorio: arquivo pequeno o vite embute como `data:`, e o
+// CSP do aplicativo (`script-src 'self'`) recusa worklet vindo de `data:`. A
+// recusa nao quebra nada visivel — a medicao cai no relogio de reserva, que e
+// justamente o que o worklet existe para evitar.
+import NIVEL_WORKLET from "./nivel.worklet.js?url&no-inline";
+
 export type ModoVoz = "sempre" | "voz" | "ptt";
 export type Filtros = { ruido: boolean; eco: boolean; ganho: boolean };
 
@@ -71,9 +77,26 @@ export function opcoesDeCaptura(deviceId?: string) {
 /// quadrada da media quadratica cresce rapido demais no comeco e a barra
 /// passaria a vida encostada no zero. Devolve a funcao que desliga tudo —
 /// esquecer de chamar deixa o `AudioContext` vivo segurando o microfone.
+///
+/// **Nada de `requestAnimationFrame`.** O quadro de animacao para por completo
+/// com a janela minimizada ou coberta por um jogo em tela cheia, e o portao de
+/// voz congelava no ultimo estado — fechado, na pratica, porque quase ninguem
+/// esta falando no instante do alt-tab. O microfone ficava mudo para a sala ate
+/// a janela voltar.
+///
+/// O caminho principal e um `AudioWorklet` (`nivel.worklet.js`): mede na thread
+/// de audio e manda o valor por mensagem, que nao passa pelo freio de pagina em
+/// segundo plano. `setInterval` tambem e freado — medido: uma volta por segundo
+/// com a aba escondida, o que abriria o portao um segundo atrasado e cortaria o
+/// comeco da fala. Ele fica so como reserva, lendo o analisador enquanto o
+/// worklet nao responde (carregando, ou ambiente sem suporte).
+///
+/// `aoFalhar` avisa quando a medicao morreu de vez (faixa encerrada, trocar ou
+/// tirar o microfone): quem usa decide o que fazer, e o portao abre.
 export function medir(
   track: MediaStreamTrack,
   aoNivel: (nivel: number) => void,
+  aoFalhar?: () => void,
 ): () => void {
   const contexto = new AudioContext();
   const fonte = contexto.createMediaStreamSource(new MediaStream([track]));
@@ -84,26 +107,59 @@ export function medir(
   fonte.connect(analisador);
 
   const amostras = new Float32Array(analisador.fftSize);
+  const escala = (rms: number) => Math.min(100, Math.round(Math.sqrt(rms) * 140));
   let vivo = true;
-  let quadro = 0;
+  let ultimaDoWorklet = 0;
+  let worklet: AudioWorkletNode | null = null;
+  let silencio: GainNode | null = null;
+
+  const falhar = () => {
+    if (!vivo) return;
+    parar();
+    aoFalhar?.();
+  };
 
   const passo = () => {
     if (!vivo) return;
+    if (track.readyState === "ended") { falhar(); return; }
+    // Contexto suspenso nao mede nada: com o portao, zero e mudo.
+    if (contexto.state === "suspended") void contexto.resume().catch(() => { /* proxima volta */ });
+    // Worklet respondendo ha pouco: ele manda, a reserva fica quieta.
+    if (performance.now() - ultimaDoWorklet < 300) return;
     analisador.getFloatTimeDomainData(amostras);
     let soma = 0;
     for (const amostra of amostras) soma += amostra * amostra;
-    const rms = Math.sqrt(soma / amostras.length);
-    aoNivel(Math.min(100, Math.round(Math.sqrt(rms) * 140)));
-    quadro = requestAnimationFrame(passo);
+    aoNivel(escala(Math.sqrt(soma / amostras.length)));
   };
-  quadro = requestAnimationFrame(passo);
+  const relogio = window.setInterval(passo, 30);
 
-  return () => {
+  void contexto.audioWorklet?.addModule(NIVEL_WORKLET).then(() => {
+    if (!vivo) return;
+    worklet = new AudioWorkletNode(contexto, "naoconcordo-nivel");
+    worklet.port.onmessage = evento => {
+      if (!vivo) return;
+      ultimaDoWorklet = performance.now();
+      if (track.readyState === "ended") { falhar(); return; }
+      aoNivel(escala(evento.data as number));
+    };
+    fonte.connect(worklet);
+    // Ligado ao destino por um ganho zero: no ar para o grafo processar, sem
+    // devolver o proprio microfone no alto-falante.
+    silencio = contexto.createGain();
+    silencio.gain.value = 0;
+    worklet.connect(silencio).connect(contexto.destination);
+  }).catch(erro => console.warn("[voz] worklet indisponivel, medindo por relogio", erro));
+
+  const parar = () => {
     vivo = false;
-    cancelAnimationFrame(quadro);
+    window.clearInterval(relogio);
+    if (worklet) worklet.port.onmessage = null;
     fonte.disconnect();
+    worklet?.disconnect();
+    silencio?.disconnect();
     void contexto.close().catch(() => { /* ja fechado */ });
   };
+  return parar;
 }
 
 /// Quanto tempo o microfone continua aberto depois que o nivel cai.
