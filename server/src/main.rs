@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 mod dj;
 mod gifs;
+mod miniatura;
 mod previa;
 mod registro;
 
@@ -619,6 +620,7 @@ async fn main() {
         .route("/api/files", post(upload_file))
         .route("/api/files/{id}", get(download_file))
         .route("/api/files/{id}/link", get(link_do_arquivo))
+        .route("/api/files/{id}/thumb", get(miniatura_de_arquivo))
         // Sem `/api` e sem sessao: e o endereco que abre no navegador.
         .route("/f/{id}", get(arquivo_por_link))
         .route("/api/livekit-token", post(livekit_token))
@@ -1641,6 +1643,18 @@ async fn guardar_bytes(
     if fs::write(dir.join(&id), body).await.is_err() {
         return Err((StatusCode::INSUFFICIENT_STORAGE, "Nao foi possivel gravar o arquivo."));
     }
+    // Miniatura junto do original. Falhar aqui nao derruba o envio: sem ela o
+    // cliente mostra o original, que e como o chat sempre funcionou.
+    //
+    // Em `spawn_blocking` porque decodificar e redimensionar e trabalho de CPU,
+    // e o laco assincrono deste servidor atende conversa e chamada ao lado.
+    if mime.starts_with("image/") {
+        let copia = body.to_vec();
+        let destino = dir.join(miniatura::nome(&id));
+        if let Ok(Some(mini)) = tokio::task::spawn_blocking(move || miniatura::gerar(&copia)).await {
+            let _ = fs::write(destino, mini).await;
+        }
+    }
 
     let stored = StoredFile {
         id: id.clone(), name, mime: mime.to_string(), size: body.len() as u64,
@@ -2306,6 +2320,50 @@ async fn servir_arquivo(state: &AppState, id: &str, privado: bool) -> Response {
         ], bytes).into_response(),
         Err(_) => error(StatusCode::NOT_FOUND, "Arquivo nao encontrado no disco."),
     }
+}
+
+/// A versao leve do anexo, para a conversa montar sem o arquivo inteiro.
+///
+/// Serve o original quando nao ha miniatura — anexo que nao e imagem, imagem
+/// pequena demais para valer a pena, ou formato que o gerador nao abriu. Assim
+/// o cliente pede a miniatura sempre e nunca precisa saber se ela existe.
+async fn miniatura_de_arquivo(State(state): State<AppState>, headers: HeaderMap, Caminho(id): Caminho<String>) -> Response {
+    if authenticated(&state, &headers).await.is_none() {
+        return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
+    }
+    let Some(file) = state.files.read().await.get(&id).cloned() else {
+        return error(StatusCode::NOT_FOUND, "Arquivo nao encontrado.");
+    };
+    if !file.mime.starts_with("image/") {
+        return servir_arquivo(&state, &id, true).await;
+    }
+    let dir = if file.disk == "fallback" { &state.config.upload_fallback_dir } else { &state.config.upload_dir };
+    let caminho = dir.join(miniatura::nome(&file.id));
+    if let Ok(bytes) = fs::read(&caminho).await {
+        return responder_miniatura(bytes);
+    }
+    // Anexo de antes desta rota existir: gera agora e guarda, para a proxima vez
+    // ser leitura de disco. E o que dispensa uma migracao do que ja esta gravado.
+    let Ok(original) = fs::read(dir.join(&file.id)).await else {
+        return error(StatusCode::NOT_FOUND, "Arquivo nao encontrado no disco.");
+    };
+    let gerada = tokio::task::spawn_blocking(move || miniatura::gerar(&original)).await.ok().flatten();
+    match gerada {
+        Some(bytes) => {
+            let _ = fs::write(&caminho, &bytes).await;
+            responder_miniatura(bytes)
+        }
+        None => servir_arquivo(&state, &id, true).await,
+    }
+}
+
+/// O conteudo da miniatura ja pronto. Guardavel para sempre: o id do anexo e o
+/// hash do conteudo, entao esta imagem nunca muda.
+fn responder_miniatura(bytes: Vec<u8>) -> Response {
+    ([
+        (axum::http::header::CONTENT_TYPE, "image/jpeg".to_string()),
+        (axum::http::header::CACHE_CONTROL, "private, max-age=31536000, immutable".to_string()),
+    ], bytes).into_response()
 }
 
 /// `inline` para o que o navegador sabe mostrar, `attachment` para o resto.

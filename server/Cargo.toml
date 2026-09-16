@@ -23,4 +23,8 @@ tower-http = { version = "0.6", features = ["cors", "limit", "trace", "fs"] }
 # de nada instalado na maquina de quem hospeda.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# Miniatura de anexo. Só os formatos que `allowed_mime` aceita, e sem os
+# padrões do crate: puxar o resto traria dezenas de decodificadores que este
+# servidor nunca vai abrir.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 

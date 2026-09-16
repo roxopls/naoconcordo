@@ -192,10 +192,22 @@ function restoreComposerDraft() {
   if (mode === "dm") { dmInput.value = conversation ? readDraft(session.username, conversation) : ""; resizeDmComposer(); }
   else { messageInput.value = conversation ? readDraft(session.username, conversation) : ""; resizeComposer(); }
 }
-function persistComposerDraft(value: string) {
+/// Guarda o rascunho **depois** que a pessoa para de digitar.
+///
+/// `localStorage.setItem` e escrita sincrona em disco, e chamar isso a cada
+/// tecla punia justamente quem escreve rapido: o custo aparecia entre a tecla e
+/// a letra na tela. Esperar a pausa nao muda nada para quem escreve — o rascunho
+/// existe para sobreviver a troca de canal e ao fechar a janela, e os dois
+/// pedem a gravacao na hora, por `agora`.
+let rascunhoPendente = 0;
+function persistComposerDraft(value: string, agora = false) {
   if (!session) return;
   const conversation = draftConversation();
-  if (conversation) saveDraft(session.username, conversation, value);
+  if (!conversation) return;
+  const quem = session.username;
+  window.clearTimeout(rascunhoPendente);
+  if (agora) { saveDraft(quem, conversation, value); return; }
+  rascunhoPendente = window.setTimeout(() => saveDraft(quem, conversation, value), 400);
 }
 
 function readSession(): AuthSession | null {
@@ -681,7 +693,10 @@ async function selectRoom(id: string) {
   olhandoAChamada = false;
   view = servers.length && currentServerId ? view : "home";
   mode = "room"; currentFriend = ""; setMode(); renderFriends();
-  currentRoomId = id; clearUnread(id); persistNavigation(); restoreComposerDraft(); renderNavigation(); renderMessages();
+  currentRoomId = id; clearUnread(id); persistNavigation(); restoreComposerDraft();
+  // Canal novo, janela nova: entrar num canal mostra o fim da conversa.
+  janelaDeMensagens = BLOCO_DE_MENSAGENS;
+  renderNavigation(); renderMessages();
 }
 /// Entrar num canal de voz, ou sair se ja estiver nele.
 /// O servidor dono da chamada em andamento. Vazio quando nao ha chamada.
@@ -1168,7 +1183,7 @@ dmForm.addEventListener("submit", async event => {
     // O anexo em si nao e cifrado: e o mesmo arquivo autenticado dos canais.
     const stored = await api<Envelope>("/api/dm", { method: "POST", body: JSON.stringify({ to: currentFriend, ...envelope, attachments: pendingFiles.map(file => file.id), replyTo: respondendoA?.id || null }) });
     recordDirect(currentFriend, { id: stored.id, from: stored.from, to: stored.to, text, createdAt: stored.createdAt, attachments: stored.attachments || [], replyTo: stored.replyTo || null });
-    dmInput.value = ""; persistComposerDraft(""); pendingFiles = []; renderAttachPreview(); cancelarResposta(); resizeDmComposer();
+    dmInput.value = ""; persistComposerDraft("", true); pendingFiles = []; renderAttachPreview(); cancelarResposta(); resizeDmComposer();
   } catch (error) { showToast(error instanceof Error ? error.message : "Não foi possível enviar."); }
 });
 dmInput.addEventListener("input", () => { resizeDmComposer(); persistComposerDraft(dmInput.value); });
@@ -1303,7 +1318,12 @@ function connectChat() {
     if (payload.type === "message" && payload.message) {
       history.push(payload.message);
       const minha = key(payload.message.username) === key(session?.username || "");
-      if (view === "server" && mode === "room" && payload.message.roomId === currentRoomId) { appendMessage(payload.message); scrollMessages(); }
+      if (view === "server" && mode === "room" && payload.message.roomId === currentRoomId) {
+        // A janela cresce junto: sem isto, o proximo redesenho descartaria a
+        // mensagem mais antiga que esta na tela para caber a que acabou de vir.
+        janelaDeMensagens += 1;
+        appendMessage(payload.message); scrollMessages();
+      }
       noteUnread(payload.message, minha);
     }
     if (payload.type === "typing" && payload.username && payload.roomId) {
@@ -1434,7 +1454,7 @@ messageForm.addEventListener("submit", event => {
   const text = messageInput.value.trim();
   if ((!text && !pendingFiles.length) || chat?.readyState !== WebSocket.OPEN) return;
   chat.send(JSON.stringify({ type: "message", text, roomId: currentRoomId, attachments: pendingFiles.map(file => file.id), replyTo: respondendoA?.id || null }));
-  messageInput.value = ""; persistComposerDraft(""); pendingFiles = []; renderAttachPreview(); cancelarResposta(); resizeComposer();
+  messageInput.value = ""; persistComposerDraft("", true); pendingFiles = []; renderAttachPreview(); cancelarResposta(); resizeComposer();
 });
 messageInput.addEventListener("input", () => {
   resizeComposer(); persistComposerDraft(messageInput.value); avisarQueDigito(); atualizarSugestoes();
@@ -1455,19 +1475,77 @@ messageInput.addEventListener("keydown", event => {
   }
   if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); messageForm.requestSubmit(); }
 });
-messageInput.addEventListener("blur", () => { sugestoes = []; renderSugestoes(); });
+messageInput.addEventListener("blur", () => { persistComposerDraft(messageInput.value, true); sugestoes = []; renderSugestoes(); });
 function resizeComposer() {
-  posicionarCameraMini(); messageInput.style.height = "auto"; messageInput.style.height = Math.min(messageInput.scrollHeight, 110) + "px"; }
+  const antes = messageInput.style.height;
+  messageInput.style.height = "auto";
+  const nova = Math.min(messageInput.scrollHeight, 110) + "px";
+  messageInput.style.height = nova;
+  // O quadradinho de camera so se mexe quando o redator muda de altura, que e
+  // quando a linha quebra. Reposicionar a cada tecla custava uma medida de
+  // layout a mais por tecla, e ele terminava exatamente no mesmo lugar.
+  if (nova !== antes) posicionarCameraMini();
+}
 function refreshVisibleRoom(roomId: string) {
   if (view !== "server" || mode !== "room" || currentRoomId !== roomId) return;
   const distanceFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop;
   renderMessages();
   if (distanceFromBottom > messagesEl.clientHeight + 60) messagesEl.scrollTop = messagesEl.scrollHeight - distanceFromBottom;
 }
-function renderMessages() {
+/// Desenha o canal aberto.
+///
+/// `manterPosicao` e para quando um bloco antigo entra no topo: sem ele a lista
+/// saltaria para o fim, que e o contrario do que quem rolou para cima quer.
+function renderMessages(manterPosicao = false) {
   // Na home sem conversa aberta o painel e a central de amigos, nao um canal.
   if (view === "home" && mode === "room") { renderFriendsHome(); return; }
-  const selected = rooms.find(item => item.id === currentRoomId); messagesEl.innerHTML = '<div class="welcome"><div class="hash">#</div><h2>#' + escapeHtml(selected?.name || "geral") + '</h2><p>Começo do canal.</p></div>'; history.filter(item => item.roomId === currentRoomId).forEach(appendMessage); scrollMessages(); }
+  const selected = rooms.find(item => item.id === currentRoomId);
+  const doCanal = history.filter(item => item.roomId === currentRoomId);
+  // So o fim da conversa entra no DOM. O historico chega inteiro do servidor e
+  // fica na memoria; o que custava caro era desenhar duas mil mensagens de uma
+  // vez e refazer isso a cada troca de canal.
+  const inicio = Math.max(0, doCanal.length - janelaDeMensagens);
+  // A distancia ate o fim sobrevive ao redesenho; o `scrollTop` cru nao, porque
+  // a lista inteira muda de altura quando um bloco antigo entra.
+  const doFim = manterPosicao ? messagesEl.scrollHeight - messagesEl.scrollTop : 0;
+
+  messagesEl.replaceChildren();
+  if (inicio === 0) {
+    messagesEl.innerHTML = '<div class="welcome"><div class="hash">#</div><h2>#'
+      + escapeHtml(selected?.name || "geral") + '</h2><p>Começo do canal.</p></div>';
+  } else {
+    messagesEl.append(sentinelaDoTopo());
+  }
+  doCanal.slice(inicio).forEach(appendMessage);
+
+  if (manterPosicao) messagesEl.scrollTop = messagesEl.scrollHeight - doFim;
+  else scrollMessages();
+}
+
+/// Quantas mensagens entram de cada vez, e quantas estao na tela agora.
+const BLOCO_DE_MENSAGENS = 60;
+let janelaDeMensagens = BLOCO_DE_MENSAGENS;
+let observadorDoTopo: IntersectionObserver | null = null;
+
+/// A marca no alto da lista: chegar nela traz o bloco anterior.
+///
+/// Sem botao de propósito. Rolar para cima e o gesto de quem quer o que veio
+/// antes; pedir um clique no meio do caminho seria inventar uma parada que a
+/// conversa nao tem.
+function sentinelaDoTopo(): HTMLElement {
+  const marca = document.createElement("div");
+  marca.className = "carregando-antigas";
+  marca.textContent = "carregando mensagens anteriores…";
+  observadorDoTopo?.disconnect();
+  observadorDoTopo = new IntersectionObserver(entradas => {
+    if (!entradas.some(entrada => entrada.isIntersecting)) return;
+    observadorDoTopo?.disconnect();
+    janelaDeMensagens += BLOCO_DE_MENSAGENS;
+    renderMessages(true);
+  }, { root: messagesEl, rootMargin: "300px" });
+  observadorDoTopo.observe(marca);
+  return marca;
+}
 /// Tela inicial dos amigos: quem esta online, e um atalho para conversar.
 function renderFriendsHome() {
   const box = document.createElement("div");
@@ -1520,7 +1598,13 @@ function mencaoEmCurso(): { termo: string; inicio: number } | null {
   return { termo: achado[2], inicio: cursor - achado[2].length - 1 };
 }
 
+/// Quantas sugestoes a caixa esta mostrando agora. Sem isto, cada tecla
+/// digitada fora de uma mencao — a esmagadora maioria — ainda refazia os filhos
+/// de uma caixa vazia.
+let sugestoesNaTela = 0;
 function renderSugestoes() {
+  if (sugestoes.length === 0 && sugestoesNaTela === 0) return;
+  sugestoesNaTela = sugestoes.length;
   const caixa = byId("mention-box");
   caixa.classList.toggle("hidden", sugestoes.length === 0);
   caixa.replaceChildren(...sugestoes.map((nome, indice) => {
@@ -5456,7 +5540,11 @@ function pedacoRico(achado: RegExpMatchArray): Node {
     const a = document.createElement("a");
     a.className = "chat-link";
     a.textContent = link;
-    a.href = "#";
+    // O endereco de verdade, e nao `#`: o menu do botao direito copia daqui
+    // (`link.href`), e com `#` o que ia para a area de transferencia era
+    // `tauri.localhost/#`, que e no que `#` se resolve dentro da janela. O
+    // clique continua sendo tratado por nos, logo abaixo.
+    a.href = link;
     a.onclick = evento => {
       evento.preventDefault();
       void abrirExterno(link).catch(() => showToast("Nao foi possivel abrir o link."));
@@ -5815,6 +5903,62 @@ async function uploadFile(file: File): Promise<StoredFile> {
     throw new Error(body.error || "Falha no envio.");
   }
   return response.json() as Promise<StoredFile>;
+}
+
+/// A versao leve do anexo, guardada por endereco.
+///
+/// Teto proprio e pequeno: sao alguns KB por imagem, e o objetivo dela e
+/// justamente nao encher a memoria.
+const miniCache = new Map<string, { url: string; bytes: number }>();
+const TETO_DE_MINIATURAS = 24 * 1024 * 1024;
+
+/// O endereco `blob:` da miniatura. O servidor devolve o original quando nao ha
+/// versao leve, entao aqui nunca e preciso saber se ela existe.
+async function miniaturaUrl(id: string): Promise<string> {
+    const pronto = miniCache.get(id);
+    if (pronto) return pronto.url;
+    const resposta = await fetch(API + "/api/files/" + encodeURIComponent(id) + "/thumb", {
+      headers: { Authorization: "Bearer " + (session?.token || "") },
+    });
+    if (!resposta.ok) throw new Error("miniatura indisponivel");
+    const dados = await resposta.blob();
+    const url = URL.createObjectURL(dados);
+    miniCache.set(id, { url, bytes: dados.size });
+    podarCache(miniCache, item => item.bytes, TETO_DE_MINIATURAS, (_, item) => URL.revokeObjectURL(item.url));
+    return url;
+}
+
+/// Quanto tempo a imagem precisa ficar parada na tela antes de virar original.
+///
+/// Curto de proposito: o objetivo e nao baixar o que so passou correndo
+/// enquanto alguem rola a conversa, e nao fazer a pessoa esperar. Quem para
+/// para olhar nem percebe que houve troca.
+const AGUARDAR_PARADO = 200;
+let observadorDeImagens: IntersectionObserver | null = null;
+const trocaAgendada = new WeakMap<Element, number>();
+
+/// Vigia uma imagem leve e a troca pela original quando ela esta visivel e a
+/// rolagem parou.
+function trocarQuandoOlhar(img: HTMLImageElement) {
+  observadorDeImagens ??= new IntersectionObserver(entradas => {
+    for (const entrada of entradas) {
+      const alvo = entrada.target as HTMLImageElement;
+      const pendente = trocaAgendada.get(alvo);
+      // Saiu da tela antes da hora: o relogio reinicia, e nada e baixado.
+      if (pendente) { window.clearTimeout(pendente); trocaAgendada.delete(alvo); }
+      if (!entrada.isIntersecting) continue;
+      trocaAgendada.set(alvo, window.setTimeout(() => {
+        trocaAgendada.delete(alvo);
+        const id = alvo.dataset.anexo;
+        if (!id) return;
+        observadorDeImagens?.unobserve(alvo);
+        void fileUrl(id).then(url => { alvo.src = url; }).catch(() => { /* fica a leve */ });
+      }, AGUARDAR_PARADO));
+    }
+    // A margem adianta a troca do que esta prestes a entrar na tela, para a
+    // imagem boa ja estar la quando a rolagem parar.
+  }, { rootMargin: "200px" });
+  observadorDeImagens.observe(img);
 }
 
 /// Busca autenticada e vira blob: <img src> nao manda cabecalho.
@@ -6297,21 +6441,43 @@ function renderAttachments(message: { attachments?: StoredFile[] }, into: HTMLEl
     box.className = "attachment";
     // Substitui o menu nativo, que so sabe oferecer o blob interno da janela.
     box.oncontextmenu = event => menuDoAnexo(file, event);
+    // O que ja esta em cache entra **no mesmo quadro**, sem passar por `await`.
+    //
+    // Trocar de canal refaz a lista inteira, e com a promessa no meio cada
+    // imagem nascia sem `src`: o navegador jogava fora a imagem decodificada e
+    // decodificava tudo de novo um quadro depois. Era isso que fazia as imagens
+    // "recarregarem" toda vez que se voltava para o mesmo canal. O `renderRail`
+    // ja fazia assim; aqui faltava.
+    const pronto = blobCache.get(file.id);
     if (file.mime.startsWith("image/")) {
       const img = document.createElement("img");
       img.alt = file.name; img.loading = "lazy";
-      void fileUrl(file.id).then(url => { img.src = url; }).catch(() => { box.textContent = "(falhou ao carregar)"; });
+      img.dataset.anexo = file.id;
+      if (pronto) {
+        // Ja baixada nesta sessao: nao ha por que mostrar a leve antes.
+        img.src = pronto;
+      } else {
+        // A leve entra primeiro e a original toma o lugar quando a pessoa para
+        // de rolar em cima dela. Abrir um canal deixa de significar baixar e
+        // decodificar todas as fotos dele.
+        void miniaturaUrl(file.id)
+          .then(url => { if (!blobCache.get(file.id)) img.src = url; })
+          .catch(() => { /* sem a leve, a original entra pelo vigia abaixo */ });
+        trocarQuandoOlhar(img);
+      }
       img.onclick = () => void fileUrl(file.id).then(url => abrirImagem(url, file.name, file));
       box.append(img);
     } else if (file.mime.startsWith("video/")) {
       const video = document.createElement("video");
       video.controls = true; video.preload = "metadata";
-      void fileUrl(file.id).then(url => { video.src = url; }).catch(() => { box.textContent = "(falhou ao carregar)"; });
+      if (pronto) video.src = pronto;
+      else void fileUrl(file.id).then(url => { video.src = url; }).catch(() => { box.textContent = "(falhou ao carregar)"; });
       box.append(video);
     } else if (file.mime.startsWith("audio/")) {
       const audio = document.createElement("audio");
       audio.controls = true;
-      void fileUrl(file.id).then(url => { audio.src = url; }).catch(() => { box.textContent = "(falhou)"; });
+      if (pronto) audio.src = pronto;
+      else void fileUrl(file.id).then(url => { audio.src = url; }).catch(() => { box.textContent = "(falhou)"; });
       box.append(audio);
     } else {
       const link = document.createElement("button");

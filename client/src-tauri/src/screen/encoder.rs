@@ -543,6 +543,19 @@ struct Mft {
     nome: String,
     largura: u32,
     altura: u32,
+    /// A passada de linha que **este** MFT usa para ler o NV12 que mandamos.
+    ///
+    /// Nao e sempre a largura. Codificador de hardware costuma querer a largura
+    /// alinhada para cima — 16 na maioria, 32, 64 ou 256 em alguns drivers — e
+    /// como nosso NV12 vai empacotado, a conta so batia por sorte: 1920, 2560 e
+    /// 3840 ja sao multiplos de 16, entao tela cheia funcionava. Janela pequena
+    /// de largura 742 ou 1006 nao e, e o MFT passava a ler cada linha alguns
+    /// bytes adiante da anterior — o erro se acumulava linha a linha e a imagem
+    /// escorria para o lado, ate o proximo quadro-chave recomecar o estrago.
+    ///
+    /// O caminho de software nunca sofreu disso porque respeita a passada que o
+    /// libwebrtc declara. Aqui passamos a fazer o mesmo: perguntar e obedecer.
+    passo: u32,
     /// O MFT de hardware entrega as amostras de saida dele. Guardado porque um
     /// MFT que nao entrega exige buffer nosso a cada `ProcessOutput`.
     entrega_amostras: bool,
@@ -710,6 +723,8 @@ impl Mft {
             nome,
             largura,
             altura,
+            // Ate o tipo de entrada ser negociado, o melhor palpite e a largura.
+            passo: largura,
             entrega_amostras: true,
             cabecalho: Vec::new(),
             assincrono,
@@ -784,9 +799,21 @@ impl Mft {
             entrada
                 .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
                 .map_err(|e| e.to_string())?;
-            self.transform
-                .SetInputType(0, &entrada, 0)
-                .map_err(|e| format!("entrada NV12 recusada ({}): {e}", self.nome))?;
+            // Dizer a passada que de fato mandamos. Sem isto o MFT calcula a
+            // dele e le nosso buffer com ela.
+            entrada
+                .SetUINT32(&MF_MT_DEFAULT_STRIDE, self.largura)
+                .map_err(|e| e.to_string())?;
+            // Ha MFT que recusa passada nao alinhada. Nesse caso o tipo vai sem
+            // ela e nos e que nos ajustamos: `passo_negociado` le a escolha
+            // dele logo abaixo.
+            if self.transform.SetInputType(0, &entrada, 0).is_err() {
+                entrada.DeleteItem(&MF_MT_DEFAULT_STRIDE).map_err(|e| e.to_string())?;
+                self.transform
+                    .SetInputType(0, &entrada, 0)
+                    .map_err(|e| format!("entrada NV12 recusada ({}): {e}", self.nome))?;
+            }
+            self.passo = self.passo_negociado();
         }
 
         if let Ok(info) = unsafe { self.transform.GetOutputStreamInfo(0) } {
@@ -880,16 +907,50 @@ impl Mft {
         }
     }
 
+    /// A passada de linha que o MFT diz que vai usar para ler a entrada.
+    ///
+    /// Sem resposta, ou com resposta que nao cabe, fica a largura — que e o que
+    /// mandamos. Passada menor que a largura nao existe; passada absurdamente
+    /// grande e sinal de valor negativo (imagem de baixo para cima) lido como
+    /// `u32`, e nenhum dos dois merece confianca.
+    unsafe fn passo_negociado(&self) -> u32 {
+        let declarado = unsafe { self.transform.GetInputCurrentType(0) }
+            .ok()
+            .and_then(|tipo| unsafe { tipo.GetUINT32(&MF_MT_DEFAULT_STRIDE) }.ok());
+        match declarado {
+            Some(valor) if valor >= self.largura && valor <= self.largura.saturating_mul(4) => valor,
+            _ => self.largura,
+        }
+    }
+
     /// Copia o NV12 para uma amostra e entrega ao codificador.
     unsafe fn entregar(&self, job: &Job) -> Result<(), String> {
-        let buffer = unsafe { MFCreateMemoryBuffer(job.nv12.len() as u32) }
+        let largura = job.largura as usize;
+        let altura = job.altura as usize;
+        let passo = (self.passo as usize).max(largura);
+        // Com passada igual a largura, o quadro ja esta no formato certo e vai
+        // num `memcpy` so. Com folga, cada linha e posta no lugar dela.
+        let tamanho = if passo == largura { job.nv12.len() } else { passo * (altura + altura / 2) };
+        let buffer = unsafe { MFCreateMemoryBuffer(tamanho as u32) }
             .map_err(|e| e.to_string())?;
         unsafe {
             let mut destino: *mut u8 = std::ptr::null_mut();
             buffer.Lock(&mut destino, None, None).map_err(|e| e.to_string())?;
-            std::ptr::copy_nonoverlapping(job.nv12.as_ptr(), destino, job.nv12.len());
+            if passo == largura {
+                std::ptr::copy_nonoverlapping(job.nv12.as_ptr(), destino, job.nv12.len());
+            } else {
+                // A folga no fim de cada linha fica como veio: o codificador le
+                // `largura` pixels por linha e nunca a mostra.
+                let destino = std::slice::from_raw_parts_mut(destino, tamanho);
+                let (origem_y, origem_uv) = job.nv12.split_at(largura * altura);
+                let (destino_y, destino_uv) = destino.split_at_mut(passo * altura);
+                copiar_com_folga(origem_y, largura, destino_y, passo, altura);
+                // O plano UV entrelacado tem metade das linhas, cada uma do
+                // mesmo comprimento do Y — e por isso a mesma passada.
+                copiar_com_folga(origem_uv, largura, destino_uv, passo, altura / 2);
+            }
             buffer.Unlock().map_err(|e| e.to_string())?;
-            buffer.SetCurrentLength(job.nv12.len() as u32).map_err(|e| e.to_string())?;
+            buffer.SetCurrentLength(tamanho as u32).map_err(|e| e.to_string())?;
 
             let amostra = MFCreateSample().map_err(|e| e.to_string())?;
             amostra.AddBuffer(&buffer).map_err(|e| e.to_string())?;
@@ -1089,4 +1150,19 @@ fn variante_u32(valor: u32) -> VARIANT {
         interno.Anonymous.ulVal = valor;
     }
     variante
+}
+
+/// Copia `linhas` de `largura` bytes para um destino com passada maior.
+///
+/// Igual ao `copiar_plano` do caminho de software; vive aqui porque aquele e
+/// privado do modulo da captura e sao dois donos diferentes do mesmo problema.
+fn copiar_com_folga(origem: &[u8], largura: usize, destino: &mut [u8], passo: usize, linhas: usize) {
+    for linha in 0..linhas {
+        let de = linha * largura;
+        let para = linha * passo;
+        if de + largura > origem.len() || para + largura > destino.len() {
+            break;
+        }
+        destino[para..para + largura].copy_from_slice(&origem[de..de + largura]);
+    }
 }
