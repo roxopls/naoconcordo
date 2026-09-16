@@ -24,9 +24,10 @@ import {
   saveDraft, saveNavigation, showNotice,
 } from "./qol";
 import {
-  desktopNotificationsOn, notificationPreviewOn, notificationsInCallOn, notifyMessage, sendTestNotification,
-  setDesktopNotifications, setNotificationPreview, setNotificationsInCall,
+  desktopNotificationsOn, notificationPreviewOn, notificationsInCallOn, notifyMessage, prepararNotificacoes,
+  sendTestNotification, setDesktopNotifications, setNotificationPreview, setNotificationsInCall,
 } from "./notifications";
+import { atualizarSelo } from "./selo";
 
 // Escolhido em tempo de execucao (veja `servidor.ts`), e nao mais fixado no
 // build. Lido uma vez: trocar de servidor recarrega a janela, porque sessao,
@@ -42,7 +43,7 @@ type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind; ca
 type Profile = { username: string; avatar: string | null; avatarFile?: string | null; bio?: string | null; bannerFile?: string | null; color?: string | null };
 type ServerRole = "owner" | "mod" | "member";
 type Categoria = { id: string; serverId: string; name: string; posicao: number };
-type Bootstrap = { servers: ServerInfo[]; rooms: RoomInfo[]; profiles: Profile[]; isOwner: boolean; isAdmin: boolean; roles: Record<string, ServerRole>; online: string[]; voice?: Record<string, string[]>; categorias?: Categoria[]; gifs?: boolean };
+type Bootstrap = { servers: ServerInfo[]; rooms: RoomInfo[]; profiles: Profile[]; isOwner: boolean; isAdmin: boolean; roles: Record<string, ServerRole>; online: string[]; voice?: Record<string, string[]>; categorias?: Categoria[]; gifs?: boolean; dj?: boolean };
 type LivekitAccess = { token: string; url: string; room: string };
 type Friendship = { requester: string; addressee: string; status: "pending" | "accepted" };
 type FriendsData = { friends: string[]; incoming: Friendship[]; outgoing: Friendship[] };
@@ -130,10 +131,19 @@ function getDisplayName(username: string) {
 // Papel em cada servidor, vindo do backend. Guia o que a interface oferece.
 let roles: Record<string, ServerRole> = {};
 let micEnabled = false, screenEnabled = false, camEnabled = false, audioEnabled = true, toastTimer = 0;
-/// O palco com um quadro por pessoa esta a mostra? Entrar numa chamada liga; o
-/// clique no proprio canal alterna. Camera e tela alheias aparecem de qualquer
-/// jeito — este interruptor vale so para os quadros de quem esta so na voz.
-let palcoDaChamada = true;
+/// O palco e a tela que voce esta olhando agora?
+///
+/// O palco deixou de dividir o painel com a conversa. Ou voce esta vendo a
+/// chamada — quadro por pessoa, tela inteira, sem chat —, ou esta lendo um
+/// canal. Quem escolhe e o clique: no canal de voz abre o palco, em qualquer
+/// canal de texto fecha.
+///
+/// Dividir os dois era mais informacao do que serve: a conversa ficava numa
+/// tira de 148 px enquanto a chamada ocupava o resto, e nenhum dos dois cabia
+/// direito. Fora do palco, camera e tela alheias continuam visiveis no
+/// quadradinho do canto e nas janelas de Cameras e Telas, que ja existem para
+/// acompanhar sem estar na tela da chamada.
+let olhandoAChamada = false;
 /// Quem esta no modo grande, por id de tile.
 ///
 /// O estado pertence ao palco, e nao a tile, porque tile e descartavel: as de
@@ -461,6 +471,7 @@ async function enterApp() {
   const data = await api<Bootstrap>("/api/bootstrap");
   servers = data.servers; rooms = data.rooms; isAdmin = Boolean(data.isAdmin); roles = data.roles || {};
   temGifs = Boolean(data.gifs); aplicarBotaoDeGif();
+  temDj = Boolean(data.dj);
   // Servidor mais antigo nao conhece categorias e nem manda o campo. Distinguir
   // "nenhuma categoria" de "este servidor nao sabe o que e isso" e o que evita
   // oferecer um botao cujo unico resultado seria erro.
@@ -586,6 +597,12 @@ function renderNavigation() {
     byId("room-title").textContent = "@ " + currentFriend;
     byId("room-subtitle").textContent = "Conversa privada cifrada";
     dmInput.placeholder = "Mensagem privada para " + currentFriend;
+  } else if (chamadaNaTela()) {
+    // Com o palco aberto nao ha canal de texto na tela. Deixar o nome do
+    // ultimo la em cima diria que voce esta lendo o que nem aparece.
+    const voice = rooms.find(item => item.id === voiceRoomId);
+    byId("room-title").textContent = voice ? voice.name : "Chamada";
+    byId("room-subtitle").textContent = "canal de voz";
   } else {
     byId("room-title").textContent = view === "home"
       ? "Amigos"
@@ -599,6 +616,10 @@ function renderNavigation() {
   }
 }
 async function selectServer(id: string) {
+  // O rail abre o servidor no primeiro canal de texto, e nao no palco — mesmo
+  // sendo o servidor da chamada. Para o palco existe o clique no canal de voz;
+  // quem volta pelo rail costuma estar indo ler alguma coisa.
+  olhandoAChamada = false;
   view = "server";
   currentServerId = id;
   // Apelido e foto sao por servidor: sem limpar aqui, os do servidor anterior
@@ -642,6 +663,7 @@ async function refreshCatalog() {
 }
 /// Volta para a casa dos amigos. A chamada de voz continua de pe.
 function goHome() {
+  olhandoAChamada = false;
   view = "home";
   serverMembers = []; serverMemberProfiles.clear();
   mode = currentFriend ? "dm" : "room";
@@ -652,7 +674,11 @@ function goHome() {
 byId("home-button").addEventListener("click", goHome);
 byId("add-server").addEventListener("click", () => void createServer());
 /// Trocar de canal de texto nao mexe na chamada, igual ao Discord.
+///
+/// Fecha o palco: quem clicou num canal quer ler o canal. A chamada continua de
+/// pe, e o que estava sendo transmitido vai para o quadradinho do canto.
 async function selectRoom(id: string) {
+  olhandoAChamada = false;
   view = servers.length && currentServerId ? view : "home";
   mode = "room"; currentFriend = ""; setMode(); renderFriends();
   currentRoomId = id; clearUnread(id); persistNavigation(); restoreComposerDraft(); renderNavigation(); renderMessages();
@@ -663,9 +689,14 @@ function serverDaChamada(): string {
   return rooms.find(item => item.id === voiceRoomId)?.serverId || "";
 }
 /// A chamada esta na tela que voce esta olhando agora?
+///
+/// Estar no servidor dono da chamada nao basta mais: o palco so aparece com
+/// `olhandoAChamada`, que e o clique no canal de voz. O servidor continua na
+/// conta porque a chamada segue de pe enquanto voce navega, e o palco nao pode
+/// reaparecer sozinho ao passar por outro servidor.
 function chamadaNaTela(): boolean {
   const dono = serverDaChamada();
-  return Boolean(dono) && view === "server" && currentServerId === dono;
+  return olhandoAChamada && Boolean(dono) && view === "server" && currentServerId === dono;
 }
 /// Decide onde as transmissoes aparecem.
 ///
@@ -680,64 +711,17 @@ function syncStagePlacement() {
   aplicarTeatro();
   const aqui = chamadaNaTela();
   if (!aqui && document.fullscreenElement === stage) void document.exitFullscreen();
-  const mostrar = aqui && stage.children.length > 0;
-  stage.classList.toggle("hidden", !mostrar);
-  byId("stage-resizer").classList.toggle("hidden", !mostrar);
+  stage.classList.toggle("hidden", !aqui);
+  // Quem apaga a conversa e o CSS, e nao `setMode`: sao os mesmos elementos que
+  // a conversa privada esconde, e dois donos para a mesma propriedade acabam
+  // com um deles reacendendo o que o outro apagou.
+  byId("app-view").querySelector(".main-panel")?.classList.toggle("so-palco", aqui);
   renderCameraMini();
 }
-// ------------------------------------------------- altura do palco
-// A alca nativa do `resize: vertical` e um triangulo de 12px no canto direito:
-// so pega quem mira. Esta barra ocupa a largura toda e guarda a altura, entao a
-// pessoa ajusta uma vez e continua assim nas proximas chamadas.
-const ALTURA_KEY = "naoconcordo.altura-palco";
-const ALTURA_MIN = 140;
-
-function aplicarAlturaDoPalco(px: number) {
-  // Sobra para o chat: um palco que come a janela inteira deixa a conversa
-  // inalcancavel, e nao ha como arrastar de volta o que nao aparece.
-  const teto = Math.max(ALTURA_MIN, window.innerHeight - 260);
-  const altura = Math.min(Math.max(px, ALTURA_MIN), teto);
-  stage.style.height = altura + "px";
-  return altura;
-}
-
-(() => {
-  const barra = byId("stage-resizer");
-  const salva = Number(localStorage.getItem(ALTURA_KEY));
-  if (salva > 0) aplicarAlturaDoPalco(salva);
-
-  let arrastando = false;
-  barra.addEventListener("pointerdown", event => {
-    arrastando = true;
-    barra.classList.add("arrastando");
-    barra.setPointerCapture(event.pointerId);
-    event.preventDefault();
-  });
-  barra.addEventListener("pointermove", event => {
-    if (!arrastando) return;
-    // A altura e a distancia do topo do palco ate o ponteiro: segue o dedo sem
-    // acumular erro, mesmo se um quadro for perdido no meio do arrasto.
-    aplicarAlturaDoPalco(event.clientY - stage.getBoundingClientRect().top);
-  });
-  const soltar = (event: PointerEvent) => {
-    if (!arrastando) return;
-    arrastando = false;
-    barra.classList.remove("arrastando");
-    barra.releasePointerCapture(event.pointerId);
-    localStorage.setItem(ALTURA_KEY, String(parseInt(stage.style.height, 10) || ALTURA_MIN));
-  };
-  barra.addEventListener("pointerup", soltar);
-  barra.addEventListener("pointercancel", soltar);
-  // Duplo clique devolve o padrao, para quem se perdeu arrastando.
-  barra.addEventListener("dblclick", () => {
-    stage.style.removeProperty("height");
-    localStorage.removeItem(ALTURA_KEY);
-  });
-  // A janela encolher nao pode deixar o palco maior que ela.
-  window.addEventListener("resize", () => {
-    if (stage.style.height) aplicarAlturaDoPalco(parseInt(stage.style.height, 10) || ALTURA_MIN);
-  });
-})();
+// A alca que ajustava a altura do palco saiu junto com a divisao do painel:
+// palco e conversa nao dividem mais a mesma tela, entao nao ha espaco para
+// repartir entre os dois. A chave `naoconcordo.altura-palco` que ela guardava
+// deixou de ser lida.
 
 /// Conta ao servidor em que canal de voz este socket esta. E o que faz a lista
 /// de quem esta na chamada aparecer para quem ainda nao entrou — o LiveKit so
@@ -753,7 +737,7 @@ function announceVoice(roomId: string) {
 /// da chamada deixava a tela sendo publicada na sala antiga com o botao ja
 /// apagado, e a interface passava a mentir sobre o que estava no ar.
 async function sairDaChamada() {
-  ganhoAtual = null;
+  cadeiaAtual = null;
   pararPortao();
   portaoAberto = true;
   // O aviso de saida e o som ficam aqui porque o `Disconnected` da sala nao
@@ -771,8 +755,35 @@ async function sairDaChamada() {
   if (screenWindowOpen) { try { await closeScreenWindow(); } catch { /* ja fechou */ } }
   if (cameraWindowOpen) { try { await closeCameraWindow(); } catch { /* idem */ } }
   if (estava) { setStatus("fora da chamada", false); playLeave(); }
-  renderNavigation(); renderPeople(); updateCallControls();
+  // Sem chamada nao ha palco. `chamadaNaTela` ja devolveria falso com
+  // `voiceRoomId` vazio, mas deixar a marca ligada faria o palco reabrir
+  // sozinho na proxima chamada, sem ninguem ter clicado no canal.
+  olhandoAChamada = false;
+  // O painel e da chamada: com `voiceRoomId` ja vazio, isto o apaga.
+  renderNavigation(); renderPeople(); updateCallControls(); renderDj();
 }
+
+/// Abre o palco da chamada, indo ao servidor dela antes se for preciso.
+///
+/// O palco vive dentro do painel de um servidor. Mostrar sem trocar de servidor
+/// poria a chamada de um na tela do outro — o mesmo defeito que
+/// `syncStagePlacement` foi escrito para nao repetir.
+async function verAChamada() {
+  const dono = serverDaChamada();
+  if (!dono) return;
+  if (view !== "server" || currentServerId !== dono) await selectServer(dono);
+  olhandoAChamada = true;
+  // As tiles de quem esta so na voz so existem com o palco a mostra, entao
+  // desenhar de novo faz parte de abrir.
+  renderCameras(); renderNavigation();
+}
+
+/// Fecha o palco e devolve o canal de texto que estava aberto.
+function fecharPalco() {
+  olhandoAChamada = false;
+  renderCameras(); renderNavigation();
+}
+
 async function toggleVoice(id: string) {
   const mesmoCanal = voiceRoomId === id && (room?.state === "connected" || room?.state === "connecting");
   await sairDaChamada();
@@ -1197,7 +1208,10 @@ function setMode() {
   messageForm.classList.toggle("hidden", isDm || semComposer);
   dmForm.classList.toggle("hidden", !isDm);
   byId("fingerprint-button").classList.toggle("hidden", !isDm);
-  byId("stage").classList.toggle("hidden", isDm || !byId("stage").children.length);
+  // Quem decide a visibilidade do palco e `syncStagePlacement`, num lugar so:
+  // a regra passou a ser "o canal de voz esta selecionado", e nao "ha tiles
+  // dentro", e duas regras diferentes para o mesmo elemento se contradiziam.
+  syncStagePlacement();
   // A lista da direita mostra quem esta no servidor. Na area de amigos nao ha
   // servidor, e ela repetia a lista da esquerda; sem ela a conversa ganha a
   // largura de volta. Dentro de um servidor continua onde estava.
@@ -1283,6 +1297,7 @@ function connectChat() {
       friendship?: Friendship; username?: string; envelope?: Envelope; online?: boolean;
       invite?: ServerInvite; inviteId?: string; accepted?: boolean; server?: ServerInfo; rooms?: RoomInfo[]; role?: ServerRole; serverId?: string;
       users?: string[];
+      estado?: DjEstado; texto?: string;
     };
     if (payload.type === "welcome") { history = payload.messages || []; renderMessages(); }
     if (payload.type === "message" && payload.message) {
@@ -1376,6 +1391,14 @@ function connectChat() {
       else voicePresence.delete(payload.roomId);
       renderNavigation();
     }
+    if (payload.type === "djEstado" && payload.roomId && payload.estado) {
+      djEstados.set(payload.roomId, payload.estado);
+      renderDj();
+    }
+    // Resposta do DJ a um comando que esta pessoa mandou: "nao achei", "entre
+    // num canal de voz". Passa como aviso, e nao como mensagem, para nao encher
+    // a conversa de resposta de robo.
+    if (payload.type === "djAviso" && payload.texto) showToast(payload.texto);
     if (payload.type === "membersChanged" && payload.serverId === currentServerId) void loadServerMembers();
     if (payload.type === "roleChanged" && payload.serverId && payload.role) {
       roles[payload.serverId] = payload.role;
@@ -2117,7 +2140,7 @@ async function connectVoice() {
     // Entrar num canal de voz ja abre o microfone, como no Discord.
     try {
       await next.localParticipant.setMicrophoneEnabled(true, voz.opcoesDeCaptura());
-      await instalarGanho();
+      await instalarCadeia();
       micEnabled = true; micButton.classList.add("active"); setIcon(micButton, "mic");
     } catch {
       micEnabled = false; micButton.classList.remove("active"); setIcon(micButton, "mic-off");
@@ -2128,54 +2151,69 @@ async function connectVoice() {
     await unlockAudio(next);
     await applySavedDevices(next);
     void reiniciarPortao();
-    // Entrar na chamada mostra quem esta nela; esconder e escolha, e o padrao
-    // nao pode ser a tela vazia de quem acabou de entrar.
-    palcoDaChamada = true;
+    // Entrar na chamada abre o palco: clicar no canal de voz foi o pedido de
+    // ver a chamada, e parar no canal de texto obrigaria a clicar de novo no
+    // mesmo lugar. Fechar e escolha, e sai em qualquer canal de texto.
+    olhandoAChamada = true;
     applyAllVolumes();
-    renderPeople(); renderNavigation();
+    // `renderCameras` junto: o evento `Connected` pode ter passado antes desta
+    // linha, e nesse caso ele desenhou o palco com a marca ainda desligada — ou
+    // seja, sem as tiles de quem esta so na voz. O palco abriria vazio e so
+    // encheria no proximo evento da sala.
+    renderPeople(); renderCameras(); renderNavigation();
+    // Pede a fila ao entrar: o bot so avisa quando algo muda, entao quem chega
+    // no meio de uma musica veria painel vazio ate a proxima trocar.
+    if (temDj) void mandarAoDj("/fila");
   } catch (error) {
     voiceRoomId = ""; renderNavigation();
     setStatus("erro de conexão", false);
     showToast(error instanceof Error ? error.message : "Não foi possível conectar ao canal de voz.");
   }
 }
-/// Amplificador vivo, ou `null` quando o microfone esta fechado.
-let ganhoAtual: voz.GanhoDoMicrofone | null = null;
+/// Cadeia viva, ou `null` quando o microfone esta fechado ou vai cru.
+let cadeiaAtual: voz.CadeiaDoMicrofone | null = null;
 
-/// Poe ou tira o amplificador da faixa publicada, conforme o volume escolhido.
+/// Poe ou tira a cadeia de audio da faixa publicada.
 ///
-/// Acima de 100% o ganho vem daqui, e nao do Windows: o sistema so oferece o
-/// que a placa entrega, e microfone de fone costuma parar baixo demais.
+/// Ela existe por dois motivos, e basta um: o volume acima de 100%, que o
+/// Windows nao da porque so oferece o que a placa entrega, e o RNNoise, que
+/// limpa o ruido de fundo melhor que o supressor do WebView.
 ///
-/// **Em 100% nao ha processador nenhum.** Quem nunca mexeu no controle — a
-/// maioria — segue com o caminho de audio que sempre teve, sem uma peca a mais
-/// entre o microfone e a chamada.
-async function instalarGanho() {
+/// **Sem nenhum dos dois nao ha processador nenhum.** Quem nunca mexeu nesses
+/// controles — a maioria — segue com o caminho de audio que sempre teve, sem uma
+/// peca a mais entre o microfone e a chamada.
+async function instalarCadeia() {
   const faixa = room?.localParticipant.audioTrackPublications.values().next().value?.track;
   if (!faixa) return;
   const desejado = voz.lerGanho();
 
-  if (desejado === 100) {
-    if (ganhoAtual) {
-      ganhoAtual = null;
+  if (desejado === 100 && !voz.comRnnoise()) {
+    if (cadeiaAtual) {
+      cadeiaAtual = null;
       try { await faixa.stopProcessor(); } catch { /* ja saiu */ }
     }
     return;
   }
-  if (ganhoAtual) { ganhoAtual.definir(desejado); return; }
+  // Com a cadeia de pe, mudar o volume e so mexer no no; ela so e refeita
+  // quando o no de ganho nem existia, que e o caso de sair dos 100%.
+  if (cadeiaAtual) {
+    if (cadeiaAtual.definir(desejado)) return;
+    cadeiaAtual = null;
+    try { await faixa.stopProcessor(); } catch { /* ja saiu */ }
+  }
 
   try {
-    const amplificador = new voz.GanhoDoMicrofone();
-    await faixa.setProcessor(amplificador as never);
-    ganhoAtual = amplificador;
+    const cadeia = new voz.CadeiaDoMicrofone();
+    await faixa.setProcessor(cadeia as never);
+    cadeiaAtual = cadeia;
   } catch (erro) {
-    // Sem o amplificador a chamada continua no volume do sistema, que e como
-    // era antes deste controle existir. Tirar o processador pela metade e o
-    // que garante que a faixa volte a ser a crua.
-    ganhoAtual = null;
+    // Sem a cadeia a chamada continua com o microfone como o Windows entrega,
+    // que e como era antes destes controles existirem. Tirar o processador pela
+    // metade e o que garante que a faixa volte a ser a crua.
+    cadeiaAtual = null;
     try { await faixa.stopProcessor(); } catch { /* nem chegou a entrar */ }
-    console.warn("[voz] amplificador indisponivel", erro);
-    showToast("Não foi possível amplificar o microfone; ele vai no volume do sistema.");
+    console.warn("[voz] cadeia do microfone indisponivel", erro);
+    showToast("Não foi possível tratar o microfone; ele vai como o Windows entrega.");
   }
 }
 
@@ -2498,7 +2536,7 @@ async function definirMicrofone(ligado: boolean) {
   try {
     micEnabled = ligado;
     await room.localParticipant.setMicrophoneEnabled(ligado, voz.opcoesDeCaptura());
-    if (ligado) await instalarGanho();
+    if (ligado) await instalarCadeia();
     // A faixa nasce aberta; o portao decide se ela continua assim.
     void reiniciarPortao();
     micButton.classList.toggle("active", micEnabled);
@@ -2690,7 +2728,7 @@ function attachTrack(track: RemoteTrack, participant: RemoteParticipant) {
     // direto da placa, e a copia que volta do servidor chega atrasada — as duas
     // juntas soam como eco. O video continua voltando, que e a previa.
     if (isScreenParticipant(participant) && key(who) === key(session?.username || "")) return;
-    const audio = track.attach();
+    const audio = anexar(track);
     audio.id = "audio-" + track.sid;
     audio.dataset.naoconcordoAudio = "true";
     audio.dataset.who = who;
@@ -2704,7 +2742,7 @@ function attachTrack(track: RemoteTrack, participant: RemoteParticipant) {
     void audio.play().catch(() => { /* a ronda abaixo tenta de novo */ });
   } else if (track.source === Track.Source.ScreenShare) {
     attachVideo(track, who);
-    if (track.sid) telasVistas.set(track.sid, { sid: track.sid, label: who, attach: () => track.attach() });
+    if (track.sid) telasVistas.set(track.sid, { sid: track.sid, label: who, attach: () => track.attach(), detach: media => track.detach(media) });
     renderCameraMini();
   } else if (track.source === Track.Source.Camera) {
     addCamera(track, who, false);
@@ -2720,7 +2758,42 @@ function attachLocalPublication(publication: LocalTrackPublication) {
 // ------------------------------------------------------------ cameras
 // As faixas de camera ficam num registro proprio para poderem ser redesenhadas
 // em qualquer container: o painel do app ou a janela separada.
-type CameraTrack = { sid: string; label: string; who: string; muted: boolean; attach: () => HTMLMediaElement };
+/// Como soltar cada elemento de midia que o LiveKit nos entregou.
+///
+/// **`attach()` nao e de graca.** Cada chamada cria um `<video>` ou `<audio>`
+/// novo e o guarda numa lista dentro da propria faixa. Tirar o elemento do DOM
+/// nao o tira dessa lista: ele continua preso ao fluxo, continua decodificando e
+/// nunca e recolhido. Como o palco e redesenhado a cada entrada, saida, mudo e
+/// troca de quem fala, isso virava um elemento vivo a mais por camera **por
+/// redesenho** — memoria subindo sozinha durante a chamada.
+///
+/// `WeakMap` porque a chave e o proprio elemento: quando ele morre, a anotacao
+/// morre junto, sem lista nossa para limpar.
+const comoSoltar = new WeakMap<HTMLMediaElement, () => void>();
+
+/// Anexa uma faixa e anota como solta-la depois.
+function anexar(faixa: { attach: () => HTMLMediaElement; detach: (media: HTMLMediaElement) => void }) {
+  const media = faixa.attach();
+  comoSoltar.set(media, () => faixa.detach(media));
+  return media;
+}
+
+/// Solta a midia deste pedaco de tela. Chamar **antes** de tira-lo do DOM.
+///
+/// Sem `srcObject = null` o elemento ainda segura o `MediaStream` mesmo depois
+/// de solto pelo LiveKit, e o recolhedor de lixo nao encosta nele.
+function soltarMidia(no: Element | null | undefined) {
+  if (!no) return;
+  const midias = [no, ...no.querySelectorAll("video, audio")];
+  for (const media of midias) {
+    if (!(media instanceof HTMLMediaElement)) continue;
+    comoSoltar.get(media)?.();
+    comoSoltar.delete(media);
+    media.srcObject = null;
+  }
+}
+
+type CameraTrack = { sid: string; label: string; who: string; muted: boolean; attach: () => HTMLMediaElement; detach: (media: HTMLMediaElement) => void };
 
 /// As telas que estao sendo assistidas, para o quadradinho poder mostrar uma.
 ///
@@ -2728,7 +2801,7 @@ type CameraTrack = { sid: string; label: string; who: string; muted: boolean; at
 /// so o palco as desenha. O quadradinho precisa desenhar a mesma faixa noutro
 /// lugar, e procurar `<video>` dentro do DOM do palco para roubar de la seria
 /// prender um ao outro.
-type TelaAssistida = { sid: string; label: string; attach: () => HTMLMediaElement };
+type TelaAssistida = { sid: string; label: string; attach: () => HTMLMediaElement; detach: (media: HTMLMediaElement) => void };
 const telasVistas = new Map<string, TelaAssistida>();
 const cameras = new Map<string, CameraTrack>();
 
@@ -2756,11 +2829,11 @@ function updateSpeakingStyles() {
   });
 }
 
-function addCamera(track: { sid?: string; attach: () => HTMLMediaElement }, label: string, isLocal: boolean) {
+function addCamera(track: { sid?: string; attach: () => HTMLMediaElement; detach: (media: HTMLMediaElement) => void }, label: string, isLocal: boolean) {
   if (!track.sid) return;
   cameras.set(track.sid, {
     sid: track.sid, who: label, label: isLocal ? label + " (você)" : label,
-    muted: isLocal, attach: () => track.attach(),
+    muted: isLocal, attach: () => track.attach(), detach: media => track.detach(media),
   });
   renderCameras();
 }
@@ -2799,7 +2872,7 @@ function cameraTile(entry: CameraTrack) {
   tile.id = "cam-" + entry.sid;
   tile.className = "track-tile";
   tile.dataset.who = entry.who;
-  const media = entry.attach();
+  const media = anexar(entry);
   if (media instanceof HTMLVideoElement) {
     media.autoplay = true; media.playsInline = true; media.muted = entry.muted;
   }
@@ -2884,6 +2957,9 @@ function renderCameras() {
     ...stage.querySelectorAll('[id^="voz-"]'),
     byId("camera-hidden-note"),
   ]) {
+    // Soltar antes de remover: e aqui que a tile de camera de cada redesenho
+    // deixava para tras um `<video>` vivo, preso a faixa para sempre.
+    soltarMidia(antiga);
     if (antiga) antiga.remove();
   }
   const todas = [...cameras.values()];
@@ -2894,7 +2970,7 @@ function renderCameras() {
 
   // Quem esta na chamada e nao aparece com camera entra com a foto. Assim o
   // palco mostra a chamada inteira, e nao so quem ligou a webcam.
-  if (chamadaNaTela() && palcoDaChamada) {
+  if (chamadaNaTela()) {
     const comCamera = new Set(visiveis.map(entry => key(entry.who)));
     for (const nome of callParticipants()) {
       if (comCamera.has(key(nome))) continue;
@@ -3055,7 +3131,7 @@ function renderCameraMini() {
     return;
   }
 
-  let escolhida: { sid: string; label: string; who?: string; attach: () => HTMLMediaElement };
+  let escolhida: { sid: string; label: string; who?: string; attach: () => HTMLMediaElement; detach: (media: HTMLMediaElement) => void };
   if (temTela) {
     // Tela ganha da camera: quem saiu do servidor no meio de uma transmissao
     // quer continuar vendo a transmissao, nao o rosto de quem narra.
@@ -3069,7 +3145,11 @@ function renderCameraMini() {
   if (escolhida.sid === miniAtual) return;
   miniAtual = escolhida.sid;
 
-  const media = escolhida.attach();
+  // A faixa anterior sai antes de a nova entrar: o quadradinho troca de rosto a
+  // cada mudanca de quem fala, e `replaceChildren` sozinho so tirava o elemento
+  // da tela — ele continuava preso a faixa, decodificando.
+  soltarMidia(caixa);
+  const media = anexar(escolhida);
   if (media instanceof HTMLVideoElement) {
     media.autoplay = true; media.playsInline = true; media.muted = true;
   }
@@ -3080,7 +3160,10 @@ function renderCameraMini() {
   voltar.className = "camera-mini-voltar";
   voltar.title = "Voltar para a chamada";
   voltar.append(icon("theater", "ic-sm"));
-  voltar.onclick = () => { const alvo = serverDaChamada(); if (alvo) selectServer(alvo); };
+  // Abre o palco, e nao so o servidor da chamada: desde que o palco virou tela
+  // propria, chegar ao servidor certo deixa a pessoa no canal de texto, olhando
+  // exatamente para o lugar de onde ela pediu para sair.
+  voltar.onclick = () => void verAChamada();
   caixa.replaceChildren(media, nome, voltar);
   posicionarCameraMini();
   caixa.oncontextmenu = event => {
@@ -4602,7 +4685,10 @@ function trechoDestacado(texto: string, termo: string): DocumentFragment {
 /// Leva ate a mensagem: troca de canal se precisar e pisca a linha.
 async function irAteMensagem(mensagem: ChatMessage) {
   byId<HTMLDialogElement>("busca-dialog").close();
-  if (mensagem.roomId !== currentRoomId) {
+  // `olhandoAChamada` entra na conta porque o palco cobre a conversa inteira:
+  // achar uma mensagem do canal que ja estava aberto nao adiantava nada se o
+  // que esta na tela e a chamada.
+  if (mensagem.roomId !== currentRoomId || olhandoAChamada) {
     const sala = rooms.find(item => item.id === mensagem.roomId);
     if (sala && sala.serverId !== currentServerId) await selectServer(sala.serverId);
     await selectRoom(mensagem.roomId);
@@ -4787,8 +4873,8 @@ byId<HTMLInputElement>("voz-ganho").addEventListener("input", event => {
   voz.guardarGanho(valor);
   pintarGanho();
   // Ao vivo: quem esta na chamada nao ouve corte enquanto a barra e arrastada.
-  // `instalarGanho` tambem poe e tira o processador ao cruzar os 100%.
-  void instalarGanho();
+  // `instalarCadeia` tambem poe e tira o processador ao cruzar os 100%.
+  void instalarCadeia();
 });
 byId<HTMLInputElement>("voz-limiar").addEventListener("input", event => {
   voz.guardarLimiar(Number((event.currentTarget as HTMLInputElement).value));
@@ -4800,8 +4886,21 @@ for (const [id, chave] of [["filtro-ruido", "ruido"], ["filtro-eco", "eco"], ["f
       ...voz.lerFiltros(),
       [chave]: (event.currentTarget as HTMLInputElement).checked,
     });
+    if (chave === "ruido") pintarMotorDeRuido();
     showToast("Vale no próximo microfone aberto.");
   });
+}
+byId<HTMLSelectElement>("filtro-ruido-motor").addEventListener("change", event => {
+  const motor = (event.currentTarget as HTMLSelectElement).value === "rnnoise" ? "rnnoise" : "webrtc";
+  voz.guardarFiltros({ ...voz.lerFiltros(), motor });
+  // Nao vale ao vivo de proposito: trocar de motor muda o que se pede ao
+  // Windows na abertura do microfone, e so reabrindo ele o pedido novo vale.
+  showToast("Vale no próximo microfone aberto.");
+});
+
+/// Esconde a escolha de motor quando nao ha o que reduzir.
+function pintarMotorDeRuido() {
+  byId("filtro-ruido-motor-linha").hidden = !voz.lerFiltros().ruido;
 }
 
 // --------------------------------------------------------- atalhos globais
@@ -4930,6 +5029,8 @@ function pintarConfiguracoesDeVoz() {
   pintarGanho();
   const filtros = voz.lerFiltros();
   byId<HTMLInputElement>("filtro-ruido").checked = filtros.ruido;
+  byId<HTMLSelectElement>("filtro-ruido-motor").value = filtros.motor;
+  pintarMotorDeRuido();
   byId<HTMLInputElement>("filtro-eco").checked = filtros.eco;
   byId<HTMLInputElement>("filtro-ganho").checked = filtros.ganho;
   pintarLimiar();
@@ -4939,7 +5040,7 @@ byId<HTMLSelectElement>("device-mic").addEventListener("change", event => void a
 byId<HTMLSelectElement>("device-cam").addEventListener("change", event => void applyDevice("videoinput", (event.target as HTMLSelectElement).value));
 byId<HTMLSelectElement>("device-out").addEventListener("change", event => void applyDevice("audiooutput", (event.target as HTMLSelectElement).value));
 navigator.mediaDevices?.addEventListener("devicechange", () => { if (byId<HTMLDialogElement>("devices-dialog").open) void fillDeviceLists(); });
-function attachVideo(track: { sid?: string; attach: () => HTMLMediaElement }, labelText: string, muted = false) {
+function attachVideo(track: { sid?: string; attach: () => HTMLMediaElement; detach: (media: HTMLMediaElement) => void }, labelText: string, muted = false) {
   if (!track.sid || document.getElementById("track-" + track.sid)) return;
   const tile = document.createElement("div");
   tile.id = "track-" + track.sid;
@@ -4948,7 +5049,7 @@ function attachVideo(track: { sid?: string; attach: () => HTMLMediaElement }, la
   // tile de tela nao e o rosto de ninguem. Sem a marca, `updateSpeakingStyles`
   // nao a alcanca.
   
-  const media = track.attach();
+  const media = anexar(track);
   if (media instanceof HTMLVideoElement) { media.autoplay = true; media.playsInline = true; media.muted = muted; }
   const label = document.createElement("label");
   label.textContent = labelText;
@@ -5028,6 +5129,10 @@ function offerScreen(sid: string, who: string) {
   card.append(titulo, botao);
   stage.append(card);
   syncStagePlacement();
+  // O convite mora no palco, e o palco agora pode estar fechado — a pessoa
+  // estaria lendo um canal sem nunca saber que alguem comecou a transmitir.
+  // O aviso leva ate la; assinar continua sendo o clique em "Assistir".
+  if (!chamadaNaTela()) showToast(who + " está compartilhando a tela", () => void verAChamada());
 }
 /// Assina ou cancela a assinatura de uma transmissao especifica.
 ///
@@ -5128,8 +5233,11 @@ function detachTrack(sid?: string) {
   // a pessoa voltasse com um `sid` reaproveitado, `rotearReforco` acharia que o
   // desvio ja estava montado e nao o refaria.
   reforcadas.delete(sid);
-  document.getElementById("track-" + sid)?.remove();
-  document.getElementById("audio-" + sid)?.remove();
+  for (const id of ["track-" + sid, "audio-" + sid]) {
+    const no = document.getElementById(id);
+    soltarMidia(no);
+    no?.remove();
+  }
   // `syncStagePlacement` reconcilia o modo grande e a visibilidade do palco:
   // sair daqui na mao era o que deixava o palco em modo grande com a tile
   // grande ja removida.
@@ -5150,13 +5258,13 @@ const ehAudio = (url: string) => /\.(mp3|ogg|wav|m4a)(\?|#|$)/i.test(url);
 /// Cartao de previa de um link, montado pelo servidor.
 ///
 /// O servidor busca titulo, autor e miniatura e devolve enderecos **nossos**
-/// para a midia; nada aqui fala com o YouTube nem com o Twitter. Isso mantem a
-/// politica de conteudo da janela fechada na propria origem e evita avisar
-/// aqueles sites de que alguem leu a conversa.
+/// para a midia; nada aqui fala com o site de origem. Isso mantem a politica de
+/// conteudo da janela fechada na propria origem e evita avisar aquele site de
+/// que alguem leu a conversa.
 type CartaoDeLink = {
-  fonte: "youtube" | "twitter";
+  fonte: "youtube" | "twitter" | "instagram" | "tiktok" | "site";
   titulo: string; autor: string; texto: string;
-  imagem: string; video: string; link: string;
+  imagem: string; video: string; site: string; link: string;
 };
 
 /// O que o servidor ja respondeu, por endereco.
@@ -5178,12 +5286,19 @@ async function montarCartao(url: string, into: HTMLElement) {
   // cartao entraria num pedaco de tela que ja saiu.
   if (!into.isConnected) return;
 
-  const cartao = document.createElement("a");
+  const cartao = document.createElement("div");
   cartao.className = "cartao-link cartao-" + dados.fonte;
-  cartao.href = dados.link;
-  cartao.onclick = evento => {
-    evento.preventDefault();
-    void abrirExterno(dados!.link).catch(() => showToast("Não foi possível abrir o link."));
+  /// Abre no navegador. O `<a>` continua existindo para o endereco aparecer ao
+  /// passar o mouse e para o menu de contexto ter o que copiar.
+  const paraFora = (classe: string) => {
+    const a = document.createElement("a");
+    a.className = classe;
+    a.href = dados!.link;
+    a.onclick = evento => {
+      evento.preventDefault();
+      void abrirExterno(dados!.link).catch(() => showToast("Não foi possível abrir o link."));
+    };
+    return a;
   };
 
   if (dados.imagem) {
@@ -5192,11 +5307,23 @@ async function montarCartao(url: string, into: HTMLElement) {
     img.alt = "";
     // A imagem vem autenticada, como os anexos: `<img src>` nao manda cabecalho.
     void previaDeGif(dados.imagem).then(endereco => { img.src = endereco; }).catch(() => img.remove());
-    cartao.append(img);
+    // Com video, a capa e o cartaz do play e nao leva para fora: quem clicou na
+    // imagem de um video quer ver o video, nao trocar de aplicativo.
+    const capa = dados.video ? document.createElement("div") : paraFora("cartao-capa");
+    capa.classList.add("cartao-capa");
+    capa.append(img);
+    if (dados.video) capa.append(botaoDePlay(dados.video, capa));
+    cartao.append(capa);
+  } else if (dados.video) {
+    // Video sem capa: o proprio player entra ja visivel, que e o unico jeito de
+    // sinalizar que ali tem algo a tocar.
+    const capa = document.createElement("div");
+    capa.className = "cartao-capa";
+    capa.append(botaoDePlay(dados.video, capa));
+    cartao.append(capa);
   }
 
-  const texto = document.createElement("div");
-  texto.className = "cartao-texto";
+  const texto = paraFora("cartao-texto");
   const titulo = document.createElement("strong");
   titulo.textContent = dados.titulo;
   texto.append(titulo);
@@ -5211,8 +5338,50 @@ async function montarCartao(url: string, into: HTMLElement) {
     corpo.textContent = dados.texto;
     texto.append(corpo);
   }
+  if (dados.site) {
+    const marca = document.createElement("span");
+    marca.className = "cartao-dominio";
+    marca.textContent = dados.site;
+    texto.append(marca);
+  }
   cartao.append(texto);
   into.append(cartao);
+}
+
+/// Botao que troca a capa pelo video, baixando-o na hora do clique.
+///
+/// **Nada toca sozinho.** Uma conversa com dez links viraria dez videos
+/// carregando de uma vez, cada um passando pelo nosso servidor — e quem so
+/// queria ler as mensagens pagaria a banda de todos eles.
+function botaoDePlay(caminho: string, capa: HTMLElement) {
+  const play = document.createElement("button");
+  play.type = "button";
+  play.className = "cartao-play";
+  play.setAttribute("aria-label", "Tocar o vídeo");
+  play.onclick = async evento => {
+    evento.preventDefault();
+    play.disabled = true;
+    play.classList.add("carregando");
+    try {
+      // Pelo mesmo caminho autenticado da miniatura: `<video src>` tambem nao
+      // manda cabecalho de autorizacao.
+      const endereco = await previaDeGif(caminho);
+      const video = document.createElement("video");
+      video.src = endereco;
+      video.controls = true;
+      video.autoplay = true;
+      video.loop = true;
+      // Sem isto o WebView recusa o `autoplay` e o clique nao vira nada. O som
+      // volta no controle do proprio player, a um clique de distancia.
+      video.muted = true;
+      capa.replaceChildren(video);
+    } catch {
+      play.disabled = false;
+      play.classList.remove("carregando");
+      showToast("Não foi possível tocar esse vídeo.");
+    }
+  };
+  return play;
 }
 
 /// Endereco de player para links que sao pagina, nao arquivo.
@@ -5578,9 +5747,9 @@ function renderLinkEmbeds(texto: string, into: HTMLElement) {
         fora.onclick = () => void abrirExterno(url).catch(() => showToast("Nao foi possivel abrir o link."));
         box.append(quadro, fora);
       } else {
-        // Sem player conhecido: pede o cartao ao servidor. Ele responde vazio
-        // para link que nao tem previa, que e a maioria — por isso a caixa so
-        // entra na tela depois da resposta.
+        // Sem player conhecido: pede o cartao ao servidor, que le as marcas
+        // `og:` de qualquer pagina. Ele responde vazio quando nao ha nada a
+        // mostrar — por isso a caixa so entra na tela depois da resposta.
         void montarCartao(url, into);
         continue;
       }
@@ -5597,6 +5766,38 @@ const blobCache = new Map<string, string>();
 /// O conteudo dos anexos ja baixados. Separado do `blobCache`, que guarda so o
 /// endereco `blob:` para as tags de imagem e video.
 const dadosCache = new Map<string, Blob>();
+
+/// Quanto de anexo baixado o aplicativo guarda antes de comecar a esquecer.
+///
+/// **Cache sem teto e vazamento com outro nome.** Antes destes limites, rolar um
+/// canal cheio de imagem carregava cada uma para a memoria e nao devolvia
+/// nenhuma ate fechar a janela — e um anexo pode ter 50 MB.
+///
+/// Esquecer custa um download a mais quando a pessoa volta ao mesmo ponto, que e
+/// barato: o servidor esta na mesma casa e o arquivo ja esta no cache do disco.
+const TETO_DE_ANEXOS = 128 * 1024 * 1024;
+/// Idem para miniatura e video de cartao de previa. Menor porque e material de
+/// passagem: ninguem volta para rever a capa de um link de tres dias atras.
+const TETO_DE_PREVIAS = 64 * 1024 * 1024;
+
+/// Tira os mais antigos ate o cache caber no teto.
+///
+/// `Map` percorre na ordem em que as chaves entraram, entao a primeira e a mais
+/// antiga. Nao e um LRU de verdade, e nao precisa ser — o que faltava era ter
+/// fim, nao ter a politica perfeita de quem sai primeiro.
+function podarCache<T>(mapa: Map<string, T>, tamanho: (valor: T) => number, teto: number, aoTirar: (chave: string, valor: T) => void) {
+  let total = 0;
+  for (const valor of mapa.values()) total += tamanho(valor);
+  while (total > teto && mapa.size > 1) {
+    const primeira = mapa.keys().next();
+    if (primeira.done) return;
+    const saindo = mapa.get(primeira.value);
+    if (saindo === undefined) return;
+    total -= tamanho(saindo);
+    mapa.delete(primeira.value);
+    aoTirar(primeira.value, saindo);
+  }
+}
 
 async function uploadFile(file: File): Promise<StoredFile> {
   if (file.size > MAX_UPLOAD) throw new Error(file.name + " passa de 50 MB.");
@@ -5643,6 +5844,13 @@ async function arquivoBlob(id: string): Promise<Blob> {
   if (!response.ok) throw new Error("Arquivo indisponível.");
   const dados = await response.blob();
   dadosCache.set(id, dados);
+  // O endereco `blob:` sai junto com os bytes. Revogar e obrigatorio: enquanto
+  // ele existe, o navegador segura o conteudo inteiro, mesmo que ninguem mais
+  // guarde o `Blob` — soltar so o `dadosCache` nao liberaria nada.
+  podarCache(dadosCache, blob => blob.size, TETO_DE_ANEXOS, chave => {
+    const endereco = blobCache.get(chave);
+    if (endereco) { URL.revokeObjectURL(endereco); blobCache.delete(chave); }
+  });
   return dados;
 }
 
@@ -5672,6 +5880,138 @@ async function queueFiles(list: FileList | File[]) {
     } catch (error) { showToast(error instanceof Error ? error.message : "Falha no envio."); }
   }
 }
+// ----------------------------------------------------------------------- dj
+//
+// O painel mostra o que toca no **canal de voz em que a pessoa esta**, e nao no
+// canal de texto aberto: a musica sai na chamada, e e nela que os comandos
+// mexem. Fora de chamada nao ha painel, porque nao haveria o que comandar.
+//
+// Nada de capa do video aqui de proposito. A miniatura mora no YouTube, e
+// carregar imagem de la avisa o YouTube de quem esta na sala ouvindo o que — a
+// mesma razao pela qual o cartao de previa passa a imagem pelo nosso servidor.
+
+type DjFaixa = { titulo: string; autor: string; duracao: number; link: string; quem: string };
+type DjEstado = { roomId: string; tocando: DjFaixa | null; decorrido: number; pausado: boolean; fila: DjFaixa[] };
+
+/// Este servidor tem bot DJ? Sem ele, `/tocar` e so uma mensagem com barra.
+let temDj = false;
+/// A ultima fila que o servidor contou, por canal de voz.
+const djEstados = new Map<string, DjEstado>();
+/// Conta os segundos entre um aviso e outro: o bot so fala quando algo muda, e
+/// sem isto a barra de progresso ficaria parada durante a musica inteira.
+let djRelogio = 0;
+
+function relogioDeDj(estado: DjEstado | undefined) {
+  const andando = Boolean(estado?.tocando) && !estado?.pausado;
+  if (andando && !djRelogio) {
+    djRelogio = window.setInterval(() => {
+      const atual = djEstados.get(voiceRoomId);
+      if (!atual?.tocando || atual.pausado) return;
+      atual.decorrido += 1;
+      renderDj();
+    }, 1000);
+  }
+  if (!andando && djRelogio) { window.clearInterval(djRelogio); djRelogio = 0; }
+}
+
+/// `m:ss`, que e como se le duracao de musica.
+function comoRelogio(segundos: number) {
+  const inteiros = Math.max(0, Math.round(segundos));
+  return Math.floor(inteiros / 60) + ":" + String(inteiros % 60).padStart(2, "0");
+}
+
+async function mandarAoDj(texto: string) {
+  if (!voiceRoomId) { showToast("Entre num canal de voz."); return; }
+  try {
+    await api("/api/dj/comando", { method: "POST", body: JSON.stringify({ roomId: voiceRoomId, texto }) });
+  } catch (erro) {
+    showToast(erro instanceof Error ? erro.message : "O DJ não atendeu.");
+  }
+}
+
+function renderDj() {
+  const painel = byId("dj-panel");
+  const estado = voiceRoomId ? djEstados.get(voiceRoomId) : undefined;
+  relogioDeDj(estado);
+  // Painel some quando nao ha nada tocando **e** a fila esta vazia: uma faixa em
+  // cartaz sem fila continua valendo painel.
+  if (!temDj || !estado || (!estado.tocando && !estado.fila.length)) {
+    painel.classList.add("hidden");
+    painel.replaceChildren();
+    return;
+  }
+  painel.classList.remove("hidden");
+
+  const agora = document.createElement("div");
+  agora.className = "dj-agora";
+  const info = document.createElement("div");
+  info.className = "dj-info";
+
+  const titulo = document.createElement("strong");
+  titulo.textContent = estado.tocando ? estado.tocando.titulo : "Nada tocando";
+  info.append(titulo);
+
+  if (estado.tocando) {
+    const linha = document.createElement("span");
+    linha.className = "dj-autor";
+    const partes = [estado.tocando.autor, estado.tocando.quem && "pedido por " + estado.tocando.quem].filter(Boolean);
+    linha.textContent = partes.join(" · ");
+    info.append(linha);
+
+    const barra = document.createElement("div");
+    barra.className = "dj-barra";
+    const cheio = document.createElement("span");
+    // Sem duracao conhecida (transmissao ao vivo, arquivo solto) a barra fica
+    // vazia em vez de mentir uma posicao.
+    const total = estado.tocando.duracao;
+    cheio.style.width = total > 0 ? Math.min(100, (estado.decorrido / total) * 100) + "%" : "0";
+    barra.append(cheio);
+    info.append(barra);
+
+    const tempo = document.createElement("span");
+    tempo.className = "dj-tempo";
+    tempo.textContent = comoRelogio(estado.decorrido) + (total > 0 ? " / " + comoRelogio(total) : "");
+    info.append(tempo);
+  }
+  agora.append(info);
+
+  const acoes = document.createElement("div");
+  acoes.className = "dj-acoes";
+  for (const [rotulo, comando, titulo] of [
+    [estado.pausado ? "Continuar" : "Pausar", "/pausar", "Pausar ou continuar"],
+    ["Pular", "/pular", "Ir para a próxima da fila"],
+    ["Parar", "/parar", "Esvaziar a fila e tirar o DJ da chamada"],
+  ] as const) {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.className = "ghost-button dj-botao";
+    botao.textContent = rotulo;
+    botao.title = titulo;
+    botao.disabled = !estado.tocando;
+    botao.onclick = () => void mandarAoDj(comando);
+    acoes.append(botao);
+  }
+  agora.append(acoes);
+  painel.replaceChildren(agora);
+
+  if (estado.fila.length) {
+    const lista = document.createElement("ol");
+    lista.className = "dj-fila";
+    for (const faixa of estado.fila.slice(0, 8)) {
+      const item = document.createElement("li");
+      item.textContent = faixa.titulo + (faixa.quem ? " — " + faixa.quem : "");
+      lista.append(item);
+    }
+    if (estado.fila.length > 8) {
+      const resto = document.createElement("li");
+      resto.className = "dj-resto";
+      resto.textContent = "e mais " + (estado.fila.length - 8);
+      lista.append(resto);
+    }
+    painel.append(lista);
+  }
+}
+
 // --------------------------------------------------------------------- gifs
 // A busca vive no servidor: ele fala com o Tenor e devolve endereco proprio
 // para cada miniatura. Nada aqui conhece o endereco de la, e por isso a
@@ -5756,16 +6096,21 @@ function abrirSeletorDeGif(ancora: HTMLElement) {
 
 /// A miniatura vem autenticada e vira blob, pela mesma razao dos anexos:
 /// `<img src>` nao manda cabecalho de autorizacao.
-const gifCache = new Map<string, string>();
+/// O tamanho vai junto do endereco porque e por ele que o cache e podado: por
+/// aqui passam tanto miniatura de alguns KB quanto o video de um cartao, que o
+/// servidor deixa chegar a 32 MB.
+const gifCache = new Map<string, { url: string; bytes: number }>();
 async function previaDeGif(caminho: string): Promise<string> {
   const pronto = gifCache.get(caminho);
-  if (pronto) return pronto;
+  if (pronto) return pronto.url;
   const resposta = await fetch(API + caminho, {
     headers: { Authorization: "Bearer " + (session?.token || "") },
   });
   if (!resposta.ok) throw new Error("miniatura indisponivel");
-  const url = URL.createObjectURL(await resposta.blob());
-  gifCache.set(caminho, url);
+  const dados = await resposta.blob();
+  const url = URL.createObjectURL(dados);
+  gifCache.set(caminho, { url, bytes: dados.size });
+  podarCache(gifCache, item => item.bytes, TETO_DE_PREVIAS, (_, item) => URL.revokeObjectURL(item.url));
   return url;
 }
 
@@ -6084,7 +6429,11 @@ function isScreenParticipant(participant: { identity: string; metadata?: string 
 
 /// Marca o canal e avisa, se a mensagem nao for do canal que esta aberto.
 function noteUnread(message: ChatMessage, fromMe: boolean) {
-  const olhando = view === "server" && mode === "room" && message.roomId === currentRoomId && document.hasFocus();
+  // Com o palco aberto o canal continua sendo o `currentRoomId`, mas ninguem
+  // esta lendo: a conversa esta atras da chamada. Contar como lido perdia a
+  // mensagem, que nao voltava a aparecer ao fechar o palco.
+  const olhando = view === "server" && mode === "room" && !olhandoAChamada
+    && message.roomId === currentRoomId && document.hasFocus();
   if (fromMe) return;
   // Ser citado avisa mesmo com o canal aberto na frente: e o ponto da mencao —
   // alguem quer sua atencao agora, nao quando voce rolar a conversa.
@@ -6120,6 +6469,10 @@ function clearUnread(roomId: string) {
 function updateUnreadTitle() {
   const total = unreadFriends.size + [...unreadRooms.values()].reduce((sum, count) => sum + count, 0);
   document.title = total ? "(" + (total > 99 ? "99+" : total) + ") naoconcordo" : "naoconcordo";
+  // Mesma contagem nos icones do sistema. Aqui e o unico ponto por onde ela
+  // passa, entao e aqui que o selo acompanha sem precisar de chamada em cada
+  // lugar que mexe nas nao lidas.
+  void atualizarSelo(total);
 }
 
 // ------------------------------------------------------- qualidade da tela
@@ -7347,7 +7700,9 @@ function esconderSecaoVazia(listaId: string, tem: boolean) {
 /// pararia de aparecer dentro dos grupos sem ninguem entender por que.
 function botaoDeTexto(item: RoomInfo) {
     const button = document.createElement("button");
-    button.className = "channel" + (mode === "room" && item.id === currentRoomId ? " active" : "");
+    // Com o palco aberto nenhum canal de texto esta sendo lido, entao nenhum
+    // pode aparecer aceso: o destaque iria para dois lugares ao mesmo tempo.
+    button.className = "channel" + (mode === "room" && !olhandoAChamada && item.id === currentRoomId ? " active" : "");
     button.append(icon("hash", "room-dot"), document.createTextNode(item.name));
     const pendentes = unreadRooms.get(item.id) || 0;
     const citacoes = mencoesPorSala.get(item.id) || 0;
@@ -7370,16 +7725,20 @@ function botaoDeTexto(item: RoomInfo) {
 /// Um canal de voz, mais a lista de quem esta dentro dele.
 function linhasDeVoz(item: RoomInfo): HTMLElement[] {
     const button = document.createElement("button");
-    button.className = "channel voice" + (item.id === voiceRoomId ? " active" : "");
+    // `active` diz "voce esta conectado aqui"; `olhando` diz "o palco deste
+    // canal esta na tela". Sao coisas diferentes: da para estar na chamada e
+    // lendo um canal de texto.
+    button.className = "channel voice"
+      + (item.id === voiceRoomId ? " active" : "")
+      + (olhandoAChamada && item.id === voiceRoomId ? " olhando" : "");
     button.append(icon("speaker", "room-dot"), document.createTextNode(item.name));
-    // Clicar no canal em que voce ja esta **nao** desconecta: mostra ou esconde
-    // o palco da chamada. Sair e o botao de desligar, que existe para isso e
-    // nao se aperta sem querer ao procurar quem esta na sala.
+    // Clicar no canal em que voce ja esta **nao** desconecta: abre o palco, e o
+    // clique de novo devolve o canal de texto. Sair e o botao de desligar, que
+    // existe para isso e nao se aperta sem querer ao procurar quem esta na sala.
     button.onclick = () => {
       if (item.id === voiceRoomId && (room?.state === "connected" || room?.state === "connecting")) {
-        palcoDaChamada = !palcoDaChamada;
-        void selectServer(item.serverId);
-        renderCameras();
+        if (olhandoAChamada) fecharPalco();
+        else void verAChamada();
         return;
       }
       void toggleVoice(item.id);
@@ -7698,6 +8057,7 @@ function initials(name: string) { return name.split(/\s+/).slice(0, 2).map(part 
 async function resume() { if (!session) return; try { await api("/api/session"); await enterApp(); } catch { saveSession(null); } }
 void resume();
 void decidirAberturaInicial();
+void prepararNotificacoes();
 bloquearRecarregar();
 byId("app-version").textContent = "v" + __APP_VERSION__;
 

@@ -1,0 +1,10 @@
+# O SDK de tempo real do LiveKit. Vem com binário pronto para linux/amd64, e é
+# por isso que este bot é Python: em Rust ele compilaria a libwebrtc junto.
+livekit>=0.17,<2
+aiohttp>=3.9
+PyJWT>=2.8
+
+# Sem versão fixa de propósito. O YouTube muda o que serve e o yt-dlp corre
+# atrás; travar a versão aqui garantiria que um dia o bot para e só volta com
+# alteração neste arquivo. Reconstruir a imagem é o conserto.
+yt-dlp

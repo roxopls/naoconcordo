@@ -25,6 +25,9 @@ services:
       # Busca de GIF. Opcionais: sem chave o botao nao aparece no aplicativo.
       GIF_PROVIDER: ${GIF_PROVIDER:-giphy}
       GIF_API_KEY: ${GIF_API_KEY:-}
+      # Bot DJ. Sem o segredo, `/tocar` volta a ser mensagem comum e o painel de
+      # fila nao aparece — o mesmo acordo da busca de GIF.
+      DJ_SECRET: ${DJ_SECRET:-}
       DATA_DIR: /app/data
       UPLOAD_DIR: /app/uploads
       UPLOAD_FALLBACK_DIR: /app/uploads-fallback
@@ -34,6 +37,26 @@ services:
       - /mnt/uploads/naoconcordo:/app/uploads
       - /mnt/storage/naoconcordo-uploads:/app/uploads-fallback
     depends_on: [livekit]
+
+  # O bot de musica. Processo separado porque o yt-dlp quebra toda vez que o
+  # YouTube muda alguma coisa, e o conserto e reconstruir esta imagem — nao uma
+  # versao nova do backend.
+  dj:
+    build: ../dj
+    container_name: naoconcordo-dj
+    restart: unless-stopped
+    # `host` como os outros: ele fala com o LiveKit e com o app pelo localhost,
+    # e a rota de controle dele escuta so em 127.0.0.1.
+    network_mode: host
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      # O LiveKit de dentro da maquina: o endereco publico daria a volta pela
+      # internet e dependeria do hairpin do roteador para voltar.
+      DJ_LIVEKIT_URL: ${DJ_LIVEKIT_URL:-ws://127.0.0.1:7880}
+      DJ_BACKEND_URL: ${DJ_BACKEND_URL:-http://127.0.0.1:3040}
+      DJ_SECRET: ${DJ_SECRET:-}
+    depends_on: [livekit, app]
 
   caddy:
     image: ghcr.io/caddybuilds/caddy-cloudflare:latest

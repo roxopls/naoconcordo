@@ -1,5 +1,6 @@
 mod salvar;
 mod screen;
+mod selo;
 mod uso;
 
 use tauri::menu::{Menu, MenuItem};
@@ -8,7 +9,7 @@ use tauri::{AppHandle, Manager, WindowEvent};
 
 /// Rotulo da janela principal. A segunda janela ("cameras") fecha de verdade;
 /// so a principal e que vai para a bandeja.
-const PRINCIPAL: &str = "main";
+pub(crate) const PRINCIPAL: &str = "main";
 
 /// Traz a janela de volta. `show` sozinho deixa ela atras das outras, e
 /// `unminimize` e preciso porque esconder uma janela minimizada guarda esse
@@ -46,12 +47,18 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // Aviso no canto da tela pela central do Windows. Sem este registro o
+        // pedido do cliente e recusado na ponte e o aplicativo cai no aviso
+        // interno — que so aparece para quem ja esta com a janela aberta, ou
+        // seja, exatamente para quem nao precisa dele.
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(screen::ShareState::default())
         .invoke_handler(tauri::generate_handler![
             uso::uso_de_recursos,
             salvar::salvar_em_downloads,
+            selo::selo_de_nao_lidas,
             screen::sources::screen_sources,
             screen::screen_border_diag,
             screen::screen_thumbnail,
@@ -77,7 +84,9 @@ pub fn run() {
             let abrir = MenuItem::with_id(app, "abrir", "Abrir naoconcordo", true, None::<&str>)?;
             let sair = MenuItem::with_id(app, "sair", "Sair", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&abrir, &sair])?;
-            let mut tray = TrayIconBuilder::new()
+            // Com identificador: o selo de nao lidas precisa achar a bandeja
+            // depois de pronta para trocar a imagem do icone.
+            let mut tray = TrayIconBuilder::with_id(selo::BANDEJA)
                 .tooltip("naoconcordo")
                 .menu(&menu)
                 // Sem isso o clique esquerdo abriria o menu, e o caminho curto

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "naoconcordo",
-  "version": "0.7.34",
+  "version": "0.7.35",
   "identifier": "br.com.naoconcordo.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http: https: ws: wss:; img-src 'self' data: blob: http: https:; media-src 'self' blob: mediastream: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src https://www.youtube-nocookie.com https://player.twitch.tv"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http: https: ws: wss:; img-src 'self' data: blob: http: https:; media-src 'self' blob: mediastream: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; frame-src https://www.youtube-nocookie.com https://player.twitch.tv"
     }
   },
   "plugins": {

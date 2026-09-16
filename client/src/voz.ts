@@ -12,8 +12,23 @@
 // justamente o que o worklet existe para evitar.
 import NIVEL_WORKLET from "./nivel.worklet.js?url&no-inline";
 
+// O supressor de ruido por rede neural. Mesmo motivo do `no-inline` acima: o
+// CSP recusa worklet vindo de `data:`.
+import { RnnoiseWorkletNode, loadRnnoise } from "@sapphi-red/web-noise-suppressor";
+import RNNOISE_WORKLET from "@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url&no-inline";
+import RNNOISE_WASM from "@sapphi-red/web-noise-suppressor/rnnoise.wasm?url";
+import RNNOISE_WASM_SIMD from "@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url";
+
 export type ModoVoz = "sempre" | "voz" | "ptt";
-export type Filtros = { ruido: boolean; eco: boolean; ganho: boolean };
+/// Quem reduz o ruido de fundo.
+///
+/// `webrtc` e o que o proprio WebView faz, de graca, dentro do `getUserMedia`.
+/// `rnnoise` e uma rede neural pequena que roda aqui, num `AudioWorklet`, entre
+/// o microfone e a chamada: ela distingue voz de ruido em vez de so cortar o que
+/// e constante, entao segura teclado mecanico, ventilador e cachorro ao fundo,
+/// que e onde o do WebView entrega os pontos.
+export type MotorDeRuido = "webrtc" | "rnnoise";
+export type Filtros = { ruido: boolean; eco: boolean; ganho: boolean; motor: MotorDeRuido };
 
 const MODO_KEY = "naoconcordo.voz.modo";
 const LIMIAR_KEY = "naoconcordo.voz.limiar";
@@ -37,17 +52,23 @@ export function guardarLimiar(valor: number) {
   localStorage.setItem(LIMIAR_KEY, String(valor));
 }
 
+const PADRAO: Filtros = { ruido: true, eco: true, ganho: true, motor: "webrtc" };
+
 export function lerFiltros(): Filtros {
   try {
     const bruto = JSON.parse(localStorage.getItem(FILTROS_KEY) || "null") as Partial<Filtros> | null;
-    if (!bruto) return { ruido: true, eco: true, ganho: true };
+    if (!bruto) return PADRAO;
     return {
       ruido: bruto.ruido !== false,
       eco: bruto.eco !== false,
       ganho: bruto.ganho !== false,
+      // Quem ja usava o aplicativo continua no motor do WebView ate escolher o
+      // outro: trocar o som do microfone de alguem sem aviso nao e atualizacao,
+      // e susto.
+      motor: bruto.motor === "rnnoise" ? "rnnoise" : "webrtc",
     };
   } catch {
-    return { ruido: true, eco: true, ganho: true };
+    return PADRAO;
   }
 }
 export function guardarFiltros(filtros: Filtros) {
@@ -65,10 +86,19 @@ export function opcoesDeCaptura(deviceId?: string) {
   const filtros = lerFiltros();
   return {
     echoCancellation: filtros.eco,
-    noiseSuppression: filtros.ruido,
+    // Com o RNNoise ligado, o do WebView sai: dois supressores em fila brigam
+    // pelo mesmo sinal, e o segundo recebe uma voz que o primeiro ja mexeu —
+    // o resultado e voz com buraco, nao silencio melhor.
+    noiseSuppression: filtros.ruido && filtros.motor === "webrtc",
     autoGainControl: filtros.ganho,
     ...(deviceId ? { deviceId } : {}),
   };
+}
+
+/// O RNNoise esta ligado, e portanto a cadeia de audio precisa existir?
+export function comRnnoise(): boolean {
+  const filtros = lerFiltros();
+  return filtros.ruido && filtros.motor === "rnnoise";
 }
 
 /// Mede o nivel de uma faixa de audio e chama de volta ate ser desligado.
@@ -193,16 +223,32 @@ export function guardarGanho(valor: number) {
   localStorage.setItem(GANHO_KEY, String(valor));
 }
 
-/// Amplificador que entra entre o microfone e o que e publicado.
+/// O binario do RNNoise, buscado uma vez so.
+///
+/// Sao ~100 KB que nao mudam entre uma chamada e outra; guardar a promessa
+/// evita baixar de novo a cada vez que o microfone abre, e faz as aberturas
+/// seguintes entrarem sem espera nenhuma.
+let rnnoiseBinario: Promise<ArrayBuffer> | null = null;
+/// Os contextos que ja carregaram o worklet. `addModule` duas vezes no mesmo
+/// contexto e erro, e um `WeakSet` esquece o contexto junto com ele.
+const comWorklet = new WeakSet<AudioContext>();
+
+/// A cadeia que entra entre o microfone e o que e publicado.
+///
+/// Microfone -> [RNNoise] -> [ganho] -> chamada, com os dois degraus do meio
+/// opcionais. Os dois moram na mesma classe porque o LiveKit so aceita **um**
+/// processador por faixa: em classes separadas, ligar o ganho desligaria o
+/// supressor de ruido sem avisar ninguem.
 ///
 /// Vai como `TrackProcessor` do LiveKit em vez de faixa propria: assim ligar,
 /// desligar e trocar de dispositivo continuam sendo trabalho dele, e nos so
 /// acrescentamos um degrau no meio do caminho.
-export class GanhoDoMicrofone {
-  name = "ganho-do-microfone";
+export class CadeiaDoMicrofone {
+  name = "cadeia-do-microfone";
   processedTrack?: MediaStreamTrack;
   private contexto?: AudioContext;
   private no?: GainNode;
+  private ruido?: RnnoiseWorkletNode;
   private fonte?: MediaStreamAudioSourceNode;
   private destino?: MediaStreamAudioDestinationNode;
   /// O contexto e nosso, e portanto nosso para fechar. Quando vem do LiveKit,
@@ -214,16 +260,39 @@ export class GanhoDoMicrofone {
     // quando a sala ja tem um contexto criado — e ai `createMediaStreamSource`
     // estourava em "cannot read properties of undefined". Abrir o nosso quando
     // faltar e o que faz o ganho existir em qualquer caso.
-    this.contextoProprio = !opcoes.audioContext;
-    this.contexto = opcoes.audioContext ?? new AudioContext();
+    const queroRnnoise = comRnnoise();
+    // O RNNoise foi treinado a 48 kHz e o worklet conta com isso. Emprestado o
+    // contexto do LiveKit em outra taxa, o certo e abrir o nosso na taxa dele:
+    // reamostrar aqui sairia mais caro do que um contexto a mais.
+    const empresta = opcoes.audioContext && (!queroRnnoise || opcoes.audioContext.sampleRate === 48000);
+    this.contextoProprio = !empresta;
+    this.contexto = empresta ? opcoes.audioContext! : new AudioContext(queroRnnoise ? { sampleRate: 48000 } : {});
     // Politica de reproducao automatica: contexto novo pode nascer suspenso, e
     // suspenso ele nao processa nada — o microfone sairia mudo.
     if (this.contexto.state === "suspended") await this.contexto.resume();
     this.fonte = this.contexto.createMediaStreamSource(new MediaStream([opcoes.track]));
-    this.no = this.contexto.createGain();
-    this.no.gain.value = lerGanho() / 100;
     this.destino = this.contexto.createMediaStreamDestination();
-    this.fonte.connect(this.no).connect(this.destino);
+
+    if (queroRnnoise) {
+      try {
+        this.ruido = await abrirRnnoise(this.contexto);
+      } catch (erro) {
+        // Sem o supressor a chamada segue com o som cru, que e pior do que o
+        // prometido e melhor do que microfone mudo. Quem escolheu o RNNoise ve
+        // o aviso e pode voltar ao do WebView.
+        console.warn("[voz] rnnoise indisponivel", erro);
+      }
+    }
+
+    const ganho = lerGanho();
+    if (ganho !== 100) {
+      this.no = this.contexto.createGain();
+      this.no.gain.value = ganho / 100;
+    }
+    // A fila e montada com o que existe: sem ruido e sem ganho ela e so fonte
+    // ligada ao destino, e a faixa sai igual a que entrou.
+    const fila: AudioNode[] = [this.fonte, this.ruido, this.no, this.destino].filter(Boolean) as AudioNode[];
+    fila.reduce((antes, agora) => antes.connect(agora));
     this.processedTrack = this.destino.stream.getAudioTracks()[0];
   }
 
@@ -235,10 +304,14 @@ export class GanhoDoMicrofone {
   async destroy() {
     this.fonte?.disconnect();
     this.no?.disconnect();
+    this.ruido?.disconnect();
+    // O worklet segura memoria do lado do WASM; `destroy` e o que a devolve.
+    this.ruido?.destroy();
     this.destino?.disconnect();
     if (this.contextoProprio) await this.contexto?.close().catch(() => { /* ja fechado */ });
     this.fonte = undefined;
     this.no = undefined;
+    this.ruido = undefined;
     this.destino = undefined;
     this.contexto = undefined;
     this.processedTrack = undefined;
@@ -246,7 +319,25 @@ export class GanhoDoMicrofone {
 
   /// Muda o volume ao vivo, sem refazer a faixa: quem esta na chamada nao
   /// percebe corte enquanto a pessoa arrasta o controle.
-  definir(porcentagem: number) {
-    if (this.no) this.no.gain.value = porcentagem / 100;
+  ///
+  /// Devolve `false` quando nao ha no de ganho para mexer — em 100% nao ha — e
+  /// ai quem chamou precisa remontar a cadeia.
+  definir(porcentagem: number): boolean {
+    if (!this.no) return porcentagem === 100;
+    this.no.gain.value = porcentagem / 100;
+    return true;
   }
+}
+
+/// Carrega o worklet e o WASM do RNNoise e devolve o no pronto para entrar.
+async function abrirRnnoise(contexto: AudioContext): Promise<RnnoiseWorkletNode> {
+  rnnoiseBinario ??= loadRnnoise({ url: RNNOISE_WASM, simdUrl: RNNOISE_WASM_SIMD });
+  const binario = await rnnoiseBinario;
+  if (!comWorklet.has(contexto)) {
+    await contexto.audioWorklet.addModule(RNNOISE_WORKLET);
+    comWorklet.add(contexto);
+  }
+  // Mono: o microfone e uma voz so, e o worklet processa cada canal separado —
+  // pedir dois dobraria o custo por nada.
+  return new RnnoiseWorkletNode(contexto, { maxChannels: 1, wasmBinary: binario });
 }

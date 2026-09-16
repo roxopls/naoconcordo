@@ -18,6 +18,7 @@ use axum::extract::DefaultBodyLimit;
 use tower_http::{cors::{Any, CorsLayer}, limit::RequestBodyLimitLayer, services::ServeDir, trace::TraceLayer};
 use uuid::Uuid;
 
+mod dj;
 mod gifs;
 mod previa;
 mod registro;
@@ -45,7 +46,10 @@ struct Config { auth_salt: String, owner_password: String, admin_username: Strin
     /// O nome nao cita provedor de proposito: o Tenor fechou para cadastros
     /// novos em janeiro de 2026, e trocar de fonte tem de ser uma linha no
     /// `.env`, nao uma versao nova do servidor.
-    gif_key: Option<String>, gif_provider: gifs::Provedor }
+    gif_key: Option<String>, gif_provider: gifs::Provedor,
+    /// Como falar com o bot DJ. `None` quando quem hospeda nao subiu o bot: os
+    /// comandos voltam a ser mensagem comum e o painel de fila nao aparece.
+    dj: Option<dj::Ligacao> }
 #[derive(Clone)]
 struct AppState {
     config: Config, auth_key: [u8; 32],
@@ -81,6 +85,13 @@ struct AppState {
     categorias: Arc<RwLock<Vec<Categoria>>>,
     friendships: Arc<RwLock<Vec<Friendship>>>,
     envelopes: Arc<RwLock<Vec<Envelope>>>,
+    /// A fila do DJ por canal de voz, como o bot a descreveu por ultimo.
+    ///
+    /// So em memoria, e de proposito: fila de musica nao sobrevive a um restart
+    /// do bot, e guardar em disco faria o painel prometer uma fila que nao
+    /// existe mais. O formato e o que o bot mandou — quem manda na forma dele e
+    /// quem monta a fila, entao acrescentar um campo la nao obriga a mexer aqui.
+    dj_estado: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     events: broadcast::Sender<Broadcast>,
 }
 #[derive(Clone)] struct Session { username: String, expires_at: u64, is_owner: bool }
@@ -327,6 +338,12 @@ enum ServerEvent {
     VoiceChanged { room_id: String, users: Vec<String> },
     // Efemero: nao e guardado nem reenviado. Quem entrar depois nao ve.
     Typing { username: String, room_id: String },
+    /// A fila do DJ mudou. Vai para todo o servidor, e nao so para quem esta na
+    /// chamada: saber que ja tem musica tocando e parte de decidir entrar.
+    DjEstado { room_id: String, estado: serde_json::Value },
+    /// Resposta do DJ a quem mandou o comando. So para essa pessoa: "nao achei
+    /// essa musica" nao e assunto dos outros.
+    DjAviso { texto: String },
 }
 
 /// Evento mais a lista de quem pode receber. `audience: None` significa todos.
@@ -484,7 +501,9 @@ struct ChallengeOutput {
     categorias: Vec<Categoria>,
     /// Se este servidor tem busca de GIF. Sem isso o cliente mostraria um botao
     /// que so sabe dar erro.
-    gifs: bool }
+    gifs: bool,
+    /// Idem para o bot DJ: sem ele, `/tocar` e so uma mensagem com barra.
+    dj: bool }
 #[derive(Serialize)] #[serde(rename_all = "camelCase")]
 struct InviteView { code: String, label: String, created_at: DateTime<Utc>, created_by: String, used_by: Option<String>, used_at: Option<DateTime<Utc>>, revoked: bool }
 #[derive(Serialize)] #[serde(rename_all = "camelCase")] struct InvitesOutput { invites: Vec<InviteView> }
@@ -521,6 +540,7 @@ async fn main() {
         // mais funcionando, so sem a busca de GIF.
         gif_key: env::var("GIF_API_KEY").ok().filter(|chave| !chave.trim().is_empty()),
         gif_provider: gifs::Provedor::ler(&env::var("GIF_PROVIDER").unwrap_or_default()),
+        dj: dj::Ligacao::do_ambiente(),
         // Quando o disco principal passa disso, o proximo arquivo vai para a
         // reserva. Contamos o que gravamos em vez de perguntar ao sistema,
         // para nao depender de chamada externa dentro do container.
@@ -552,6 +572,7 @@ async fn main() {
         categorias: Arc::new(RwLock::new(load_json(&config.data_dir, "categorias.json").await)),
         friendships: Arc::new(RwLock::new(load_json(&config.data_dir, "friends.json").await)),
         envelopes: Arc::new(RwLock::new(load_envelopes(&config.data_dir).await)),
+        dj_estado: Default::default(),
         config, auth_key, sessions: Default::default(), challenges: Default::default(), events,
     };
     let cors = CorsLayer::new().allow_origin(Any)
@@ -601,6 +622,9 @@ async fn main() {
         // Sem `/api` e sem sessao: e o endereco que abre no navegador.
         .route("/f/{id}", get(arquivo_por_link))
         .route("/api/livekit-token", post(livekit_token))
+        .route("/api/dj/comando", post(dj_comando))
+        // So o bot chama, pelo localhost, com o segredo no cabecalho.
+        .route("/api/dj/interno/estado", post(dj_estado_interno))
         .route("/api/servers/{server_id}/members", get(list_members))
         .route("/api/servers/members/add", post(add_member))
         .route("/api/servers/invites", get(list_server_invites))
@@ -847,6 +871,7 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Respons
         is_owner: session.is_owner, is_admin: is_admin(&state, &session.username), roles, online, voice,
         categorias,
         gifs: state.config.gif_key.is_some(),
+        dj: state.config.dj.is_some(),
     }).into_response()
 }
 /// Admin do sistema: quem emite convites e ve quem os usou.
@@ -1090,6 +1115,118 @@ async fn livekit_token(State(state): State<AppState>, headers: HeaderMap, Json(b
         }
     }
 }
+// ----------------------------------------------------------------------- DJ
+
+#[derive(Deserialize)] #[serde(rename_all = "camelCase")]
+struct DjComandoInput {
+    /// O canal de voz onde tocar. Vazio quer dizer "onde eu estiver".
+    #[serde(default)] room_id: String,
+    /// O comando escrito como se fosse na conversa: `/tocar <link>`, `/pular`.
+    ///
+    /// Assim o painel e a conversa passam pelo mesmo leitor, e um botao novo no
+    /// painel nao precisa de rota nova aqui.
+    #[serde(default)] texto: String,
+}
+
+/// Comando vindo do painel. O da conversa entra por `handle_socket`.
+async fn dj_comando(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<DjComandoInput>) -> Response {
+    let Some((_, s)) = authenticated(&state, &headers).await else { return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."); };
+    let Some(comando) = dj::ler_comando(&body.texto) else { return error(StatusCode::BAD_REQUEST, "Comando desconhecido."); };
+    let sala = (!body.room_id.is_empty()).then_some(body.room_id);
+    match executar_dj(&state, &s.username, sala, comando, None).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(motivo) => error(StatusCode::BAD_REQUEST, &motivo),
+    }
+}
+
+/// Faz o que o comando pede, venha ele da conversa ou do painel.
+///
+/// A musica toca **na chamada em que a pessoa esta**, e nao no canal de texto em
+/// que ela escreveu: sao dois canais diferentes, e quem manda `/tocar` no canal
+/// de recados quer ouvir onde esta. Sem chamada nenhuma, o comando vira aviso.
+async fn executar_dj(
+    state: &AppState,
+    quem: &str,
+    sala: Option<String>,
+    comando: dj::Comando,
+    anexo: Option<StoredFile>,
+) -> Result<(), String> {
+    let Some(ligacao) = state.config.dj.clone() else { return Err("Este servidor nao tem DJ.".into()); };
+
+    let sala_de_voz = match sala {
+        Some(id) => id,
+        None => state.voice.read().await.iter()
+            .find(|(_, gente)| gente.iter().any(|nome| profile_key(nome) == profile_key(quem)))
+            .map(|(id, _)| id.clone())
+            .ok_or("Entre num canal de voz para o DJ tocar.")?,
+    };
+    // A conferencia de sempre, porque o canal pode ter vindo do cliente: existe,
+    // e de voz, e a pessoa participa do servidor dele.
+    let alvo = state.rooms.read().await.iter()
+        .find(|r| r.id == sala_de_voz && r.kind == RoomKind::Voice).cloned()
+        .ok_or("Canal de voz nao encontrado.")?;
+    {
+        let memberships = state.memberships.read().await;
+        if !is_member(&memberships, &alvo.server_id, quem) {
+            return Err("Voce nao participa deste servidor.".into());
+        }
+    }
+
+    // `/fila` nao mexe em nada: so reenvia a quem pediu o que ja se sabe.
+    if comando == dj::Comando::Fila {
+        let guardado = state.dj_estado.read().await.get(&sala_de_voz).cloned();
+        let estado = guardado.unwrap_or_else(|| serde_json::json!({
+            "roomId": sala_de_voz, "tocando": null, "decorrido": 0, "pausado": false, "fila": [],
+        }));
+        let _ = state.events.send(Broadcast::to_one(quem, ServerEvent::DjEstado { room_id: sala_de_voz, estado }));
+        return Ok(());
+    }
+
+    let (rota, corpo) = match comando {
+        dj::Comando::Tocar(pedido) => {
+            // Pedido vazio e o caso de mandar o arquivo junto com o comando. O
+            // bot nao tem sessao neste servidor, entao o que vai para ele e o
+            // mesmo link assinado que abre o anexo no navegador.
+            let pedido = if pedido.is_empty() {
+                let arquivo = anexo.ok_or("Diga o que tocar: um link, um nome, ou mande o arquivo junto.")?;
+                let prova = prova_do_arquivo(state, &arquivo.id).ok_or("Erro interno.")?;
+                format!("{}/f/{}?t={}", ligacao.nosso_endereco.trim_end_matches('/'), arquivo.id, prova)
+            } else {
+                pedido
+            };
+            ("tocar", serde_json::json!({ "roomId": sala_de_voz, "pedido": pedido, "quem": quem }))
+        }
+        dj::Comando::Pular => ("pular", serde_json::json!({ "roomId": sala_de_voz })),
+        dj::Comando::Pausar => ("pausar", serde_json::json!({ "roomId": sala_de_voz })),
+        dj::Comando::Parar => ("parar", serde_json::json!({ "roomId": sala_de_voz })),
+        dj::Comando::Fila => unreachable!("tratado acima"),
+    };
+    dj::falar(&ligacao, rota, corpo).await.map(|_| ())
+}
+
+/// O bot conta como esta a fila, e isso vai para quem enxerga o canal.
+async fn dj_estado_interno(State(state): State<AppState>, headers: HeaderMap, Json(estado): Json<serde_json::Value>) -> Response {
+    let Some(ligacao) = state.config.dj.clone() else {
+        return error(StatusCode::NOT_FOUND, "Nao encontrado.");
+    };
+    let enviado = headers.get("x-dj-secret").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    if !gifs::constante(enviado.as_bytes(), ligacao.segredo.as_bytes()) {
+        // Mesma resposta de rota inexistente: quem esta tentando adivinhar o
+        // segredo nao ganha a confirmacao de que achou a porta certa.
+        return error(StatusCode::NOT_FOUND, "Nao encontrado.");
+    }
+    let Some(room_id) = estado.get("roomId").and_then(|v| v.as_str()).map(str::to_string) else {
+        return error(StatusCode::BAD_REQUEST, "Sem canal.");
+    };
+    let Some(alvo) = state.rooms.read().await.iter().find(|r| r.id == room_id).cloned() else {
+        return error(StatusCode::NOT_FOUND, "Canal nao encontrado.");
+    };
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &alvo.server_id) };
+    state.dj_estado.write().await.insert(room_id.clone(), estado.clone());
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::DjEstado { room_id, estado }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// Duas pessoas sao amigas quando existe um vinculo aceito, em qualquer direcao.
 fn friends_already(list: &[Friendship], a: &str, b: &str) -> bool {
     list.iter().any(|f| f.status == FriendStatus::Accepted && pair_matches(f, a, b))
@@ -1929,7 +2066,7 @@ async fn ler_chamadas(State(state): State<AppState>, headers: HeaderMap, Query(p
 #[derive(Deserialize)]
 struct PedidoDePrevia { #[serde(default)] url: String }
 
-/// Cartao de previa de um link do YouTube ou do Twitter.
+/// Cartao de previa de um link, seja ele de que site for.
 ///
 /// **204 quando o link nao tem cartao**, e nao um erro: canal, playlist, perfil e
 /// qualquer outro endereco sao casos normais, nao falhas. O cliente pede a previa
@@ -1939,8 +2076,9 @@ async fn previa_de_link(State(state): State<AppState>, headers: HeaderMap, Query
     if authenticated(&state, &headers).await.is_none() {
         return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
     }
-    // Endereco enorme so gasta tempo: nenhum link de video ou tuite chega perto.
-    if pedido.url.len() > 500 {
+    // Endereco enorme so gasta tempo. O teto subiu junto com o cartao de site
+    // qualquer: link de loja e de noticia carrega rastreio e passa dos 500.
+    if pedido.url.len() > 1500 {
         return StatusCode::NO_CONTENT.into_response();
     }
     let Some((fonte, alvo)) = previa::reconhecer(&pedido.url) else {
@@ -2688,9 +2826,26 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session)
                         .any(|item| item.id == alvo && item.room_id == room_id).then_some(alvo),
                     None => None,
                 };
+                // Comando do DJ: a mensagem continua aparecendo na conversa, como
+                // qualquer outra, e a acao acontece depois dela. Os outros veem
+                // quem pediu o que, que e metade da graca de ter um DJ na sala.
+                let comando = state.config.dj.as_ref().and_then(|_| dj::ler_comando(&text));
+                let anexo_do_dj = anexos.first().cloned();
                 let message = ChatMessage { id: Uuid::new_v4(), username: session.username.clone(), text, created_at: Utc::now(), edited_at: None, room_id, attachments: anexos, reply_to: citada, reactions: BTreeMap::new(), pinned: false };
                 { let mut h = state.messages.write().await; h.push(message.clone()); let excess = h.len().saturating_sub(MAX_MESSAGES); if excess > 0 { h.drain(..excess); } persist_json(&state.config.data_dir, "messages.json", &*h).await; }
                 let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::Message { message }));
+                if let Some(comando) = comando {
+                    // Em outra tarefa: resolver um link do YouTube leva segundos,
+                    // e este laco e o que atende tudo o mais que esta pessoa faz
+                    // — esperar aqui congelaria a conversa dela ate o bot voltar.
+                    let state = state.clone();
+                    let quem = session.username.clone();
+                    tokio::spawn(async move {
+                        if let Err(motivo) = executar_dj(&state, &quem, None, comando, anexo_do_dj).await {
+                            let _ = state.events.send(Broadcast::to_one(&quem, ServerEvent::DjAviso { texto: motivo }));
+                        }
+                    });
+                }
             }
             Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break, _ => {}
         },

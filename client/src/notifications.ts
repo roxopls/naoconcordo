@@ -61,7 +61,11 @@ function writeFlag(key: string, value: boolean) {
   } catch { /* preferencia e descartavel, nao vale derrubar o app */ }
 }
 
-export const desktopNotificationsOn = () => readFlag(DESKTOP_KEY, false);
+/// Ligada por padrao. Ficou desligada enquanto o plugin nem estava registrado
+/// no Tauri e a notificacao nunca chegava a aparecer; agora que aparece, o
+/// padrao util e o contrario — quem fecha a janela para a bandeja espera ser
+/// avisado, e quem nao quiser desliga uma vez nas configuracoes.
+export const desktopNotificationsOn = () => readFlag(DESKTOP_KEY, true);
 export const notificationPreviewOn = () => readFlag(PREVIEW_KEY, false);
 export const notificationsInCallOn = () => readFlag(IN_CALL_KEY, false);
 
@@ -114,6 +118,21 @@ export async function notifyMessage(notice: MessageNotice): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/// Pede a permissao uma vez, na abertura, quando as notificacoes estao ligadas
+/// e o sistema ainda nao concedeu.
+///
+/// Sem isto o padrao ligado seria so aparencia: `notifyMessage` confere a
+/// permissao antes de mandar e desiste calado quando ela falta, e a primeira
+/// vez que alguem pediria seria ao mexer no interruptor — que ja esta ligado, e
+/// por isso ninguem toca. No Windows a concessao nao abre janela nenhuma; num
+/// navegador e o unico ponto do aplicativo onde a pergunta aparece.
+export async function prepararNotificacoes(): Promise<void> {
+  if (!desktopNotificationsOn()) return;
+  try {
+    if (!(await permissaoConcedida())) await pedirPermissao();
+  } catch { /* sem notificacao do sistema sobra o aviso interno */ }
 }
 
 /// Manda uma notificacao de teste, para a pessoa conferir se chega. Ignora as

@@ -242,6 +242,26 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 .track-tile:hover .tile-action { opacity: 1; }
 .tile-action:hover { background: rgba(0,0,0,.85); }
 
+/* Palco sozinho: o canal de voz foi escolhido, e a chamada ocupa o painel.
+   A conversa nao encolhe, sai — ler acontece nos canais de texto, e cada clique
+   troca entre um e outro. A altura vem com `!important` porque a alca de
+   redimensionar escreve `height` no proprio elemento, e ali ela nao vale mais. */
+.main-panel.so-palco > .stage {
+  flex: 1 1 auto;
+  height: auto !important;
+  max-height: none;
+  min-height: 0;
+  resize: none;
+}
+.main-panel.so-palco > .messages,
+.main-panel.so-palco > .composer,
+.main-panel.so-palco > .typing-note,
+.main-panel.so-palco > .camera-mini { display: none; }
+
+/* O canal de voz cujo palco esta na tela. `active` ja marca onde voce esta
+   conectado; esta marca diz o que voce esta vendo. */
+.channel.voice.olhando { background: #3d3d46; box-shadow: inset 2px 0 0 var(--accent); }
+
 /* modo grande: um compartilhamento domina o painel e o chat vira faixa embaixo */
 .stage.has-theater { grid-template-columns: 1fr; }
 .stage.has-theater .track-tile:not(.theater) { display: none; }
@@ -525,14 +545,46 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
    aplicativo, e um cartao funciona igual em qualquer lugar. */
 .cartao-link { margin-top: 6px; display: block; width: min(420px, 100%); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 10px; overflow: hidden; background: var(--panel-2); color: inherit; text-decoration: none; cursor: pointer; }
 .cartao-link:hover { border-color: var(--accent); }
-.cartao-link img { width: 100%; display: block; aspect-ratio: 16 / 9; object-fit: cover; background: #000; }
+.cartao-link img, .cartao-link video { width: 100%; display: block; aspect-ratio: 16 / 9; object-fit: cover; background: #000; }
+/* A capa e o palco do play: a imagem embaixo, o botao no meio dela. */
+.cartao-capa { position: relative; display: block; min-height: 40px; }
+.cartao-play { position: absolute; inset: 0; margin: auto; width: 54px; height: 54px; border: 0; border-radius: 50%; background: rgba(0,0,0,.62); cursor: pointer; }
+/* O triangulo e desenhado com borda: um so elemento, sem imagem a carregar. */
+.cartao-play::before { content: ""; display: block; width: 0; height: 0; margin: 0 auto 0 20px; border-style: solid; border-width: 10px 0 10px 16px; border-color: transparent transparent transparent #fff; }
+.cartao-play:hover { background: rgba(0,0,0,.8); }
+.cartao-play.carregando { opacity: .5; cursor: progress; }
+/* Video vertical de celular cortado em 16:9 vira uma tira no meio da cena. */
+.cartao-tiktok img, .cartao-tiktok video, .cartao-instagram img, .cartao-instagram video { aspect-ratio: auto; max-height: 420px; object-fit: contain; }
+.cartao-site img { aspect-ratio: auto; max-height: 260px; object-fit: cover; }
+/* De que site veio, sob o resumo: no cartao generico o desenho nao conta. */
+.cartao-dominio { color: var(--muted); font-size: 11px; margin-top: 4px; }
 /* Foto de tuite nao e 16:9, e cortar tudo no mesmo quadro decapitaria metade
    das imagens. */
 .cartao-twitter img { aspect-ratio: auto; max-height: 320px; object-fit: contain; }
+/* Capa e texto sao os `<a>` que levam para fora; o cartao em volta e uma
+   caixa comum, para o botao de play nao morar dentro de um link. */
+.cartao-texto, a.cartao-capa { color: inherit; text-decoration: none; }
 .cartao-texto { padding: 8px 10px; display: grid; gap: 2px; }
 .cartao-texto strong { font-size: 13px; line-height: 1.3; }
 .cartao-autor { color: var(--muted); font-size: 11px; }
 .cartao-texto p { margin: 4px 0 0; font-size: 12px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Painel do DJ: entre o palco da chamada e as mensagens, onde a pessoa ja
+   esta olhando enquanto ouve. */
+.dj-panel { margin: 0 12px 6px; padding: 8px 10px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 10px; background: var(--panel-2); }
+.dj-agora { display: flex; align-items: center; gap: 12px; }
+.dj-info { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.dj-info strong { font-size: 13px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dj-autor, .dj-tempo { color: var(--muted); font-size: 11px; }
+/* Fundo sempre visivel: barra que so aparece quando ha progresso pisca no
+   comeco de cada faixa. */
+.dj-barra { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.dj-barra span { display: block; height: 100%; background: var(--accent); }
+.dj-acoes { display: flex; gap: 6px; flex-shrink: 0; }
+.dj-botao { padding: 4px 10px; font-size: 12px; }
+.dj-fila { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 2px; font-size: 12px; color: var(--muted); }
+.dj-fila li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dj-resto { list-style: none; margin-left: -20px; font-style: italic; }
 
 .embed-fora { display: block; margin-top: 4px; padding: 0; border: 0; background: none; color: var(--muted); font-size: 11px; text-decoration: underline; cursor: pointer; }
 .embed-fora:hover { color: var(--accent); }
@@ -555,9 +607,6 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 /* Barra de arrasto do palco: ocupa a largura toda, entao pega em qualquer
    ponto. Substitui a alca nativa do `resize: vertical`, um triangulo de 12px
    no canto direito que exigia mira. */
-.stage-resizer { height: 11px; display: grid; place-items: center; cursor: ns-resize; touch-action: none; flex: 0 0 auto; }
-.stage-resizer span { width: 46px; height: 3px; border-radius: 999px; background: #3a3a44; transition: background .15s, width .15s; }
-.stage-resizer:hover span, .stage-resizer.arrastando span { background: var(--accent); width: 74px; }
 
 /* Cameras fora da tela do servidor: uma so, no canto, seguindo quem fala.
    Fica acima do redator e longe da navegacao — o painel flutuante antigo

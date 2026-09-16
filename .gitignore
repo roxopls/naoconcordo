@@ -31,3 +31,6 @@ dist-web/
 *.exe
 *.sig
 *.msi
+
+# Cache do Python do bot DJ.
+__pycache__/

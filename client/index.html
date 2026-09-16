@@ -157,7 +157,7 @@
           </div>
         </header>
         <section id="stage" class="stage hidden"></section>
-        <div id="stage-resizer" class="stage-resizer hidden" role="separator" aria-orientation="horizontal" title="Arraste para mudar a altura"><span></span></div>
+        <section id="dj-panel" class="dj-panel hidden" aria-label="Fila do DJ"></section>
         <div id="camera-mini" class="camera-mini hidden"></div>
         <section id="messages" class="messages" aria-live="polite"></section>
         <section id="dm-messages" class="messages hidden" aria-live="polite"></section>
@@ -408,6 +408,10 @@
 
             <p class="section-label">FILTROS</p>
             <label class="switch-row"><input id="filtro-ruido" type="checkbox" checked /> Reduzir ruído de fundo</label>
+            <label id="filtro-ruido-motor-linha">Como<select id="filtro-ruido-motor">
+              <option value="webrtc">Do Windows — leve, some com o ruído parado</option>
+              <option value="rnnoise">RNNoise — segura teclado, ventilador e voz ao fundo</option>
+            </select></label>
             <label class="switch-row"><input id="filtro-eco" type="checkbox" checked /> Cancelar eco da caixa de som</label>
             <label class="switch-row"><input id="filtro-ganho" type="checkbox" checked /> Equilibrar o volume da voz automaticamente</label>
             <p class="muted small">Valem no próximo microfone aberto. Com fone, o cancelamento de eco pode ser desligado sem prejuízo.</p>
