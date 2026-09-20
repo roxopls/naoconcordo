@@ -33,7 +33,7 @@ use livekit::webrtc::video_source::{VideoResolution, native::NativeVideoSource};
 
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
-use windows::Win32::System::Variant::{VARIANT, VT_UI4};
+use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface, PWSTR};
 
 /// Codec que o hardware desta maquina aceitou.
@@ -202,10 +202,113 @@ impl Preferencia {
     }
     fn ordem(self) -> &'static [HwCodec] {
         match self {
-            Self::Auto => &[HwCodec::Av1, HwCodec::H264],
+            Self::Auto => ordem_automatica(),
             Self::H264 => &[HwCodec::H264],
             Self::Software => &[],
         }
+    }
+}
+
+const AV1_PRIMEIRO: &[HwCodec] = &[HwCodec::Av1, HwCodec::H264];
+const H264_PRIMEIRO: &[HwCodec] = &[HwCodec::H264, HwCodec::Av1];
+
+/// Em que ordem tentar os codecs, olhando de quem e a placa.
+///
+/// Os dois codecs ficam disponiveis para todo mundo — muda so quem vai na
+/// frente, e nenhum e removido: se o primeiro nao abrir, o segundo e tentado
+/// como sempre.
+///
+/// **NVIDIA e Intel: AV1 na frente.** O AV1 da Ada (RTX 40 para cima) e do
+/// QuickSync moderno e maduro, e comprime bem melhor por bit — que em tela com
+/// texto e a diferenca entre legivel e borrado. Placa que nao tem AV1 nao
+/// aparece na enumeracao e cai sozinha no H.264.
+///
+/// **AMD: H.264 na frente.** O encoder AV1 da AMD so existe de RDNA3 (RX 7000)
+/// para cima, e o caminho dele por Media Foundation e novo e pouco exercitado
+/// — e acabamos de descobrir, com a RX 6600, que ate o H.264 da AMD vinha com
+/// metade do controle de taxa no padrao de fabrica. Enquanto nao houver medida
+/// de uma placa AMD com AV1, o palpite seguro e o caminho antigo e conhecido.
+/// Vantagem de tabela: H.264 e o unico codec que todo assinante decodifica sem
+/// discussao, entao a escolha que protege a AMD tambem protege quem assiste.
+///
+/// A leitura e feita pelo nome do codificador de AV1 que o sistema registra,
+/// e nao pelo adaptador de video: o que interessa e de quem e o MFT que
+/// **seria usado**, que numa maquina com duas placas nao e necessariamente o
+/// dono do monitor.
+fn ordem_automatica() -> &'static [HwCodec] {
+    let nomes = unsafe { nomes_de_codificadores(HwCodec::Av1) };
+    if nomes.is_empty() {
+        // Sem AV1 nenhum: a ordem nao muda nada, mas dizer isso no log evita
+        // a duvida de "por que essa maquina foi para H.264".
+        eprintln!("[encoder] sem codificador AV1 de hardware; ordem: H.264");
+        return H264_PRIMEIRO;
+    }
+    let amd = nomes
+        .iter()
+        .any(|nome| {
+            let n = nome.to_ascii_lowercase();
+            n.contains("amd") || n.contains("radeon")
+        });
+    eprintln!("[encoder] AV1 de hardware: [{}] -> ordem: {}", nomes.join(" | "), if amd { "H.264, AV1" } else { "AV1, H.264" });
+    if amd { H264_PRIMEIRO } else { AV1_PRIMEIRO }
+}
+
+/// Nomes dos MFTs de hardware registrados para este codec, sem ativar nenhum.
+///
+/// `MFTEnumEx` ja devolve o nome legivel no `IMFActivate`, entao da para saber
+/// de quem e a placa antes de decidir o que abrir — e sem o custo (e o risco)
+/// de instanciar um codificador so para perguntar.
+unsafe fn nomes_de_codificadores(codec: HwCodec) -> Vec<String> {
+    let entrada = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: MFVideoFormat_NV12,
+    };
+    let saida = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: codec.subtipo(),
+    };
+    let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
+    let mut quantos = 0u32;
+    if unsafe {
+        MFTEnumEx(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+            Some(&entrada),
+            Some(&saida),
+            &mut activates,
+            &mut quantos,
+        )
+    }
+    .is_err()
+        || activates.is_null()
+    {
+        return Vec::new();
+    }
+    let mut nomes = Vec::new();
+    for indice in 0..quantos as usize {
+        // SAFETY: mesma posse de `abrir_codec` — cada ponteiro e lido uma vez
+        // e a referencia morre com a variavel.
+        let activate: Option<IMFActivate> = unsafe { std::ptr::read(activates.add(indice)) };
+        let Some(activate) = activate else { continue };
+        if let Some(nome) = unsafe { nome_amigavel(&activate) } {
+            nomes.push(nome);
+        }
+    }
+    unsafe { CoTaskMemFree(Some(activates as *const _)) };
+    nomes
+}
+
+/// Nome legivel de um `IMFActivate`, com a cadeia do COM devolvida ao alocador.
+unsafe fn nome_amigavel(activate: &IMFActivate) -> Option<String> {
+    unsafe {
+        let mut texto = PWSTR::null();
+        let mut tamanho = 0u32;
+        activate
+            .GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut texto, &mut tamanho)
+            .ok()?;
+        let nome = texto.to_string().unwrap_or_default();
+        CoTaskMemFree(Some(texto.0 as *const _));
+        Some(nome)
     }
 }
 
@@ -221,8 +324,11 @@ pub fn iniciar(
     bitrate: u64,
     preferencia: Preferencia,
 ) -> Result<EncoderHandle, String> {
-    let ordem = preferencia.ordem();
-    if ordem.is_empty() {
+    // A ordem de verdade so e resolvida dentro da thread: descobrir de quem e
+    // a placa passa por `MFTEnumEx`, e o Media Foundation so esta de pe depois
+    // do `MFStartup` que a thread faz. Aqui cabe apenas a escolha que nao
+    // depende dele.
+    if preferencia == Preferencia::Software {
         return Err("codificacao por hardware desligada nas configuracoes".into());
     }
     // Fila curta de proposito: dois quadros de folga absorvem o soluco de um
@@ -248,7 +354,7 @@ pub fn iniciar(
         .spawn(move || {
             rodar(
                 source, rx, stop_thread, chave_thread, chaves_thread, pedidos_thread,
-                falha_thread, pronto_tx, ordem, largura, altura, fps, bitrate,
+                falha_thread, pronto_tx, preferencia, largura, altura, fps, bitrate,
             );
         })
         .map_err(|e| format!("Nao foi possivel criar a thread do codificador: {e}"))?;
@@ -294,7 +400,7 @@ fn rodar(
     pedidos_de_chave: Arc<AtomicU64>,
     falha: Arc<std::sync::Mutex<Option<String>>>,
     pronto: std::sync::mpsc::Sender<Result<(HwCodec, String), String>>,
-    ordem: &'static [HwCodec],
+    preferencia: Preferencia,
     largura: u32,
     altura: u32,
     fps: f64,
@@ -310,6 +416,9 @@ fn rodar(
             return;
         }
 
+        // Agora sim: o Media Foundation esta de pe, e da para perguntar a ele
+        // quais codificadores existem antes de escolher em que ordem tenta-los.
+        let ordem = preferencia.ordem();
         let mut mft = match Mft::abrir(ordem, largura, altura, fps, bitrate) {
             Ok(mft) => mft,
             Err(erro) => {
@@ -379,12 +488,21 @@ unsafe fn laco(
     let mut recusas = 0u32;
 
     while !stop.load(Ordering::Relaxed) {
+        // As chaves que sairam desde a volta passada. Recolhidas com `replace`
+        // porque `trocar_tamanho` troca o `Mft` inteiro: o que nao for lido
+        // antes disso se perde, e um punhado de chaves a menos na conta importa
+        // menos do que o numero parar de andar.
+        let emitidas = mft.chaves_emitidas.replace(0);
+        if emitidas > 0 {
+            chaves.fetch_add(emitidas, Ordering::Relaxed);
+        }
+
         // Pedido de bitrate e de quadro-chave valem para os dois modos.
         if let Some(pedido) = source.take_rate_control_request() {
             let alvo = pedido.target_bitrate_bps.max(200_000);
             if alvo.abs_diff(bitrate_atual) * 20 > bitrate_atual {
                 bitrate_atual = alvo;
-                unsafe { mft.definir_bitrate(alvo) };
+                unsafe { mft.definir_bitrate(alvo, fps) };
             }
         }
         // Contados separadamente: o pedido vem de quem assiste, e a chave e o
@@ -413,7 +531,6 @@ unsafe fn laco(
                     }
                     if forcar_chave {
                         unsafe { mft.forcar_chave() };
-                        chaves.fetch_add(1, Ordering::Relaxed);
                         forcar_chave = false;
                     }
                     if let Err(erro) = unsafe { entregar_com_folga(mft, source, &job) } {
@@ -464,7 +581,6 @@ unsafe fn laco(
                     }
                     if forcar_chave {
                         unsafe { mft.forcar_chave() };
-                        chaves.fetch_add(1, Ordering::Relaxed);
                         forcar_chave = false;
                     }
                     if let Err(erro) = unsafe { entregar_com_folga(mft, source, &job) } {
@@ -579,6 +695,20 @@ struct Mft {
     /// primeiro fazia a placa do outro tipo ser descartada como se nao
     /// funcionasse.
     assincrono: bool,
+    /// Quadros-chave que de fato **sairam** do codificador, contados na saida
+    /// pelo `MFSampleExtension_CleanPoint`.
+    ///
+    /// Antes o painel contava o pedido, nao a entrega: `forcar_chave` descarta
+    /// o erro do `SetValue`, entao um codificador que ignora o pedido — o AMF
+    /// da AMD ignora `AVEncVideoForceKeyFrame` com frequencia — aparecia com a
+    /// mesma contagem de um que obedece. O laco recolhe este numero a cada
+    /// volta e soma no contador compartilhado.
+    chaves_emitidas: std::cell::Cell<u64>,
+    /// Pedido de chave ainda nao entregue ao codificador.
+    ///
+    /// Alem do `ICodecAPI`, o pedido vai marcado no proprio quadro de entrada
+    /// (`MFSampleExtension_ForceKeyFrame`), que e o caminho que o AMF respeita.
+    chave_pendente: std::cell::Cell<bool>,
 }
 
 impl Mft {
@@ -674,23 +804,8 @@ impl Mft {
         fps: f64,
         bitrate: u64,
     ) -> Result<Self, String> {
-        let nome = unsafe {
-            let mut texto = PWSTR::null();
-            let mut tamanho = 0u32;
-            match activate.GetAllocatedString(
-                &MFT_FRIENDLY_NAME_Attribute,
-                &mut texto,
-                &mut tamanho,
-            ) {
-                Ok(()) => {
-                    let nome = texto.to_string().unwrap_or_default();
-                    // A cadeia veio do alocador do COM e nao se solta sozinha.
-                    CoTaskMemFree(Some(texto.0 as *const _));
-                    nome
-                }
-                Err(_) => "codificador de hardware".to_string(),
-            }
-        };
+        let nome = unsafe { nome_amigavel(activate) }
+            .unwrap_or_else(|| "codificador de hardware".to_string());
 
         let transform: IMFTransform = unsafe { activate.ActivateObject() }
             .map_err(|e| format!("nao abriu ({nome}): {e}"))?;
@@ -728,6 +843,8 @@ impl Mft {
             entrega_amostras: true,
             cabecalho: Vec::new(),
             assincrono,
+            chaves_emitidas: std::cell::Cell::new(0),
+            chave_pendente: std::cell::Cell::new(false),
         };
         unsafe { mft.configurar(largura, altura, fps, bitrate) }?;
         Ok(mft)
@@ -824,15 +941,65 @@ impl Mft {
         if let Some(api) = &self.codec_api {
             // Taxa constante: numa chamada quem manda e o teto de upload, nao a
             // qualidade media de um arquivo que se assiste depois.
-            unsafe {
-                let _ = api.SetValue(
-                    &CODECAPI_AVEncCommonRateControlMode,
-                    &variante_u32(eAVEncCommonRateControlMode_CBR.0 as u32),
-                );
-                let _ = api.SetValue(
-                    &CODECAPI_AVEncCommonMeanBitRate,
-                    &variante_u32(bitrate.min(u64::from(u32::MAX)) as u32),
-                );
+            //
+            // O que cada ajuste resolve esta anotado um a um: o AMF da AMD
+            // aceita alguns e ignora outros calados, e foi por isso que a tela
+            // de uma RX 6600 saia em blocos derretidos enquanto a mesma tela
+            // pelo processador saia limpa. `aplicados` guarda os que o
+            // codificador aceitou, e o nome que vai ao painel diz quais foram —
+            // sem isso a proxima investigacao recomeca no escuro.
+            let mut aplicados: Vec<&str> = Vec::new();
+            let mut recusados: Vec<&str> = Vec::new();
+            let mut tentar = |rotulo: &'static str, guid: &windows::core::GUID, valor: VARIANT| {
+                if unsafe { api.SetValue(guid, &valor) }.is_ok() {
+                    aplicados.push(rotulo);
+                } else {
+                    recusados.push(rotulo);
+                }
+            };
+
+            tentar(
+                "cbr",
+                &CODECAPI_AVEncCommonRateControlMode,
+                variante_u32(eAVEncCommonRateControlMode_CBR.0 as u32),
+            );
+            tentar(
+                "bitrate",
+                &CODECAPI_AVEncCommonMeanBitRate,
+                variante_u32(bitrate.min(u64::from(u32::MAX)) as u32),
+            );
+            // Baixa latencia pelo `ICodecAPI`, e nao so pelo atributo
+            // `MF_LOW_LATENCY` do MFT. Sao dois interruptores diferentes: o
+            // atributo e uma dica para o pipeline, este aqui e o que o AMF le
+            // para desligar lookahead e a janela longa de decisao. Sem ele o
+            // controle de taxa da AMD distribui os bits olhando muito para
+            // tras, e cena com movimento estoura o orcamento antes de ele
+            // reagir — que e exatamente o "derretido em blocos" com o que esta
+            // parado ainda nitido.
+            tentar("lowlatency", &CODECAPI_AVEncCommonLowLatency, variante_bool(true));
+            // Teto igual a media: em CBR de verdade os dois andam juntos. Sem
+            // o teto, o AMF trata o valor medio como alvo frouxo.
+            tentar(
+                "maxbitrate",
+                &CODECAPI_AVEncCommonMaxBitRate,
+                variante_u32(bitrate.min(u64::from(u32::MAX)) as u32),
+            );
+            // Tamanho do balde (VBV/HRD), em bits. O padrao da AMD e grande o
+            // bastante para o codificador gastar varios quadros de orcamento
+            // num quadro so e passar os seguintes se recuperando — em video
+            // gravado ninguem ve, numa chamada e o esfarelamento. Dois quadros
+            // de folga: o suficiente para um corte de cena, pouco o bastante
+            // para nao virar divida.
+            let balde = ((bitrate as f64 / fps.max(1.0)) * 2.0) as u64;
+            tentar(
+                "vbv",
+                &CODECAPI_AVEncCommonBufferSize,
+                variante_u32(balde.clamp(1, u64::from(u32::MAX)) as u32),
+            );
+            // 0 e "o mais rapido", 100 e "o melhor". O padrao do AMF puxa para
+            // a velocidade; numa GPU que esta codificando um quadro a cada
+            // 16 ms com folga, essa troca nao paga.
+            tentar("qualidade", &CODECAPI_AVEncCommonQualityVsSpeed, variante_u32(66));
                 // Dois segundos entre quadros-chave, e nao dez.
                 //
                 // O raciocinio antigo era: chave so quando o WebRTC pedir, e
@@ -847,10 +1014,27 @@ impl Mft {
                 // nenhum chegar. Custa banda: quadro-chave e caro. Mas imagem
                 // que se remonta sozinha em dois segundos e melhor do que imagem
                 // limpa que, quando quebra, fica quebrada.
-                let _ = api.SetValue(
-                    &CODECAPI_AVEncMPVGOPSize,
-                    &variante_u32((fps.max(1.0) * 2.0) as u32),
-                );
+            tentar(
+                "gop",
+                &CODECAPI_AVEncMPVGOPSize,
+                variante_u32((fps.max(1.0) * 2.0) as u32),
+            );
+
+            eprintln!(
+                "[encoder] {}: aceitou [{}], recusou [{}]",
+                self.nome,
+                aplicados.join(" "),
+                recusados.join(" ")
+            );
+            // O nome e o unico campo deste modulo que chega ao painel. Colar os
+            // ajustes nele evita atravessar tres camadas so para mostrar um
+            // texto, e e o que transforma "a imagem esta feia" em um relato com
+            // dado dentro.
+            if let Some(corte) = self.nome.find(" [") {
+                self.nome.truncate(corte);
+            }
+            if !recusados.is_empty() {
+                self.nome.push_str(&format!(" [sem: {}]", recusados.join(",")));
             }
         }
 
@@ -888,23 +1072,37 @@ impl Mft {
         }
     }
 
-    unsafe fn definir_bitrate(&self, bps: u64) {
-        if let Some(api) = &self.codec_api {
-            unsafe {
-                let _ = api.SetValue(
-                    &CODECAPI_AVEncCommonMeanBitRate,
-                    &variante_u32(bps.min(u64::from(u32::MAX)) as u32),
-                );
-            }
+    /// Segue a estimativa de banda do WebRTC.
+    ///
+    /// O teto e o balde andam junto com a media: mexer so na media deixa o
+    /// codificador em CBR com um balde dimensionado para a taxa antiga, que e
+    /// o pior dos dois mundos — apertado quando a banda sobe, frouxo quando
+    /// ela cai.
+    unsafe fn definir_bitrate(&self, bps: u64, fps: f64) {
+        let Some(api) = &self.codec_api else { return };
+        let teto = bps.min(u64::from(u32::MAX)) as u32;
+        let balde = (((bps as f64 / fps.max(1.0)) * 2.0) as u64).clamp(1, u64::from(u32::MAX)) as u32;
+        unsafe {
+            let _ = api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variante_u32(teto));
+            let _ = api.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &variante_u32(teto));
+            let _ = api.SetValue(&CODECAPI_AVEncCommonBufferSize, &variante_u32(balde));
         }
     }
 
+    /// Pede um quadro-chave pelos dois caminhos que existem.
+    ///
+    /// `AVEncVideoForceKeyFrame` no `ICodecAPI` e o caminho que o NVENC segue.
+    /// O AMF da AMD costuma aceitar a chamada e nao produzir chave nenhuma;
+    /// o que ele respeita e a marca no proprio quadro de entrada, posta em
+    /// `entregar`. Pedir pelos dois nao custa nada e nao ha efeito de pedir
+    /// duas vezes: sai uma chave so.
     unsafe fn forcar_chave(&self) {
         if let Some(api) = &self.codec_api {
             unsafe {
                 let _ = api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &variante_u32(1));
             }
         }
+        self.chave_pendente.set(true);
     }
 
     /// A passada de linha que o MFT diz que vai usar para ler a entrada.
@@ -956,6 +1154,17 @@ impl Mft {
             amostra.AddBuffer(&buffer).map_err(|e| e.to_string())?;
             // Media Foundation conta em unidades de 100 ns.
             amostra.SetSampleTime(job.timestamp_us * 10).map_err(|e| e.to_string())?;
+            // A marca vai no quadro, nao no codificador: e assim que o AMF
+            // aceita o pedido de chave. Limpa antes do `ProcessInput` para que
+            // um erro na entrega nao deixe o pedido grudado em todo quadro
+            // seguinte, o que transformaria a transmissao numa sequencia de
+            // chaves e mataria a banda.
+            if self.chave_pendente.replace(false) {
+                let _ = amostra.SetUINT32(
+                    &MFSampleExtension_VideoEncodePictureType,
+                    eAVEncH264PictureType_IDR.0 as u32,
+                );
+            }
             self.transform.ProcessInput(0, &amostra, 0).map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -1081,6 +1290,9 @@ fn comeca_com(todo: &[u8], prefixo: &[u8]) -> bool {
     /// Manda uma amostra ja comprimida para a faixa publicada.
     unsafe fn entregar_amostra(&self, source: &NativeVideoSource, amostra: IMFSample) {
         let chave = unsafe { amostra.GetUINT32(&MFSampleExtension_CleanPoint) }.unwrap_or(0) == 1;
+        if chave {
+            self.chaves_emitidas.set(self.chaves_emitidas.get() + 1);
+        }
         let timestamp_us = unsafe { amostra.GetSampleTime() }.unwrap_or(0) / 10;
 
         let Ok(buffer) = (unsafe { amostra.ConvertToContiguousBuffer() }) else { return };
@@ -1142,6 +1354,18 @@ fn fracao_de_fps(fps: f64) -> (u32, u32) {
 
 /// `ICodecAPI` fala em `VARIANT`, e todos os controles que usamos sao
 /// inteiros sem sinal.
+/// `VARIANT` booleano. `VT_BOOL` verdadeiro e -1, e nao 1: valor 1 e aceito
+/// por uns e recusado por outros, e o `ICodecAPI` e do segundo grupo.
+fn variante_bool(valor: bool) -> VARIANT {
+    let mut variante = VARIANT::default();
+    unsafe {
+        let interno = &mut variante.Anonymous.Anonymous;
+        interno.vt = VT_BOOL;
+        interno.Anonymous.boolVal = windows::Win32::Foundation::VARIANT_BOOL(if valor { -1 } else { 0 });
+    }
+    variante
+}
+
 fn variante_u32(valor: u32) -> VARIANT {
     let mut variante = VARIANT::default();
     unsafe {

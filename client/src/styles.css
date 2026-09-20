@@ -265,13 +265,12 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
    conectado; esta marca diz o que voce esta vendo. */
 .channel.voice.olhando { background: #3d3d46; box-shadow: inset 2px 0 0 var(--accent); }
 
-/* modo grande: um compartilhamento domina o painel e o chat vira faixa embaixo */
+/* modo grande: um compartilhamento domina o palco. Nao mexe na conversa: ela so
+   aparece com o palco escondido, e a faixa de 148px que sobrou da divisao antiga
+   prendia o chat ao voltar para um canal de texto com o modo grande ligado. */
 .stage.has-theater { grid-template-columns: 1fr; }
 .stage.has-theater .track-tile:not(.theater) { display: none; }
 .main-panel.theater-mode > .stage { flex: 1 1 auto; height: auto; max-height: none; min-height: 0; resize: none; }
-.main-panel.theater-mode > .messages { flex: 0 0 148px; }
-.main-panel.theater-mode .welcome { display: none; }
-.main-panel.theater-mode .message { padding: 4px 0; }
 .track-tile.theater { min-height: 0; height: 100%; }
 /* Tela cheia acontece no proprio `stage`, com a tile escolhida ocupando tudo.
    O `stage` sobrevive as trocas de transmissao, e por isso a barra de chamada
