@@ -2070,12 +2070,17 @@ async function connectVoice() {
       adaptiveStream: { pixelDensity: "screen" },
       dynacast: true,
       disconnectOnPageLeave: true,
-      // Camera em 1080p30 sempre que a webcam permitir.
-      videoCaptureDefaults: { resolution: { width: 1920, height: 1080, frameRate: 30 } },
+      // Camera em 720p24. Era 1080p30 a 3 Mbps, e com quatro cameras ligadas
+      // isso pedia ~12 Mbps de descida por pessoa — mais do que o link de casa
+      // entrega. O assinante afogava, e **a voz morria junto**, porque ela viaja
+      // na mesma conexao do video (medido 2026-09-20: estimativa de banda caindo
+      // a 6-52 kbps e `DEFICIENT` a cada dois segundos). A tile e miniatura: os
+      // outros 3/4 da banda nao viravam imagem visivel, so perda de pacote.
+      videoCaptureDefaults: { resolution: { width: 1280, height: 720, frameRate: 24 } },
       publishDefaults: {
         // Camadas menores para quem estiver com rede ruim do outro lado.
-        videoSimulcastLayers: [VideoPresets.h540, VideoPresets.h216],
-        videoEncoding: { maxBitrate: 3_000_000, maxFramerate: 30 },
+        videoSimulcastLayers: [VideoPresets.h360, VideoPresets.h180],
+        videoEncoding: { maxBitrate: 1_200_000, maxFramerate: 24 },
         // Tela em 1080p a 30fps: o padrao do LiveKit e 15fps, e era isso que
         // deixava tudo pixelado quando a imagem tinha movimento.
         screenShareEncoding: { maxBitrate: 5_000_000, maxFramerate: 30 },
@@ -2159,6 +2164,13 @@ async function connectVoice() {
           void publication.setSubscribed(false);
           return;
         }
+        // Camera chegando com as cameras suspensas volta a ser recusada: com
+        // `autoSubscribe` a assinatura e automatica, e sem isto a primeira
+        // camera publicada desfaria a suspensao pelas costas.
+        if (track.source === Track.Source.Camera && camerasSuspensas) {
+          void publication.setSubscribed(false);
+          return;
+        }
         attachTrack(track, participant); applyAllVolumes(); renderPeople();
       })
       .on(RoomEvent.TrackPublished, (publication, participant) => {
@@ -2223,12 +2235,12 @@ async function connectVoice() {
     await next.connect(access.url, access.token, { autoSubscribe: true });
     // Entrar num canal de voz ja abre o microfone, como no Discord.
     try {
-      await next.localParticipant.setMicrophoneEnabled(true, voz.opcoesDeCaptura());
+      await abrirMicrofone(next);
       await instalarCadeia();
       micEnabled = true; micButton.classList.add("active"); setIcon(micButton, "mic");
-    } catch {
+    } catch (erro) {
       micEnabled = false; micButton.classList.remove("active"); setIcon(micButton, "mic-off");
-      showToast("O Windows não liberou o microfone.");
+      showToast(recadoDoMicrofone(erro));
     }
     // O WebView bloqueia som automatico ate haver interacao; startAudio destrava.
     audioEnabled = true; audioButton.classList.remove("active"); setIcon(audioButton, "audio");
@@ -2317,8 +2329,71 @@ async function instalarCadeia() {
 //
 // E um so, compartilhado entre o portao e o medidor das configuracoes: abrir o
 // microfone duas vezes em paralelo funciona, mas gasta a toa.
+/// Abre o microfone na chamada com o aparelho escolhido nas configuracoes.
+///
+/// Sem isto o LiveKit abre o **padrao do Windows**, que nao e necessariamente o
+/// que a pessoa escolheu e testou no medidor — daí o caso de "o microfone
+/// funciona no teste e nao funciona na chamada". Se o escolhido nao abrir por
+/// ter sumido, cai no padrao em vez de deixar a pessoa muda.
+async function abrirMicrofone(alvo: Room) {
+  const escolhido = readDevices().mic;
+  try {
+    await alvo.localParticipant.setMicrophoneEnabled(true, voz.opcoesDeCaptura(escolhido));
+  } catch (erro) {
+    const nome = erro instanceof Error ? erro.name : "";
+    // Microfone ocupado quase sempre e o proprio aplicativo: o medidor das
+    // configuracoes segura a captura aberta, e driver em modo exclusivo recusa
+    // a segunda abertura do mesmo aparelho. Era o caso de "funciona no teste e
+    // nao funciona ao entrar na chamada" — o teste era quem estava segurando.
+    if (nome === "NotReadableError" && largarMedicao()) {
+      console.warn("[voz] microfone ocupado pelo medidor; soltando e tentando de novo", erro);
+      await alvo.localParticipant.setMicrophoneEnabled(true, voz.opcoesDeCaptura(escolhido));
+      return;
+    }
+    if (!escolhido || (nome !== "NotFoundError" && nome !== "OverconstrainedError")) throw erro;
+    console.warn("[voz] microfone escolhido nao abriu, caindo no padrao", erro);
+    await alvo.localParticipant.setMicrophoneEnabled(true, voz.opcoesDeCaptura());
+  }
+}
+
+/// Solta a captura do medidor, custe o que custar. Devolve se havia o que soltar.
+///
+/// Diferente de `soltarFaixaDeMedicao`, que so devolve uma vaga da contagem:
+/// aqui a chamada tem prioridade sobre a barrinha, entao a captura morre mesmo
+/// com o dialogo aberto. O medidor pede outra quando precisar — ele ja trata
+/// faixa encerrada.
+function largarMedicao(): boolean {
+  if (!fluxoDeMedicao) return false;
+  fluxoDeMedicao.getTracks().forEach(faixa => faixa.stop());
+  fluxoDeMedicao = null;
+  usuariosDaMedicao = 0;
+  return true;
+}
+
+/// Diz o que o Windows respondeu, em vez de um recado unico para tudo.
+///
+/// Os motivos pedem acoes diferentes: permissao negada se resolve na Privacidade
+/// do Windows, aparelho ocupado se resolve fechando quem o segura, e aparelho
+/// sumido se resolve escolhendo outro.
+function recadoDoMicrofone(erro: unknown): string {
+  console.warn("[voz] microfone nao abriu", erro);
+  switch (erro instanceof Error ? erro.name : "") {
+    case "NotAllowedError":
+      return "O Windows bloqueou o microfone. Abra Privacidade e segurança › Microfone e libere o acesso para aplicativos da área de trabalho.";
+    case "NotReadableError":
+    case "AbortError":
+      return "Outro programa está segurando o microfone. Feche quem estiver usando e tente de novo.";
+    case "NotFoundError":
+    case "OverconstrainedError":
+      return "O microfone escolhido não foi encontrado. Escolha outro em Configurações › Voz.";
+    default:
+      return "Não foi possível abrir o microfone" + (erro instanceof Error && erro.message ? ": " + erro.message : ".");
+  }
+}
+
 let fluxoDeMedicao: MediaStream | null = null;
 let usuariosDaMedicao = 0;
+let ultimoErroDeMedicao: unknown = null;
 
 async function pegarFaixaDeMedicao(): Promise<MediaStreamTrack | null> {
   usuariosDaMedicao += 1;
@@ -2332,7 +2407,9 @@ async function pegarFaixaDeMedicao(): Promise<MediaStreamTrack | null> {
       fluxoDeMedicao = await navigator.mediaDevices.getUserMedia({
         audio: voz.opcoesDeCaptura(readDevices().mic),
       });
-    } catch {
+    } catch (erro) {
+      // Guardado para o medidor poder dizer o motivo, e nao so "nao liberou".
+      ultimoErroDeMedicao = erro;
       usuariosDaMedicao -= 1;
       return null;
     }
@@ -2548,6 +2625,14 @@ function vigiaDeMidia() {
     if (reconectandoDesde && agora - reconectandoDesde > 20_000) { await reentrar("reconexao sem fim"); return; }
     if (sala.state !== "connected") return;
 
+    // Conexao afogada nao se conserta mexendo na assinatura da voz: reassinar
+    // e reentrar sob congestionamento so trocam uma faixa que chega atrasada por
+    // uma que nao chega — foi assim que "um para de ouvir o outro" virou rotina
+    // com as cameras ligadas. Primeiro derruba a imagem, que e quem come a
+    // banda, e da 15 s para a rede aliviar antes de qualquer medida na voz.
+    const afogado = ["poor", "lost"].includes(String(sala.localParticipant.connectionQuality));
+    const naCarencia = camerasSuspensas && agora - suspensasDesde < 15_000;
+
     const vivas = new Set<string>();
     let remotas = 0, remotasParadas = 0, precisaReentrar = "";
     for (const participante of sala.remoteParticipants.values()) {
@@ -2564,6 +2649,11 @@ function vigiaDeMidia() {
       if (ms < PARADA_MS) { vozesParadas.delete(who); continue; }
       remotasParadas++;
       vozesParadas.add(who);
+      // Faixa parada com a conexao afogada: o problema e banda, nao assinatura.
+      if (afogado || naCarencia) {
+        if (afogado && suspenderCameras(sala)) ultimo.delete(chave);
+        continue;
+      }
       const tentou = reassinadaEm.get(pub.trackSid) || 0;
       if (agora - tentou > 60_000) {
         reassinadaEm.set(pub.trackSid, agora);
@@ -2587,10 +2677,84 @@ function vigiaDeMidia() {
     }
     if (remotas >= 2 && remotasParadas === remotas) precisaReentrar ||= "nenhuma voz chegando";
     if (room !== sala) return;
+    // Reentrar sob congestionamento derruba a chamada de quem ja estava mal e
+    // volta para a mesma rede cheia. Se ainda ha camera assinada, ela cai
+    // primeiro; a reentrada fica para a volta seguinte, se ainda fizer falta.
+    if (precisaReentrar && (afogado || naCarencia)) {
+      if (afogado) suspenderCameras(sala);
+      return;
+    }
     if (precisaReentrar) await reentrar(precisaReentrar);
   }, 4000);
 }
 vigiaDeMidia();
+
+/// Com a conexao afogada, a voz ganha da camera.
+///
+/// Medido em 2026-09-20: com as cameras ligadas o assinante de quem tem link
+/// curto entrava em `DEFICIENT` a cada dois segundos e a estimativa de banda
+/// caia para dezenas de kbps. Imagem e voz viajam na mesma conexao, entao a voz
+/// morria junto — era o "um nao ouve o outro" que so reentrar resolvia, e que
+/// so acontecia com camera ligada.
+///
+/// Suspender e reversivel e barato: as faixas de camera voltam sozinhas quando
+/// a conexao segura por meio minuto. Sair da chamada continua sendo a ultima
+/// carta do vigia de midia; esta aqui e a primeira, e bem mais suave.
+let camerasSuspensas = false;
+/// Quando a suspensao das cameras comecou, para dar tempo de a rede aliviar
+/// antes de o vigia de midia partir para medidas mais duras.
+let suspensasDesde = 0;
+
+const cameraPubs = (sala: Room) => [...sala.remoteParticipants.values()]
+  .flatMap(pessoa => [...pessoa.trackPublications.values()] as RemoteTrackPublication[])
+  .filter(pub => pub.source === Track.Source.Camera);
+
+/// Derruba a imagem para salvar a voz. Devolve se havia o que derrubar.
+function suspenderCameras(sala: Room): boolean {
+  if (camerasSuspensas) return false;
+  const pubs = cameraPubs(sala).filter(pub => pub.isSubscribed);
+  if (!pubs.length) return false;
+  camerasSuspensas = true;
+  suspensasDesde = Date.now();
+  for (const pub of pubs) void pub.setSubscribed(false);
+  showToast("Conexão fraca: câmeras pausadas para a voz não falhar.");
+  return true;
+}
+
+function vigiaDeBanda() {
+  const RUIM_MS = 6_000;
+  const BOM_MS = 30_000;
+  let ruimDesde = 0;
+  let bomDesde = 0;
+
+  window.setInterval(() => {
+    const sala = room;
+    if (!sala || sala.state !== "connected") { ruimDesde = 0; bomDesde = 0; return; }
+    // `poor` e `lost` sao a leitura que o proprio LiveKit faz de perda e atraso;
+    // `unknown` nao e ma noticia, e nao pode virar suspensao.
+    const qualidade = String(sala.localParticipant.connectionQuality);
+    const ruim = qualidade === "poor" || qualidade === "lost";
+    const agora = Date.now();
+
+    if (ruim) {
+      bomDesde = 0;
+      if (!ruimDesde) ruimDesde = agora;
+      if (agora - ruimDesde >= RUIM_MS) suspenderCameras(sala);
+      return;
+    }
+
+    ruimDesde = 0;
+    if (!camerasSuspensas) return;
+    if (!bomDesde) bomDesde = agora;
+    if (agora - bomDesde < BOM_MS) return;
+    camerasSuspensas = false;
+    suspensasDesde = 0;
+    bomDesde = 0;
+    for (const pub of cameraPubs(sala)) void pub.setSubscribed(true);
+    showToast("Conexão estabilizou: câmeras de volta.");
+  }, 4000);
+}
+vigiaDeBanda();
 
 /// Destrava a reproducao de som. Se o WebView recusar, tenta de novo no primeiro
 /// clique do usuario, que conta como interacao.
@@ -2619,18 +2783,19 @@ async function definirMicrofone(ligado: boolean) {
   if (!room) return;
   try {
     micEnabled = ligado;
-    await room.localParticipant.setMicrophoneEnabled(ligado, voz.opcoesDeCaptura());
+    if (ligado) await abrirMicrofone(room);
+    else await room.localParticipant.setMicrophoneEnabled(false);
     if (ligado) await instalarCadeia();
     // A faixa nasce aberta; o portao decide se ela continua assim.
     void reiniciarPortao();
     micButton.classList.toggle("active", micEnabled);
     setIcon(micButton, micEnabled ? "mic" : "mic-off");
     renderPeople(); renderNavigation();
-  } catch {
+  } catch (erro) {
     micEnabled = false;
     micButton.classList.remove("active");
     setIcon(micButton, "mic-off");
-    showToast("O Windows não liberou o microfone.");
+    showToast(recadoDoMicrofone(erro));
   }
 }
 micButton.onclick = async () => { if (!await ensureInCall() || !room) return; await definirMicrofone(!micEnabled); };
@@ -4914,7 +5079,7 @@ async function ligarMedidorDoDialogo() {
   // quando a pessoa esta ali para ajustar o limiar.
   const faixa = await pegarFaixaDeMedicao();
   if (!faixa) {
-    nota.textContent = "O Windows não liberou o microfone para o teste.";
+    nota.textContent = recadoDoMicrofone(ultimoErroDeMedicao);
     return;
   }
   nota.textContent = "Fale para ver o nível. A marca clara é o ponto em que o microfone abre.";
