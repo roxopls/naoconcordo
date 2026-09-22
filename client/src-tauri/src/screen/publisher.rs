@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use livekit::{
     Room, RoomOptions,
-    options::{DegradationPreference, TrackPublishOptions, VideoCodec, VideoEncoding},
+    options::{AudioEncoding, DegradationPreference, TrackPublishOptions, VideoCodec, VideoEncoding},
     track::{LocalAudioTrack, LocalTrack, LocalVideoTrack, TrackSource},
     webrtc::{
         audio_source::{RtcAudioSource, native::NativeAudioSource},
@@ -411,7 +411,25 @@ async fn publish_audio(
         .local_participant()
         .publish_track(
             LocalTrack::Audio(track),
-            TrackPublishOptions { source: TrackSource::ScreenshareAudio, ..Default::default() },
+            TrackPublishOptions {
+                source: TrackSource::ScreenshareAudio,
+                // Som de jogo e musica, nao conversa.
+                //
+                // O padrao do LiveKit e `dtx: true`, que e supressao de
+                // silencio: o Opus para de transmitir no que julga silencio e
+                // manda so atualizacao esparsa de ruido de conforto. Em voz
+                // isso e economia; aqui e defeito, porque som baixo e continuo
+                // — ambiente, musica de fundo, passo distante — fica entrando e
+                // saindo, e chega do outro lado como se estivesse espremido.
+                //
+                // Sem `audio_encoding` o Opus tambem fica no teto de fala, em
+                // torno de 24 kbps. Estereo de alta qualidade sao 128 kbps: a
+                // captura ja vem em 48 kHz e dois canais (`audio.rs`), entao o
+                // que faltava era deixar o codec usar isso.
+                dtx: false,
+                audio_encoding: Some(AudioEncoding { max_bitrate: 128_000 }),
+                ..Default::default()
+            },
         )
         .await
         .is_err()

@@ -27,13 +27,20 @@ type Quality = { id: string; label: string; hint: string } & ShareQuality;
 // Os mesmos degraus da janela principal. Ficam repetidos de proposito: importar
 // o `main.ts` traria o aplicativo inteiro para dentro desta janela.
 const QUALITIES: Quality[] = [
-  { id: "720p30", label: "720p 30fps", hint: "leve, para upload curto", width: 1280, height: 720, fps: 30, bitrate: 3_000_000 },
-  { id: "1080p30", label: "1080p 30fps", hint: "equilíbrio, bom para janela e leitura", width: 1920, height: 1080, fps: 30, bitrate: 5_000_000 },
-  { id: "1080p60", label: "1080p 60fps", hint: "movimento fluido, para jogo", width: 1920, height: 1080, fps: 60, bitrate: 8_000_000 },
+  { id: "baixa", label: "Baixa — 720p 30fps", hint: "para upload curto: pede ~3 Mbps de subida", width: 1280, height: 720, fps: 30, bitrate: 3_000_000 },
+  { id: "media", label: "Média — 1080p 30fps", hint: "para upload folgado: pede ~8 Mbps de subida", width: 1920, height: 1080, fps: 30, bitrate: 8_000_000 },
+  { id: "alta", label: "Alta — 1080p 60fps", hint: "para upload sobrando: pede ~12 Mbps de subida", width: 1920, height: 1080, fps: 60, bitrate: 12_000_000 },
 ];
 const QUALITY_KEY = "naoconcordo.quality";
-const readQuality = (): Quality =>
-  QUALITIES.find(item => item.id === localStorage.getItem(QUALITY_KEY)) || QUALITIES[1];
+/// Mesma migracao da janela principal: nome antigo continua valendo.
+const DEGRAUS_ANTIGOS: Record<string, string> = {
+  "720p30": "baixa", "1080p30": "media", "1080p60": "alta",
+};
+const readQuality = (): Quality => {
+  const salvo = localStorage.getItem(QUALITY_KEY) || "";
+  const id = DEGRAUS_ANTIGOS[salvo] || salvo;
+  return QUALITIES.find(item => item.id === id) || QUALITIES[1];
+};
 
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const grid = byId<HTMLDivElement>("telas-grid");

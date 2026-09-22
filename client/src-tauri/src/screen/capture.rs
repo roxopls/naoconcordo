@@ -13,6 +13,8 @@ use std::sync::{
     atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
 };
 
+use std::borrow::Cow;
+
 use livekit::webrtc::{
     native::yuv_helper,
     video_frame::{NV12Buffer, VideoFrame, VideoRotation},
@@ -65,6 +67,24 @@ impl Destino {
         timestamp_us: i64,
         ultimo: &Ultimo,
     ) {
+        // Escada de resolucao, so no caminho de hardware: menos bits tem de
+        // significar menos pixels. Ver `EncoderHandle::tamanho_alvo`. No caminho
+        // de software quem encolhe e o proprio libwebrtc, e mexer aqui seria
+        // encolher duas vezes.
+        let (largura, altura, bgra, stride) = match self {
+            Self::Hardware(encoder) => {
+                let (alvo_l, alvo_a) = encoder.tamanho_alvo(largura, altura);
+                if alvo_l != largura || alvo_a != altura {
+                    let menor = reduzir_bgra(bgra, stride, largura, altura, alvo_l, alvo_a);
+                    (alvo_l, alvo_a, Cow::Owned(menor), alvo_l * 4)
+                } else {
+                    (largura, altura, Cow::Borrowed(bgra), stride)
+                }
+            }
+            Self::Software(_) => (largura, altura, Cow::Borrowed(bgra), stride),
+        };
+        let bgra: &[u8] = &bgra;
+
         let pixels = largura as usize * altura as usize;
         // NV12 sem folga: plano Y inteiro, depois o UV entrelacado com metade
         // das linhas. E o formato que o MFT espera quando o passo de linha e
@@ -124,6 +144,65 @@ impl Destino {
             }
         }
     }
+}
+
+/// Reduz um quadro BGRA para `destino_l` x `destino_a`, tirando a media da
+/// area de origem que cai em cada pixel novo.
+///
+/// Media de area, e nao o pixel mais proximo: tela tem texto e linhas de um
+/// pixel, e o vizinho mais proximo transforma isso em serrilhado que pisca a
+/// cada quadro — justamente o tipo de detalhe que custa caro ao codificador.
+/// A media custa mais CPU, mas so roda quando a escada desceu, que e quando a
+/// banda ja e o gargalo e sobra processador.
+///
+/// So reduz. Ampliar nao faz sentido aqui e sairia borrado.
+fn reduzir_bgra(
+    origem: &[u8],
+    stride: u32,
+    origem_l: u32,
+    origem_a: u32,
+    destino_l: u32,
+    destino_a: u32,
+) -> Vec<u8> {
+    let stride = stride as usize;
+    let (origem_l, origem_a) = (origem_l as usize, origem_a as usize);
+    let (destino_l, destino_a) = (destino_l as usize, destino_a as usize);
+    let mut saida = vec![0u8; destino_l * destino_a * 4];
+    if destino_l == 0 || destino_a == 0 || destino_l > origem_l || destino_a > origem_a {
+        return saida;
+    }
+
+    for y in 0..destino_a {
+        let y0 = y * origem_a / destino_a;
+        let y1 = (((y + 1) * origem_a).div_ceil(destino_a)).max(y0 + 1).min(origem_a);
+        for x in 0..destino_l {
+            let x0 = x * origem_l / destino_l;
+            let x1 = (((x + 1) * origem_l).div_ceil(destino_l)).max(x0 + 1).min(origem_l);
+            let (mut b, mut g, mut r, mut a) = (0u32, 0u32, 0u32, 0u32);
+            let mut contados = 0u32;
+            for linha in y0..y1 {
+                let base = linha * stride;
+                for coluna in x0..x1 {
+                    let i = base + coluna * 4;
+                    let Some(pixel) = origem.get(i..i + 4) else { continue };
+                    b += pixel[0] as u32;
+                    g += pixel[1] as u32;
+                    r += pixel[2] as u32;
+                    a += pixel[3] as u32;
+                    contados += 1;
+                }
+            }
+            if contados == 0 {
+                continue;
+            }
+            let destino = (y * destino_l + x) * 4;
+            saida[destino] = (b / contados) as u8;
+            saida[destino + 1] = (g / contados) as u8;
+            saida[destino + 2] = (r / contados) as u8;
+            saida[destino + 3] = (a / contados) as u8;
+        }
+    }
+    saida
 }
 
 /// Copia `linhas` de `largura` bytes, de um plano sem folga para um com folga.
@@ -799,4 +878,50 @@ pub fn start(
     // nao subiu seria trabalho para ninguem.
     iniciar_cadencia(&destino_da_cadencia, &ultimo, &contagem, stop.clone(), intervalo);
     Ok((CaptureHandle::Wgc { control: Some(control), stop, contagem }, motor))
+}
+
+#[cfg(test)]
+mod testes {
+    use super::reduzir_bgra;
+
+    /// Cor chapada continua a mesma cor depois de encolher.
+    #[test]
+    fn a_media_preserva_cor_chapada() {
+        let origem = vec![10u8, 20, 30, 255].repeat(16); // 4x4
+        let menor = reduzir_bgra(&origem, 4 * 4, 4, 4, 2, 2);
+        assert_eq!(menor.len(), 2 * 2 * 4);
+        assert_eq!(&menor[0..4], &[10, 20, 30, 255]);
+        assert_eq!(&menor[12..16], &[10, 20, 30, 255]);
+    }
+
+    /// Metade preto e metade branco viram cinza: e media de area, nao o pixel
+    /// mais proximo.
+    #[test]
+    fn a_media_mistura_vizinhos() {
+        let mut origem = vec![0u8; 2 * 2 * 4];
+        for i in 0..2 {
+            // Primeira coluna branca, segunda preta, nas duas linhas.
+            let base = i * 2 * 4;
+            origem[base..base + 4].copy_from_slice(&[255, 255, 255, 255]);
+        }
+        let menor = reduzir_bgra(&origem, 2 * 4, 2, 2, 1, 1);
+        assert_eq!(menor, vec![127, 127, 127, 127]);
+    }
+
+    /// Passo de linha maior que a largura e o caso normal no Windows: a conta
+    /// nao pode ler a folga como se fosse imagem.
+    #[test]
+    fn respeita_o_passo_de_linha() {
+        // 2x2 com 8 bytes de folga por linha, tudo branco na area util.
+        let mut origem = vec![0u8; 2 * (2 * 4 + 8)];
+        for linha in 0..2 {
+            let base = linha * (2 * 4 + 8);
+            for coluna in 0..2 {
+                origem[base + coluna * 4..base + coluna * 4 + 4]
+                    .copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        let menor = reduzir_bgra(&origem, 2 * 4 + 8, 2, 2, 1, 1);
+        assert_eq!(menor, vec![255, 255, 255, 255]);
+    }
 }

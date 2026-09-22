@@ -2083,7 +2083,7 @@ async function connectVoice() {
         videoEncoding: { maxBitrate: 1_200_000, maxFramerate: 24 },
         // Tela em 1080p a 30fps: o padrao do LiveKit e 15fps, e era isso que
         // deixava tudo pixelado quando a imagem tinha movimento.
-        screenShareEncoding: { maxBitrate: 5_000_000, maxFramerate: 30 },
+        screenShareEncoding: { maxBitrate: 12_000_000, maxFramerate: 30 },
         screenShareSimulcastLayers: [],
         videoCodec: "vp9",
         backupCodec: { codec: "vp8" },
@@ -2849,6 +2849,12 @@ screenButton.onclick = async () => {
         // banda tira nitidez em vez de travar a imagem.
         degradationPreference: "maintain-framerate",
         simulcast: false,
+        // Som de jogo e musica, nao conversa: sem supressao de silencio e com
+        // teto de estereo. O DTX corta o que julga silencio, e som baixo e
+        // continuo fica entrando e saindo. Vale so aqui — no microfone o DTX
+        // continua, que la ele economiza banda sem estragar nada.
+        dtx: false,
+        audioPreset: { maxBitrate: 128_000 },
       });
       screenEnabled = true;
       screenButton.classList.add("active");
@@ -6808,20 +6814,26 @@ function updateUnreadTitle() {
 
 // ------------------------------------------------------- qualidade da tela
 // O LiveKit so entrega presets ate 1080p30, entao 60fps sai daqui.
-type QualityId = "720p30" | "1080p30" | "1080p60";
+type QualityId = "baixa" | "media" | "alta";
 type Quality = {
   id: QualityId; label: string; hint: string;
   width: number; height: number; fps: number; bitrate: number;
 };
 const QUALITIES: Quality[] = [
-  { id: "720p30", label: "720p 30fps", hint: "leve, para upload curto", width: 1280, height: 720, fps: 30, bitrate: 3_000_000 },
-  { id: "1080p30", label: "1080p 30fps", hint: "equilíbrio, bom para janela e leitura", width: 1920, height: 1080, fps: 30, bitrate: 5_000_000 },
-  { id: "1080p60", label: "1080p 60fps", hint: "movimento fluido, para jogo", width: 1920, height: 1080, fps: 60, bitrate: 8_000_000 },
+  { id: "baixa", label: "Baixa — 720p 30fps", hint: "para upload curto: pede ~3 Mbps de subida", width: 1280, height: 720, fps: 30, bitrate: 3_000_000 },
+  { id: "media", label: "Média — 1080p 30fps", hint: "para upload folgado: pede ~8 Mbps de subida", width: 1920, height: 1080, fps: 30, bitrate: 8_000_000 },
+  { id: "alta", label: "Alta — 1080p 60fps", hint: "para upload sobrando: pede ~12 Mbps de subida", width: 1920, height: 1080, fps: 60, bitrate: 12_000_000 },
 ];
 const QUALITY_KEY = "naoconcordo.quality";
+/// Nomes antigos, de quando o degrau se chamava pela resolucao. Quem ja tinha
+/// escolhido nao pode cair no padrao so porque a etiqueta mudou.
+const DEGRAUS_ANTIGOS: Record<string, QualityId> = {
+  "720p30": "baixa", "1080p30": "media", "1080p60": "alta",
+};
 function readQuality(): Quality {
-  const saved = localStorage.getItem(QUALITY_KEY);
-  return QUALITIES.find(item => item.id === saved) || QUALITIES[1];
+  const saved = localStorage.getItem(QUALITY_KEY) || "";
+  const id = DEGRAUS_ANTIGOS[saved] || saved;
+  return QUALITIES.find(item => item.id === id) || QUALITIES[1];
 }
 function saveQuality(id: QualityId) { localStorage.setItem(QUALITY_KEY, id); }
 

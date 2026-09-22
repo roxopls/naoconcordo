@@ -22,11 +22,11 @@
 //! o `METransformNeedInput` chega. Fazer esse laco na thread da captura
 //! seguraria o WGC, que entrega quadro no ritmo do compositor.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use livekit::webrtc::video_frame::{EncodedFrameType, EncodedVideoCodec, EncodedVideoFrame};
 use livekit::webrtc::video_source::{VideoResolution, native::NativeVideoSource};
@@ -107,6 +107,68 @@ pub struct EncoderHandle {
     /// Por que o codificador parou, quando parou sozinho. Sem isto a thread
     /// morria calada e a transmissao ficava em zero quadro sem explicacao.
     falha: Arc<std::sync::Mutex<Option<String>>>,
+    /// Bits por segundo que o controle de congestionamento esta liberando agora.
+    ///
+    /// Vive aqui porque quem precisa dele e a **captura**, que roda noutra
+    /// thread: e ela que decide em que tamanho o quadro entra no codificador.
+    alvo: Arc<AtomicU64>,
+    /// Degrau da escada de resolucao em vigor: 0 = tamanho cheio, e cada degrau
+    /// seguinte encolhe mais (ver `DEGRAUS_DE_ESCALA`).
+    degrau: Arc<AtomicU32>,
+    /// Quando o degrau mudou pela ultima vez, em milissegundos desde `inicio`.
+    /// Segura a escada quieta por alguns segundos e evita subir e descer a cada
+    /// oscilacao da estimativa de banda.
+    degrau_desde: Arc<AtomicU64>,
+    inicio: Instant,
+    /// Quadros por segundo pedidos. A escada precisa deles para saber quantos
+    /// bits sobram por pixel.
+    fps: f64,
+}
+
+/// Os degraus da escada, como fracao do tamanho capturado.
+///
+/// Passos curtos de proposito: cada troca custa um quadro-chave e um MFT novo,
+/// entao pular de 1080p direto para 360p seria visivel como solavanco. Quatro
+/// degraus cobrem de 12 Mbps a menos de 1 Mbps sem buraco grande entre eles.
+const DEGRAUS_DE_ESCALA: [(u32, u32); 4] = [(1, 1), (3, 4), (1, 2), (1, 3)];
+
+/// Bits por pixel por quadro que se quer manter.
+///
+/// Abaixo disto o codificador para de ter bits para o detalhe e comeca a
+/// entregar bloco — e o "derretimento". O valor vem da pratica com tela de
+/// jogo em H.264/AV1: 0,05 bpp segura a imagem, 0,03 ja aparece sujeira.
+const BPP_ALVO: f64 = 0.05;
+/// Margem para subir de volta: so sobe quando sobra folga de verdade, senao a
+/// escada fica pingando entre dois degraus na mesma banda.
+const BPP_PARA_SUBIR: f64 = 0.075;
+/// Quanto tempo o degrau novo precisa esperar antes de ceder lugar a outro.
+/// Descer e urgente (a imagem ja esta ruim); subir pode esperar.
+const ESPERA_PARA_DESCER: u64 = 1_500;
+const ESPERA_PARA_SUBIR: u64 = 6_000;
+
+/// Em que degrau a escada deveria estar para o bitrate que a rede liberou.
+///
+/// Separada de `tamanho_alvo` porque aqui nao ha relogio nem estado: so a
+/// conta. O amortecimento no tempo fica com quem chama.
+fn degrau_ideal(alvo: u64, largura: u32, altura: u32, fps: f64, atual: u32) -> u32 {
+    let bpp = |(num, den): (u32, u32)| {
+        let w = (largura as f64) * num as f64 / den as f64;
+        let h = (altura as f64) * num as f64 / den as f64;
+        alvo as f64 / (w * h * fps)
+    };
+    // O degrau ideal e o maior (imagem maior) que ainda paga os bits por pixel
+    // pedidos. Sem nenhum que pague, fica o menor da escada.
+    let ideal = DEGRAUS_DE_ESCALA
+        .iter()
+        .position(|passo| bpp(*passo) >= BPP_ALVO)
+        .unwrap_or(DEGRAUS_DE_ESCALA.len() - 1) as u32;
+    // Subir exige folga maior do que a que bastou para ficar: no limiar exato a
+    // escada subiria e desceria a cada estimativa nova.
+    if ideal < atual && bpp(DEGRAUS_DE_ESCALA[ideal as usize]) < BPP_PARA_SUBIR {
+        atual
+    } else {
+        ideal
+    }
 }
 
 impl EncoderHandle {
@@ -133,6 +195,45 @@ impl EncoderHandle {
     /// Por que o codificador parou, quando parou.
     pub fn falha(&self) -> Option<String> {
         self.falha.lock().ok().and_then(|vaga| vaga.clone())
+    }
+
+    /// Em que tamanho o proximo quadro deve entrar no codificador.
+    ///
+    /// **Este e o conserto do "derretimento".** A publicacao por GPU usa
+    /// `VideoEncoderBackend::PreEncoded`, e ali o libwebrtc e apenas
+    /// empacotador: ele nao tem escalador para acionar, entao a unica coisa que
+    /// cede sob pressao de banda e o bitrate. Manter 1080p60 com um bitrate que
+    /// nao paga a conta nao produz imagem pior aos poucos — produz bloco
+    /// derretido, porque o codificador joga fora o detalhe inteiro. Menos bits
+    /// tem de significar **menos pixels**, que e o que o caminho de software faz
+    /// sozinho e o de hardware nunca fez.
+    ///
+    /// Devolve sempre dimensoes pares: NV12 subamostra croma pela metade, e
+    /// dimensao impar quebra a conta.
+    pub fn tamanho_alvo(&self, largura: u32, altura: u32) -> (u32, u32) {
+        let alvo = self.alvo.load(Ordering::Relaxed);
+        let fps = self.fps;
+        if alvo == 0 || largura < 2 || altura < 2 || fps <= 0.0 {
+            return (largura, altura);
+        }
+        let atual = self.degrau.load(Ordering::Relaxed).min(DEGRAUS_DE_ESCALA.len() as u32 - 1);
+        let ideal = degrau_ideal(alvo, largura, altura, fps, atual);
+
+        let agora = self.inicio.elapsed().as_millis() as u64;
+        if ideal != atual {
+            let espera = if ideal > atual { ESPERA_PARA_DESCER } else { ESPERA_PARA_SUBIR };
+            if agora.saturating_sub(self.degrau_desde.load(Ordering::Relaxed)) >= espera {
+                self.degrau.store(ideal, Ordering::Relaxed);
+                self.degrau_desde.store(agora, Ordering::Relaxed);
+            }
+        }
+
+        let (num, den) = DEGRAUS_DE_ESCALA[self.degrau.load(Ordering::Relaxed) as usize];
+        if num == den {
+            return (largura, altura);
+        }
+        let par = |valor: u32| (valor.max(2)) & !1;
+        (par(largura * num / den), par(altura * num / den))
     }
 
     /// Pede um quadro-chave no proximo quadro.
@@ -340,6 +441,9 @@ pub fn iniciar(
     let chaves = Arc::new(AtomicU64::new(0));
     let pedidos_de_chave = Arc::new(AtomicU64::new(0));
     let falha = Arc::new(std::sync::Mutex::new(None::<String>));
+    // Comeca no bitrate pedido: ate a primeira estimativa chegar, a escada tem
+    // de ficar no tamanho cheio em vez de encolher por falta de informacao.
+    let alvo = Arc::new(AtomicU64::new(bitrate));
     // A thread responde qual codec conseguiu abrir; ate ela responder, quem
     // chamou nao sabe se ha hardware.
     let (pronto_tx, pronto_rx) = std::sync::mpsc::channel::<Result<(HwCodec, String), String>>();
@@ -349,12 +453,14 @@ pub fn iniciar(
     let chaves_thread = chaves.clone();
     let pedidos_thread = pedidos_de_chave.clone();
     let falha_thread = falha.clone();
+    let alvo_thread = alvo.clone();
     let thread = std::thread::Builder::new()
         .name("tela-encoder".into())
         .spawn(move || {
             rodar(
                 source, rx, stop_thread, chave_thread, chaves_thread, pedidos_thread,
-                falha_thread, pronto_tx, preferencia, largura, altura, fps, bitrate,
+                falha_thread, alvo_thread, pronto_tx, preferencia, largura, altura, fps,
+                bitrate,
             );
         })
         .map_err(|e| format!("Nao foi possivel criar a thread do codificador: {e}"))?;
@@ -373,6 +479,11 @@ pub fn iniciar(
             chaves,
             pedidos_de_chave,
             falha,
+            alvo,
+            degrau: Arc::new(AtomicU32::new(0)),
+            degrau_desde: Arc::new(AtomicU64::new(0)),
+            inicio: Instant::now(),
+            fps,
         }),
         Ok(Err(erro)) => {
             stop.store(true, Ordering::Relaxed);
@@ -399,6 +510,7 @@ fn rodar(
     chaves: Arc<AtomicU64>,
     pedidos_de_chave: Arc<AtomicU64>,
     falha: Arc<std::sync::Mutex<Option<String>>>,
+    alvo_publicado: Arc<AtomicU64>,
     pronto: std::sync::mpsc::Sender<Result<(HwCodec, String), String>>,
     preferencia: Preferencia,
     largura: u32,
@@ -445,8 +557,8 @@ fn rodar(
         let _ = pronto.send(Ok((mft.codec, mft.nome.clone())));
 
         laco(
-            &source, &rx, &stop, &chave, &chaves, &pedidos_de_chave, &falha, &mut mft, ordem,
-            fps, bitrate,
+            &source, &rx, &stop, &chave, &chaves, &pedidos_de_chave, &falha, &alvo_publicado,
+            &mut mft, ordem, fps, bitrate,
         );
 
         mft.encerrar();
@@ -466,6 +578,7 @@ unsafe fn laco(
     chaves: &AtomicU64,
     pedidos_de_chave: &AtomicU64,
     falha: &std::sync::Mutex<Option<String>>,
+    alvo_publicado: &AtomicU64,
     mft: &mut Mft,
     ordem: &'static [HwCodec],
     fps: f64,
@@ -483,6 +596,18 @@ unsafe fn laco(
     let mut precisa_entrada = 0usize;
     let mut forcar_chave = false;
     let mut bitrate_atual = bitrate_inicial;
+    // Piso do controle de taxa: 1 Mbps.
+    //
+    // Baixo de proposito, porque **quem cede agora e a resolucao**, nao o
+    // detalhe. A escada (`EncoderHandle::tamanho_alvo`) encolhe o quadro
+    // conforme os bits somem, entao 1 Mbps chega ao codificador como 640x360,
+    // que e imagem limpa — e nao como 1080p60 derretido, que era o defeito.
+    //
+    // Piso mais alto seria pior: insistir em mandar mais do que o uplink
+    // entrega troca imagem feia por pacote perdido. O teto continua sendo o
+    // degrau que a pessoa escolheu; o piso so evita que o codificador desca a
+    // numeros onde nem 360p fecha.
+    let piso_de_taxa = 1_000_000;
     // Quadro recusado seguido. Um sozinho e soluco; muitos em sequencia sao
     // codificador morto — e ai vale desistir e dizer por que.
     let mut recusas = 0u32;
@@ -499,7 +624,11 @@ unsafe fn laco(
 
         // Pedido de bitrate e de quadro-chave valem para os dois modos.
         if let Some(pedido) = source.take_rate_control_request() {
-            let alvo = pedido.target_bitrate_bps.max(200_000);
+            let alvo = pedido.target_bitrate_bps.clamp(piso_de_taxa, bitrate_inicial);
+            // Publicado antes do filtro de 5%: a escada de resolucao decide na
+            // captura, noutra thread, e ela precisa do numero atual mesmo
+            // quando a diferenca e pequena demais para reconfigurar o MFT.
+            alvo_publicado.store(alvo, Ordering::Relaxed);
             if alvo.abs_diff(bitrate_atual) * 20 > bitrate_atual {
                 bitrate_atual = alvo;
                 unsafe { mft.definir_bitrate(alvo, fps) };
@@ -1388,5 +1517,37 @@ fn copiar_com_folga(origem: &[u8], largura: usize, destino: &mut [u8], passo: us
             break;
         }
         destino[para..para + largura].copy_from_slice(&origem[de..de + largura]);
+    }
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    /// 12 Mbps pagam 1080p60 inteiro; 2 Mbps nao pagam nem o terco.
+    #[test]
+    fn a_escada_desce_conforme_a_banda_encolhe() {
+        assert_eq!(degrau_ideal(12_000_000, 1920, 1080, 60.0, 0), 0);
+        assert_eq!(degrau_ideal(6_000_000, 1920, 1080, 60.0, 0), 1);
+        assert_eq!(degrau_ideal(3_000_000, 1920, 1080, 60.0, 0), 2);
+        assert_eq!(degrau_ideal(500_000, 1920, 1080, 60.0, 0), 3);
+    }
+
+    /// A 30fps o mesmo bitrate paga o dobro de pixels por quadro.
+    #[test]
+    fn menos_quadros_por_segundo_seguram_a_resolucao() {
+        assert_eq!(degrau_ideal(6_000_000, 1920, 1080, 30.0, 0), 0);
+    }
+
+    /// Subir exige folga: no limiar de descida a escada fica onde esta, em vez
+    /// de pingar entre dois degraus a cada estimativa nova.
+    #[test]
+    fn subir_exige_folga() {
+        // bpp entre BPP_ALVO e BPP_PARA_SUBIR no degrau cheio: nao sobe.
+        let apertado = (1920.0 * 1080.0 * 60.0 * 0.06) as u64;
+        assert_eq!(degrau_ideal(apertado, 1920, 1080, 60.0, 1), 1);
+        // Com folga de verdade, sobe.
+        let folgado = (1920.0 * 1080.0 * 60.0 * 0.09) as u64;
+        assert_eq!(degrau_ideal(folgado, 1920, 1080, 60.0, 1), 0);
     }
 }
