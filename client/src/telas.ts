@@ -194,7 +194,14 @@ async function start() {
     const announceClose = async () => {
       if (announced) return;
       announced = true;
-      room.disconnect();
+      // Mesma espera da janela de cameras: o espectador desta janela e um
+      // participante a parte, e sem o `await` ele so morria por `dtls timeout`,
+      // muito depois de a janela ter fechado. Teto de 2 s para saida travada
+      // nao travar o fechamento.
+      await Promise.race([
+        room.disconnect().catch(() => { /* ja caiu */ }),
+        new Promise(pronto => window.setTimeout(pronto, 2000)),
+      ]);
       try {
         const { emit } = await import("@tauri-apps/api/event");
         await emit("telas-fechada");

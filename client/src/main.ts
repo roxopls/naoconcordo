@@ -760,7 +760,25 @@ async function sairDaChamada() {
   // chega, e o guarda de sala atrasada o descarta.
   const estava = Boolean(room);
   await pararDeCompartilhar();
-  room?.disconnect(); room = null; voiceRoomId = ""; resetMediaState(); announceVoice("");
+  // `room` e zerado **antes** da espera, e nao depois: o guarda de sala atrasada
+  // (`atual()`) e o que descarta o `Disconnected` desta sala, e ele compara com
+  // `room`. Invertendo a ordem, o evento chegaria com a sala ainda corrente e
+  // refaria aqui o trabalho que as linhas abaixo ja fazem.
+  const saindo = room;
+  room = null; voiceRoomId = ""; resetMediaState(); announceVoice("");
+  // Esperar o fim da saida. Sem o `await`, a sala velha seguia viva enquanto a
+  // nova ja estava de pe: medido em 2026-09-22, o participante antigo so morreu
+  // 14 s depois, por `dtls timeout`, com o dono dele ja publicando microfone em
+  // outra sala. Duas conexoes da mesma pessoa ao mesmo LiveKit disputam banda e
+  // rendem `DUPLICATE_IDENTITY` quando o canal e o mesmo.
+  //
+  // Com teto: saida que nao termina nao pode prender a troca de canal, que e o
+  // gesto mais comum da chamada. Passando do teto, segue em frente e deixa o
+  // LiveKit derrubar a sala velha por conta propria.
+  if (saindo) await Promise.race([
+    saindo.disconnect().catch(() => { /* ja caiu */ }),
+    new Promise(pronto => window.setTimeout(pronto, 2000)),
+  ]);
   // As janelas separadas entram na sala por conta propria, com token de
   // espectador. Deixadas abertas, continuavam ligadas ao canal do qual voce
   // acabou de sair — e a de telas ainda oferece o botao de compartilhar, que
@@ -8295,7 +8313,19 @@ function resetMediaState() {
   restaurarControles(); stage.replaceChildren(); stage.classList.add("hidden");
   tileGrande = ""; tileCheia = ""; aplicarTeatro();
   cameras.clear(); renderCameras();
-  document.querySelectorAll("audio[data-naoconcordo-audio]").forEach(el => el.remove());
+  // A suspensao das cameras pertence a chamada que acabou. Deixada ligada, a
+  // chamada seguinte nascia com a protecao ja gasta: `suspenderCameras` devolve
+  // `false` de cara quando a marca esta de pe, entao a imagem nunca mais caia
+  // para salvar a voz — e, ate o vigia de banda somar 30 s de conexao boa, toda
+  // camera que chegasse era recusada no `TrackSubscribed`.
+  camerasSuspensas = false;
+  suspensasDesde = 0;
+  // `soltarMidia` antes do `remove`, e nao so o `remove`: tirar o elemento do
+  // DOM nao o tira da lista de anexados da faixa. Ele continua preso ao fluxo,
+  // continua decodificando e nunca e recolhido — e este e o caminho que mais
+  // acumula, porque sair e voltar da chamada e o gesto que a pessoa repete
+  // quando alguma coisa trava. Ver o comentario de `anexar`.
+  document.querySelectorAll("audio[data-naoconcordo-audio]").forEach(el => { soltarMidia(el); el.remove(); });
 }
 /// A barra de chamada so existe durante a chamada: fora dela e poluicao.
 function updateCallControls() {

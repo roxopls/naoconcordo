@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, HashMap}, env, net::SocketAddr, path::{Path, PathBuf}, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::{BTreeMap, HashMap}, env, net::SocketAddr, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicU64, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
 
 use axum::{
     extract::{ConnectInfo, Path as Caminho, Query, State, WebSocketUpgrade, ws::{Message as WsMessage, WebSocket}},
@@ -72,7 +72,9 @@ struct AppState {
     // Quem esta em cada canal de voz, para a lista aparecer antes de entrar na
     // chamada. So existe em memoria: chamada nao sobrevive a um restart, e
     // gravar isso deixaria gente presa numa sala que nao existe mais.
-    voice: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    //
+    // Guardado por **socket**, e nao por nome: ver `Presenca`.
+    voice: Arc<RwLock<HashMap<String, Vec<Presenca>>>>,
     files: Arc<RwLock<HashMap<String, StoredFile>>>,
     keys: Arc<RwLock<HashMap<String, IdentityKey>>>,
     // A identidade privada de cada conta, cifrada pelo proprio dono. O servidor
@@ -379,26 +381,58 @@ struct RecoverInput { username: String, nonce: String, recovery_proof: String, v
     // Usados por "react" e "pin": qual mensagem e qual emoji.
     #[serde(default)] message_id: Option<Uuid>, #[serde(default)] emoji: Option<String> }
 
+/// Uma pessoa num canal de voz, e **por qual socket** ela se anunciou.
+///
+/// O socket e o que faltava. A limpeza da saida apagava por nome, e o nome nao
+/// distingue duas conexoes da mesma conta: quando a rede pisca, o socket novo
+/// abre e reanuncia o canal antes de o velho terminar de morrer, e a limpeza
+/// atrasada do velho apagava o registro que o novo acabara de fazer. A pessoa
+/// sumia da lista para quem estava fora da chamada, enquanto o LiveKit seguia
+/// com ela dentro — "nao mostrava que ele estava na call, so aparecia quando eu
+/// entrava".
+#[derive(Clone)]
+struct Presenca { socket: u64, username: String }
+
+/// Numero de cada socket, so para distinguir conexoes da mesma conta. Reinicia
+/// com o processo, e nao precisa sobreviver a ele: a lista de voz tambem nao.
+static PROXIMO_SOCKET: AtomicU64 = AtomicU64::new(1);
+
+/// Os nomes a anunciar, uma vez por pessoa.
+///
+/// Duas conexoes da mesma conta na mesma sala sao duas `Presenca`, e a lista
+/// que vai ao cliente e de gente: sem a deduplicacao, quem esta com o app
+/// aberto em duas maquinas apareceria duas vezes no canal.
+fn nomes_na_voz(gente: &[Presenca]) -> Vec<String> {
+    let mut nomes: Vec<String> = Vec::new();
+    for presenca in gente {
+        if !nomes.iter().any(|nome| profile_key(nome) == profile_key(&presenca.username)) {
+            nomes.push(presenca.username.clone());
+        }
+    }
+    nomes
+}
+
 /// Anuncia a entrada e a saida de um canal de voz e avisa quem enxerga o
 /// servidor. `sala` vazia significa que a pessoa saiu da chamada.
 ///
 /// A lista guarda o nome como a pessoa escreveu, mas a comparacao e sempre por
 /// `profile_key`, senao "Ana" e "ana" viram duas pessoas na mesma sala.
-async fn set_voice(state: &AppState, username: &str, anterior: &mut Option<String>, sala: Option<String>) {
+async fn set_voice(state: &AppState, username: &str, socket: u64, anterior: &mut Option<String>, sala: Option<String>) {
     let mut mudou: Vec<String> = Vec::new();
     {
         let mut voice = state.voice.write().await;
         if let Some(antiga) = anterior.take() {
             if let Some(gente) = voice.get_mut(&antiga) {
-                gente.retain(|nome| profile_key(nome) != profile_key(username));
+                // Por socket: este socket so desfaz o que este socket declarou.
+                gente.retain(|presenca| presenca.socket != socket);
                 if gente.is_empty() { voice.remove(&antiga); }
             }
             mudou.push(antiga);
         }
         if let Some(nova) = sala {
             let gente = voice.entry(nova.clone()).or_default();
-            if !gente.iter().any(|nome| profile_key(nome) == profile_key(username)) {
-                gente.push(username.to_string());
+            if !gente.iter().any(|presenca| presenca.socket == socket) {
+                gente.push(Presenca { socket, username: username.to_string() });
             }
             *anterior = Some(nova.clone());
             if !mudou.contains(&nova) { mudou.push(nova); }
@@ -407,7 +441,7 @@ async fn set_voice(state: &AppState, username: &str, anterior: &mut Option<Strin
     for room_id in mudou {
         let Some(sala) = state.rooms.read().await.iter().find(|r| r.id == room_id).cloned() else { continue; };
         let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &sala.server_id) };
-        let users = state.voice.read().await.get(&room_id).cloned().unwrap_or_default();
+        let users = nomes_na_voz(&state.voice.read().await.get(&room_id).cloned().unwrap_or_default());
         let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::VoiceChanged { room_id, users }));
     }
 }
@@ -866,7 +900,7 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Respons
     let visiveis: Vec<String> = rooms.iter().map(|room| room.id.clone()).collect();
     let voice: HashMap<String, Vec<String>> = state.voice.read().await.iter()
         .filter(|(room_id, gente)| visiveis.contains(room_id) && !gente.is_empty())
-        .map(|(room_id, gente)| (room_id.clone(), gente.clone())).collect();
+        .map(|(room_id, gente)| (room_id.clone(), nomes_na_voz(gente))).collect();
     Json(BootstrapOutput {
         servers, rooms,
         profiles: state.profiles.read().await.values().cloned().collect(),
@@ -1158,7 +1192,7 @@ async fn executar_dj(
     let sala_de_voz = match sala {
         Some(id) => id,
         None => state.voice.read().await.iter()
-            .find(|(_, gente)| gente.iter().any(|nome| profile_key(nome) == profile_key(quem)))
+            .find(|(_, gente)| gente.iter().any(|presenca| profile_key(&presenca.username) == profile_key(quem)))
             .map(|(id, _)| id.clone())
             .ok_or("Entre num canal de voz para o DJ tocar.")?,
     };
@@ -2750,6 +2784,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session)
     // Canal de voz anunciado por este socket. Fica aqui, e nao no estado
     // global, para a limpeza da saida so desfazer o que este socket declarou:
     // a mesma pessoa pode estar com o app aberto em duas maquinas.
+    //
+    // O numero acompanha a anotacao ate a lista de voz, que tambem passou a
+    // guardar por socket — so a variavel local nao bastava, porque quem apagava
+    // era a lista, e la a chave era o nome.
+    let socket_id = PROXIMO_SOCKET.fetch_add(1, Ordering::Relaxed);
     let mut sala_de_voz: Option<String> = None;
     loop { tokio::select! {
         incoming = socket.recv() => match incoming {
@@ -2770,7 +2809,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session)
                             None => None,
                         }
                     };
-                    set_voice(&state, &session.username, &mut sala_de_voz, destino).await;
+                    set_voice(&state, &session.username, socket_id, &mut sala_de_voz, destino).await;
                     continue;
                 }
                 // "typing" e efemero: nunca e guardado, entao quem chega depois
@@ -2918,7 +2957,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session)
 
     // Fechou o app ou caiu: sai da chamada tambem, senao fica um fantasma na
     // lista do canal de voz ate o servidor reiniciar.
-    set_voice(&state, &session.username, &mut sala_de_voz, None).await;
+    set_voice(&state, &session.username, socket_id, &mut sala_de_voz, None).await;
 
     // Saiu: o ultimo socket fechado marca offline.
     let mut online = state.online.write().await;

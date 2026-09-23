@@ -173,7 +173,14 @@ async function start() {
     const announceClose = async () => {
       if (announced) return;
       announced = true;
-      room.disconnect();
+      // Esperado, para o participante `#cameras` morrer aqui e nao 14 s depois
+      // por `dtls timeout` — enquanto isso ele continua contando como gente na
+      // sala e disputando banda com a conexao da voz. Com teto: esta promessa
+      // segura o fechamento da janela, e saida travada nao pode travar isso.
+      await Promise.race([
+        room.disconnect().catch(() => { /* ja caiu */ }),
+        new Promise(pronto => window.setTimeout(pronto, 2000)),
+      ]);
       try {
         const { emit } = await import("@tauri-apps/api/event");
         await emit("cameras-fechada");
