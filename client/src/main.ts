@@ -16,7 +16,7 @@ import {
 } from "./private";
 import { checkForUpdate, procurarAtualizacao, instalarAtualizacao, canalAtual, definirCanal, notasSalvas, limparNotas } from "./updates";
 import {
-  pickSource, startShare, stopShare, pauseShare, targetAlive,
+  pickSource, startShare, stopShare, pauseShare, switchShare, targetAlive,
   codecPreferido, guardarCodec, type CodecPreferido,
 } from "./screenshare";
 import {
@@ -43,7 +43,7 @@ type RoomKind = "text" | "voice";
 type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind; categoryId?: string | null; posicao?: number } & Skin;
 /// Cor e fundo de um servidor ou canal. Campos independentes: da para trocar so
 /// a cor de destaque, so o fundo, ou os dois.
-type Skin = { accent?: string | null; bgColor?: string | null; bgFile?: string | null };
+type Skin = { accent?: string | null; bgColor?: string | null; bgFile?: string | null; bgOpacity?: number | null };
 type Profile = { username: string; avatar: string | null; avatarFile?: string | null; bio?: string | null; bannerFile?: string | null; color?: string | null; recado?: string | null };
 type ServerRole = "owner" | "mod" | "member";
 type Categoria = { id: string; serverId: string; name: string; posicao: number };
@@ -727,6 +727,8 @@ function skinEmVigor(): Skin {
     accent: canal?.accent ?? servidor?.accent ?? null,
     bgColor: canal?.bgColor ?? servidor?.bgColor ?? null,
     bgFile: canal?.bgFile ?? servidor?.bgFile ?? null,
+    // A opacidade anda com a imagem: canal com imagem propria usa a dele.
+    bgOpacity: (canal?.bgFile ? canal?.bgOpacity : null) ?? servidor?.bgOpacity ?? null,
   };
 }
 
@@ -742,6 +744,7 @@ function aplicarSkin() {
   alvo.style.setProperty("--skin-bg", skin.bgColor || "");
   alvo.classList.toggle("com-skin", Boolean(skin.bgColor));
 
+  alvo.style.setProperty("--skin-bg-opacidade", String((skin.bgOpacity ?? 50) / 100));
   if (!skin.bgFile) {
     alvo.classList.remove("com-skin-imagem");
     alvo.style.removeProperty("--skin-bg-imagem");
@@ -943,7 +946,9 @@ function syncStagePlacement() {
   // A grade entra depois do `hidden`: com o palco escondido a medida sai zero,
   // e a divisao escolhida com zero nao serve para nada.
   if (aqui) {
-    ajustarPalco ||= grade(stage);
+    // Teto de 640px por tile: quadros pequenos no alto, como no Discord, em vez
+    // de esticar ate encher o painel.
+    ajustarPalco ||= grade(stage, 16 / 9, 640);
     ajustarPalco();
   }
   // Quem apaga a conversa e o CSS, e nao `setMode`: sao os mesmos elementos que
@@ -1843,17 +1848,24 @@ function renderFriendsHome() {
 // ------------------------------------------------------------- mencoes
 // Escrever "@" abre a lista de quem esta no servidor. Sem isso a mencao existe
 // mas ninguem acerta: nome com acento, maiuscula ou apelido nao sai de cabeca.
-let sugestoes: string[] = [];
+// Escrever ":" e duas letras abre a lista dos emotes do servidor, pelo mesmo
+// motivo: ninguem decora o apelido de cada um.
+type Sugestao = { tipo: "pessoa"; nome: string } | { tipo: "emote"; emote: Emote };
+let sugestoes: Sugestao[] = [];
 let sugestaoAtiva = 0;
 
-/// Pedaco de "@nome" que esta sendo escrito na posicao do cursor, se houver.
-function mencaoEmCurso(): { termo: string; inicio: number } | null {
+/// Pedaco de "@nome" ou ":emote" que esta sendo escrito na posicao do cursor.
+function mencaoEmCurso(): { termo: string; inicio: number; sinal: "@" | ":" } | null {
   const cursor = messageInput.selectionStart ?? 0;
   const antes = messageInput.value.slice(0, cursor);
   // O "@" tem de comecar palavra: um e-mail no meio da frase nao abre a lista.
   const achado = /(^|\s)@([\w.-]*)$/.exec(antes);
-  if (!achado) return null;
-  return { termo: achado[2], inicio: cursor - achado[2].length - 1 };
+  if (achado) return { termo: achado[2], inicio: cursor - achado[2].length - 1, sinal: "@" };
+  // Emote pede duas letras depois do ":": com uma so, todo "a:" de conversa
+  // normal e todo horario abririam a lista.
+  const emote = /(^|[\s(]):([a-z0-9_]{2,24})$/i.exec(antes);
+  if (emote) return { termo: emote[2], inicio: cursor - emote[2].length - 1, sinal: ":" };
+  return null;
 }
 
 /// Quantas sugestoes a caixa esta mostrando agora. Sem isto, cada tecla
@@ -1865,16 +1877,21 @@ function renderSugestoes() {
   sugestoesNaTela = sugestoes.length;
   const caixa = byId("mention-box");
   caixa.classList.toggle("hidden", sugestoes.length === 0);
-  caixa.replaceChildren(...sugestoes.map((nome, indice) => {
+  caixa.replaceChildren(...sugestoes.map((sugestao, indice) => {
     const linha = document.createElement("button");
     linha.type = "button";
     linha.className = "mention-item" + (indice === sugestaoAtiva ? " active" : "");
-    const avatar = document.createElement("div");
-    avatar.className = "avatar";
-    paintAvatar(avatar, nome);
     const rotulo = document.createElement("span");
-    rotulo.textContent = getDisplayName(nome);
-    linha.append(avatar, rotulo);
+    if (sugestao.tipo === "pessoa") {
+      const avatar = document.createElement("div");
+      avatar.className = "avatar";
+      paintAvatar(avatar, sugestao.nome);
+      rotulo.textContent = getDisplayName(sugestao.nome);
+      linha.append(avatar, rotulo);
+    } else {
+      rotulo.textContent = ":" + sugestao.emote.name + ":";
+      linha.append(imagemDeEmote(sugestao.emote, "emote emote-sugestao"), rotulo);
+    }
     // `mousedown` e nao `click`: o clique tiraria o foco do redator antes de
     // chegar aqui, e a posicao do cursor se perderia.
     linha.onmousedown = evento => { evento.preventDefault(); aplicarSugestao(indice); };
@@ -1886,23 +1903,34 @@ function atualizarSugestoes() {
   const emCurso = mencaoEmCurso();
   if (!emCurso || view !== "server") { sugestoes = []; renderSugestoes(); return; }
   const termo = emCurso.termo.toLowerCase();
-  sugestoes = serverMembers
-    .filter(nome => nome.toLowerCase().includes(termo) || getDisplayName(nome).toLowerCase().includes(termo))
-    .filter(nome => key(nome) !== key(session?.username || ""))
-    .slice(0, 6);
+  if (emCurso.sinal === ":") {
+    // Quem comeca com o termo vem antes de quem so contem ele.
+    const casam = emotesDoServidor().filter(emote => emote.name.toLowerCase().includes(termo));
+    sugestoes = [
+      ...casam.filter(emote => emote.name.toLowerCase().startsWith(termo)),
+      ...casam.filter(emote => !emote.name.toLowerCase().startsWith(termo)),
+    ].slice(0, 8).map(emote => ({ tipo: "emote", emote }));
+  } else {
+    sugestoes = serverMembers
+      .filter(nome => nome.toLowerCase().includes(termo) || getDisplayName(nome).toLowerCase().includes(termo))
+      .filter(nome => key(nome) !== key(session?.username || ""))
+      .slice(0, 6)
+      .map(nome => ({ tipo: "pessoa", nome }));
+  }
   sugestaoAtiva = 0;
   renderSugestoes();
 }
 
 function aplicarSugestao(indice: number) {
   const emCurso = mencaoEmCurso();
-  const nome = sugestoes[indice];
-  if (!emCurso || !nome) return;
+  const sugestao = sugestoes[indice];
+  if (!emCurso || !sugestao) return;
   const cursor = messageInput.selectionStart ?? 0;
   const antes = messageInput.value.slice(0, emCurso.inicio);
   const depois = messageInput.value.slice(cursor);
-  messageInput.value = antes + "@" + nome + " " + depois;
-  const novaPosicao = (antes + "@" + nome + " ").length;
+  const texto = sugestao.tipo === "pessoa" ? "@" + sugestao.nome + " " : ":" + sugestao.emote.name + ": ";
+  messageInput.value = antes + texto + depois;
+  const novaPosicao = (antes + texto).length;
   messageInput.setSelectionRange(novaPosicao, novaPosicao);
   sugestoes = [];
   renderSugestoes();
@@ -2432,6 +2460,16 @@ async function connectVoice() {
         // Quem ja estava transmitindo quando voce entrou chega por aqui, sem
         // passar por TrackPublished — sem esta recusa, essa tela ainda abria
         // sozinha.
+        // Com a janela separada aberta, a tela nova e vista la: aqui fica so o
+        // cartao, sem baixar a mesma imagem duas vezes.
+        if (track.source === Track.Source.ScreenShare && screenWindowOpen) {
+          void publication.setSubscribed(false);
+          if (!document.getElementById("fora-" + publication.trackSid)) {
+            stage.append(cartaoNaJanela(publication.trackSid, participant.name || participant.identity));
+            syncStagePlacement();
+          }
+          return;
+        }
         if (track.source === Track.Source.ScreenShare && !assistindo.has(publication.trackSid) && !screenWindowOpen) {
           void publication.setSubscribed(false);
           offerScreen(publication.trackSid, participant.name || participant.identity);
@@ -2462,7 +2500,13 @@ async function connectVoice() {
           noteShareStarted(publication.trackSid);
           // Nada de assinar sozinho: vira convite. `autoSubscribe` do LiveKit
           // e por sala, entao a recusa e feita aqui, faixa por faixa.
-          if (!assistindo.has(publication.trackSid)) {
+          if (screenWindowOpen) {
+            void publication.setSubscribed(false);
+            if (!document.getElementById("fora-" + publication.trackSid)) {
+              stage.append(cartaoNaJanela(publication.trackSid, participant.name || participant.identity));
+              syncStagePlacement();
+            }
+          } else if (!assistindo.has(publication.trackSid)) {
             void publication.setSubscribed(false);
             offerScreen(publication.trackSid, participant.name || participant.identity);
           }
@@ -2481,6 +2525,7 @@ async function connectVoice() {
           assistindo.delete(publication.trackSid);
           telasVistas.delete(publication.trackSid);
           document.getElementById("oferta-" + publication.trackSid)?.remove();
+          document.getElementById("fora-" + publication.trackSid)?.remove();
           syncStagePlacement();
         }
         refresh();
@@ -3079,9 +3124,37 @@ async function definirMicrofone(ligado: boolean) {
   }
 }
 micButton.onclick = async () => { if (!await ensureInCall() || !room) return; await definirMicrofone(!micEnabled); };
-// Pausar fica no botao direito do proprio botao de compartilhar: e a acao
-// vizinha de parar, e a barra ja esta cheia de botoes.
-screenButton.oncontextmenu = event => { event.preventDefault(); void alternarPausaDaTela(); };
+// Transmitindo, o botao de compartilhar abre um menu com trocar tela, pausar
+// e parar — no clique e no botao direito. Esses controles moravam numa barra
+// da janela de telas, que agora so mostra as transmissoes.
+function menuDaTransmissao(ponto: { x: number; y: number }) {
+  const acoes: HTMLElement[] = [];
+  // Trocar e pausar sao do capturador em Rust; no navegador quem captura e o
+  // proprio navegador, e o jeito de trocar e parar e comecar de novo.
+  if (ehTauri()) {
+    acoes.push(menuAcao("Trocar tela", "screen", () => void trocarDeTela()));
+    acoes.push(menuAcao(sharePausado ? "Retomar transmissão" : "Pausar transmissão", sharePausado ? "plus" : "minus",
+      () => void alternarPausaDaTela()));
+  }
+  acoes.push(menuAcao("Parar de compartilhar", "hangup", () => void pararDeCompartilhar()));
+  abrirMenuSimples(screenButton, ponto, acoes);
+}
+/// Troca o que esta sendo transmitido sem derrubar a transmissao: o Rust muda o
+/// alvo da captura e a faixa publicada continua a mesma, entao quem assiste
+/// nem percebe.
+async function trocarDeTela() {
+  const escolha = await pickSource(QUALITIES, readQuality(), byId);
+  if (!escolha) return;
+  try {
+    await switchShare(escolha.sourceId);
+    vigiarJanelaTransmitida();
+    showToast("Tela trocada.");
+  } catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível trocar de tela."); }
+}
+screenButton.oncontextmenu = event => {
+  event.preventDefault();
+  if (screenEnabled) menuDaTransmissao({ x: event.clientX, y: event.clientY });
+};
 /// Encerra a transmissao de tela, venha o pedido do botao ou da saida da
 /// chamada. Nao ha `room` garantido aqui: sair da chamada pode ja ter
 /// derrubado a sala antes de a captura ser desligada.
@@ -3106,12 +3179,15 @@ async function pararDeCompartilhar() {
   }
   if (estava) updateCallControls();
 }
-screenButton.onclick = async () => {
-  if (!await ensureInCall() || !room || !session) return;
+screenButton.onclick = async event => {
   if (screenEnabled) {
-    await pararDeCompartilhar();
+    // O menu nasce em cima do botao, e nao no cursor: o clique pode vir do
+    // teclado, que nao tem ponto.
+    const caixa = screenButton.getBoundingClientRect();
+    menuDaTransmissao(event.detail ? { x: event.clientX, y: event.clientY } : { x: caixa.left, y: caixa.top });
     return;
   }
+  if (!await ensureInCall() || !room || !session) return;
 
   // No navegador quem captura e o proprio navegador, com o seletor dele. Todo
   // o trabalho em Rust existe para fugir desse seletor e da barra amarela
@@ -3914,7 +3990,40 @@ function setScreenSubscription(active: boolean) {
       if (publication.source === Track.Source.ScreenShare) void publication.setSubscribed(active);
     }
   }
-  if (!active) { restaurarControles(); stage.replaceChildren(); stage.classList.add("hidden"); }
+  // So as telas saem do palco: fotos e cameras continuam, e no lugar de cada
+  // transmissao fica um cartao dizendo onde ela foi parar. Apagar o palco
+  // inteiro sumia com a chamada toda ao virar janela.
+  for (const antiga of stage.querySelectorAll('[id^="track-"], [id^="oferta-"], [id^="fora-"]')) {
+    soltarMidia(antiga);
+    antiga.remove();
+  }
+  if (!active) {
+    for (const participant of room.remoteParticipants.values()) {
+      for (const publication of participant.trackPublications.values()) {
+        if (publication.source === Track.Source.ScreenShare) {
+          stage.append(cartaoNaJanela(publication.trackSid, participant.name || participant.identity));
+        }
+      }
+    }
+  }
+  syncStagePlacement();
+}
+
+/// Lugar da transmissao que esta sendo vista na janela separada.
+function cartaoNaJanela(sid: string, who: string) {
+  const card = document.createElement("div");
+  card.id = "fora-" + sid;
+  card.className = "track-tile oferta";
+  const titulo = document.createElement("span");
+  titulo.className = "oferta-nome";
+  titulo.textContent = "Tela de " + getDisplayName(who) + " na janela separada";
+  const botao = document.createElement("button");
+  botao.type = "button";
+  botao.className = "small";
+  botao.textContent = "Trazer de volta";
+  botao.onclick = () => void closeScreenWindow();
+  card.append(titulo, botao);
+  return card;
 }
 
 function onScreenWindowClosed() {
@@ -3971,7 +4080,6 @@ async function closeScreenWindow() {
   await win?.close();
 }
 
-byId("screen-window").addEventListener("click", () => { void (screenWindowOpen ? closeScreenWindow() : openScreenWindow()); });
 
 void (async () => {
   try {
@@ -4143,7 +4251,35 @@ byId("delete-server").addEventListener("click", async () => {
     await enterApp();
   } catch (error) { byId("members-error").textContent = error instanceof Error ? error.message : "Não foi possível apagar."; }
 });
-byId("server-members").addEventListener("click", async () => { await renderMembers(); byId<HTMLDialogElement>("members-dialog").showModal(); });
+/// Configuracoes do servidor, em abas. Cada aba se desenha ao ser aberta: os
+/// dados podem ter mudado desde a ultima vez (outro moderador, outro canal).
+let abaDoServidor = "membros";
+function abrirAbaDoServidor(aba: string) {
+  // Aba escondida (sem permissao) cai em Membros, que todo mundo ve.
+  const botao = document.querySelector<HTMLElement>('.servidor-aba[data-aba="' + aba + '"]');
+  if (!botao || botao.classList.contains("hidden")) aba = "membros";
+  abaDoServidor = aba;
+  for (const outra of document.querySelectorAll<HTMLElement>(".servidor-aba[data-aba]")) {
+    outra.classList.toggle("ativo", outra.dataset.aba === aba);
+  }
+  for (const painel of document.querySelectorAll<HTMLElement>(".servidor-painel")) {
+    painel.classList.toggle("ativo", painel.dataset.aba === aba);
+  }
+  if (aba === "geral") preencherConfigDoServidor();
+  if (aba === "emotes") abrirAbaDeEmotes();
+  if (aba === "aparencia") renderSkinDialog();
+}
+for (const aba of document.querySelectorAll<HTMLButtonElement>(".servidor-aba[data-aba]")) {
+  aba.addEventListener("click", () => {
+    if (!currentServerId) { showToast("Abra um servidor primeiro."); return; }
+    abrirAbaDoServidor(aba.dataset.aba || "membros");
+  });
+}
+byId("server-members").addEventListener("click", async () => {
+  await renderMembers();
+  abrirAbaDoServidor(abaDoServidor);
+  byId<HTMLDialogElement>("members-dialog").showModal();
+});
 byId("close-members").addEventListener("click", () => byId<HTMLDialogElement>("members-dialog").close());
 
 // ------------------------------------------------- personalizacao de perfil
@@ -4269,7 +4405,7 @@ let serverSettingsBannerChanged = false;
 let serverSettingsIconFileId: string | null = null;
 let serverSettingsIconChanged = false;
 
-function openServerSettings() {
+function preencherConfigDoServidor() {
   const s = servers.find(item => item.id === currentServerId);
   if (!s) return;
   byId<HTMLInputElement>("server-settings-name").value = s.name;
@@ -4305,14 +4441,7 @@ function openServerSettings() {
     iconPrev.style.backgroundImage = "";
     iconRem.classList.add("hidden");
   }
-
-  byId<HTMLDialogElement>("server-settings-dialog").showModal();
 }
-
-byId("customize-server-btn")?.addEventListener("click", () => {
-  byId<HTMLDialogElement>("members-dialog").close();
-  openServerSettings();
-});
 
 byId("server-settings-description")?.addEventListener("input", e => {
   const target = e.target as HTMLTextAreaElement;
@@ -4381,10 +4510,6 @@ byId("server-settings-icon-remove")?.addEventListener("click", () => {
   byId("server-settings-icon-remove").classList.add("hidden");
 });
 
-byId("server-settings-cancel")?.addEventListener("click", () => {
-  byId<HTMLDialogElement>("server-settings-dialog").close();
-});
-
 byId("server-settings-save")?.addEventListener("click", async () => {
   const name = byId<HTMLInputElement>("server-settings-name").value.trim();
   if (name.length < 2) { showToast("O nome do servidor precisa ter pelo menos 2 letras."); return; }
@@ -4404,7 +4529,7 @@ byId("server-settings-save")?.addEventListener("click", async () => {
     const idx = servers.findIndex(s => s.id === updated.id);
     if (idx >= 0) servers[idx] = updated;
     renderNavigation();
-    byId<HTMLDialogElement>("server-settings-dialog").close();
+    byId("members-title").textContent = "Configurações de " + updated.name;
     showToast("Servidor atualizado.");
   } catch (err) {
     showToast(err instanceof Error ? err.message : "Erro ao salvar servidor.");
@@ -5617,11 +5742,18 @@ function attachVideo(track: { sid?: string; attach: () => HTMLMediaElement; deta
   parar.onclick = event => { event.stopPropagation(); pararDeAssistir(track.sid!, labelText); };
   tile.ondblclick = () => void toggleFullscreen(tile);
   // Botao direito na propria transmissao: e onde a mao ja esta quando o volume
-  // incomoda, entao o controle tem de estar aqui tambem, nao so na lista.
+  // incomoda, entao o controle tem de estar aqui tambem, nao so na lista. Virar
+  // janela mora aqui tambem, como nas cameras — o botao "Janela" da barra saiu.
   tile.oncontextmenu = event => {
     event.preventDefault();
     event.stopPropagation();
-    openUserMenu(labelText, tile, { x: event.clientX, y: event.clientY });
+    openUserMenu(labelText, tile, { x: event.clientX, y: event.clientY }, [
+      menuAcao(
+        screenWindowOpen ? "Trazer as telas de volta" : "Virar janela",
+        "window",
+        () => void (screenWindowOpen ? closeScreenWindow() : openScreenWindow()),
+      ),
+    ]);
   };
 
   tile.append(media, label, parar, bigger, full);
@@ -5649,6 +5781,8 @@ function aplicarTeatro() {
   stage.classList.toggle("has-theater", ligado);
   // No modo grande o chat encolhe para uma faixa embaixo e a tela fica com o resto.
   byId("app-view").querySelector(".main-panel")?.classList.toggle("theater-mode", ligado);
+  // Entrar e sair do modo grande troca quem manda nas colunas (grade ou CSS).
+  ajustarPalco?.();
 }
 
 /// Modo grande: o compartilhamento domina o painel, sem virar tela cheia.
@@ -8122,7 +8256,7 @@ async function recarregarEmotes() {
     emotes = dados.emotes || [];
     renderMessages();
     aplicarBotaoDeEmote();
-    if (byId<HTMLDialogElement>("emotes-dialog").open) renderEmotesDialog();
+    if (byId<HTMLDialogElement>("members-dialog").open && abaDoServidor === "emotes") renderEmotesDialog();
   } catch (erro) { console.warn("[emotes] recarregar", erro); }
 }
 
@@ -8513,17 +8647,13 @@ async function criarEmote() {
   }
 }
 
-byId("emotes-btn")?.addEventListener("click", () => {
-  if (!currentServerId) { showToast("Abra um servidor para ver os emotes dele."); return; }
-  byId<HTMLDialogElement>("members-dialog").close();
+function abrirAbaDeEmotes() {
   emoteEscolhido = null;
   byId<HTMLInputElement>("emote-nome").value = "";
   byId("emote-preview").style.backgroundImage = "";
   byId("emote-preview").classList.remove("has-image");
   renderEmotesDialog();
-  byId<HTMLDialogElement>("emotes-dialog").showModal();
-});
-byId("emotes-fechar")?.addEventListener("click", () => byId<HTMLDialogElement>("emotes-dialog").close());
+}
 byId("emote-escolher")?.addEventListener("click", () => byId<HTMLInputElement>("emote-input").click());
 byId("emote-input")?.addEventListener("change", evento => {
   const entrada = evento.target as HTMLInputElement;
@@ -8611,10 +8741,10 @@ const skinAlvoEscolhido = (): "servidor" | "canal" =>
 function skinDoAlvo(): Skin {
   if (skinAlvoEscolhido() === "canal") {
     const canal = rooms.find(item => item.id === currentRoomId);
-    return { accent: canal?.accent ?? null, bgColor: canal?.bgColor ?? null, bgFile: canal?.bgFile ?? null };
+    return { accent: canal?.accent ?? null, bgColor: canal?.bgColor ?? null, bgFile: canal?.bgFile ?? null, bgOpacity: canal?.bgOpacity ?? null };
   }
   const servidor = servers.find(item => item.id === currentServerId);
-  return { accent: servidor?.accent ?? null, bgColor: servidor?.bgColor ?? null, bgFile: servidor?.bgFile ?? null };
+  return { accent: servidor?.accent ?? null, bgColor: servidor?.bgColor ?? null, bgFile: servidor?.bgFile ?? null, bgOpacity: servidor?.bgOpacity ?? null };
 }
 
 function renderSkinDialog() {
@@ -8625,27 +8755,45 @@ function renderSkinDialog() {
   byId<HTMLInputElement>("skin-bg").value = skinEditando.bgColor || "#111114";
   const canal = rooms.find(item => item.id === currentRoomId);
   byId("skin-alvo-canal").textContent = canal ? "Só " + (canal.kind === "voice" ? "" : "#") + canal.name : "Só este canal";
+  byId<HTMLInputElement>("skin-opacidade").value = String(skinEditando.bgOpacity ?? 50);
   pintarPreviaDaSkin();
+}
+
+/// Cor, destaque e opacidade na previa do dialogo, sem tocar na tela de tras.
+function pintarCoresDaPrevia() {
+  const previa = byId("skin-previa");
+  const opacidade = skinEditando.bgOpacity ?? 50;
+  previa.style.setProperty("--accent", skinEditando.accent || "");
+  previa.style.setProperty("--skin-previa-bg", skinEditando.bgColor || "");
+  previa.style.setProperty("--skin-previa-opacidade", String(opacidade / 100));
+  byId("skin-opacidade-valor").textContent = opacidade + "%";
+  const temImagem = Boolean(skinImagemNova || skinEditando.bgFile);
+  byId("skin-opacidade").closest(".skin-campo")?.classList.toggle("desligado", !temImagem);
+  byId<HTMLInputElement>("skin-opacidade").disabled = !temImagem;
 }
 
 function pintarPreviaDaSkin() {
   const preview = byId("skin-imagem-preview");
   const remover = byId("skin-imagem-remove");
+  pintarCoresDaPrevia();
   if (skinImagemNova) {
     preview.classList.add("has-image");
     preview.style.backgroundImage = 'url("' + URL.createObjectURL(skinImagemNova) + '")';
     remover.classList.remove("hidden");
+    byId("skin-imagem-btn").textContent = "Trocar imagem";
     return;
   }
   if (skinEditando.bgFile) {
     preview.classList.add("has-image");
     remover.classList.remove("hidden");
+    byId("skin-imagem-btn").textContent = "Trocar imagem";
     void fileUrl(skinEditando.bgFile).then(url => { preview.style.backgroundImage = 'url("' + url + '")'; }).catch(() => {});
     return;
   }
   preview.classList.remove("has-image");
   preview.style.backgroundImage = "";
   remover.classList.add("hidden");
+  byId("skin-imagem-btn").textContent = "Escolher imagem";
 }
 
 async function salvarSkin() {
@@ -8662,17 +8810,17 @@ async function salvarSkin() {
       accent: skinEditando.accent ?? null,
       bgColor: skinEditando.bgColor ?? null,
       bgFile,
+      bgOpacity: bgFile ? (skinEditando.bgOpacity ?? 50) : null,
     });
     if (skinAlvoEscolhido() === "canal") {
       await api<void>("/api/rooms/" + encodeURIComponent(currentRoomId) + "/skin", { method: "PUT", body: corpo });
       const canal = rooms.find(item => item.id === currentRoomId);
-      if (canal) Object.assign(canal, { accent: skinEditando.accent ?? null, bgColor: skinEditando.bgColor ?? null, bgFile });
+      if (canal) Object.assign(canal, { accent: skinEditando.accent ?? null, bgColor: skinEditando.bgColor ?? null, bgFile, bgOpacity: bgFile ? (skinEditando.bgOpacity ?? 50) : null });
     } else {
       const atualizado = await api<ServerInfo>("/api/servers/" + encodeURIComponent(currentServerId) + "/skin", { method: "PUT", body: corpo });
       const indice = servers.findIndex(item => item.id === currentServerId);
       if (indice >= 0) servers[indice] = atualizado;
     }
-    byId<HTMLDialogElement>("skin-dialog").close();
     renderNavigation();
     showToast("Aparência salva.");
   } catch (erro) {
@@ -8682,28 +8830,30 @@ async function salvarSkin() {
   }
 }
 
-byId("skin-btn")?.addEventListener("click", () => {
-  if (!currentServerId) { showToast("Abra um servidor para mudar a aparência dele."); return; }
-  byId<HTMLDialogElement>("members-dialog").close();
-  renderSkinDialog();
-  byId<HTMLDialogElement>("skin-dialog").showModal();
-});
 for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="skin-alvo"]')) {
   radio.addEventListener("change", renderSkinDialog);
 }
 byId("skin-accent")?.addEventListener("input", evento => {
   skinEditando.accent = (evento.target as HTMLInputElement).value;
+  pintarCoresDaPrevia();
 });
 byId("skin-bg")?.addEventListener("input", evento => {
   skinEditando.bgColor = (evento.target as HTMLInputElement).value;
+  pintarCoresDaPrevia();
+});
+byId("skin-opacidade")?.addEventListener("input", evento => {
+  skinEditando.bgOpacity = Number((evento.target as HTMLInputElement).value);
+  pintarCoresDaPrevia();
 });
 byId("skin-accent-limpar")?.addEventListener("click", () => {
   skinEditando.accent = null;
   byId<HTMLInputElement>("skin-accent").value = "#ff7a45";
+  pintarCoresDaPrevia();
 });
 byId("skin-bg-limpar")?.addEventListener("click", () => {
   skinEditando.bgColor = null;
   byId<HTMLInputElement>("skin-bg").value = "#111114";
+  pintarCoresDaPrevia();
 });
 byId("skin-imagem-btn")?.addEventListener("click", () => byId<HTMLInputElement>("skin-imagem-input").click());
 byId("skin-imagem-input")?.addEventListener("change", evento => {
@@ -8719,7 +8869,6 @@ byId("skin-imagem-remove")?.addEventListener("click", () => {
   skinEditando.bgFile = null;
   pintarPreviaDaSkin();
 });
-byId("skin-cancelar")?.addEventListener("click", () => byId<HTMLDialogElement>("skin-dialog").close());
 byId("skin-salvar")?.addEventListener("click", () => void salvarSkin());
 
 // Na barra inteira, e nao so na lista: o espaco vazio embaixo dos canais fica
@@ -9088,7 +9237,7 @@ function updateCallControls() {
       : espectadores + " assistindo";
     screenButton.classList.toggle("pausada", screenEnabled && sharePausado);
     screenButton.title = screenEnabled
-      ? "Parar de compartilhar (botão direito pausa sem parar)"
+      ? "Trocar tela, pausar ou parar"
       : "Compartilhar tela";
   }
 }

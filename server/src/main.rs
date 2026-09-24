@@ -247,6 +247,9 @@ struct Skin {
     /// Imagem de fundo, como id de anexo. Convive com `bg_color`, que fica por
     /// baixo enquanto a imagem carrega e aparece nas bordas se ela nao cobrir.
     #[serde(default, skip_serializing_if = "Option::is_none")] bg_file: Option<String>,
+    /// Opacidade da imagem de fundo, 0 a 100. Ausente = 50, o valor de antes
+    /// de existir o campo.
+    #[serde(default, skip_serializing_if = "Option::is_none")] bg_opacity: Option<u8>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -609,6 +612,7 @@ struct SkinInput {
     #[serde(default, deserialize_with = "double_option")] accent: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")] bg_color: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")] bg_file: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")] bg_opacity: Option<Option<u8>>,
 }
 
 /// Confere as cores e a imagem, e aplica o que veio sobre a skin atual.
@@ -631,9 +635,15 @@ async fn aplicar_skin(state: &AppState, alvo: &mut Skin, pedido: SkinInput) -> R
             return Err(error(StatusCode::BAD_REQUEST, "O fundo precisa ser uma imagem."));
         }
     }
+    if let Some(Some(opacidade)) = pedido.bg_opacity {
+        if opacidade > 100 {
+            return Err(error(StatusCode::BAD_REQUEST, "Opacidade do fundo invalida."));
+        }
+    }
     if let Some(valor) = pedido.accent { alvo.accent = valor; }
     if let Some(valor) = pedido.bg_color { alvo.bg_color = valor; }
     if let Some(valor) = pedido.bg_file { alvo.bg_file = valor; }
+    if let Some(valor) = pedido.bg_opacity { alvo.bg_opacity = valor; }
     Ok(())
 }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")]

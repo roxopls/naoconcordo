@@ -24,14 +24,16 @@
    skin nao ha nada inline e tudo cai no tema padrao herdado do `:root`. */
 #app-view.com-skin { background-color: var(--skin-bg, transparent); }
 /* A imagem de fundo vai numa camada propria, atras de tudo, para o texto nao
-   herdar transparencia e continuar legivel por cima dela. */
+   herdar transparencia e continuar legivel por cima dela. `isolation` +
+   `z-index: -1` poe a camada atras dos filhos sem mexer no `position` deles:
+   forcar `relative` nos filhos tirava do `fixed` a barra da chamada e o aviso,
+   que viravam celulas do grid e encurtavam as laterais. */
 #app-view.com-skin-imagem::before {
-  content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
   background-image: var(--skin-bg-imagem); background-size: cover; background-position: center;
-  opacity: .5;
+  opacity: var(--skin-bg-opacidade, .5);
 }
-#app-view.com-skin-imagem { position: relative; }
-#app-view.com-skin-imagem > * { position: relative; z-index: 1; }
+#app-view.com-skin-imagem { position: relative; isolation: isolate; }
 /* A area da conversa e da chamada tem fundo proprio e opaco: sem abrir esse
    fundo, a cor e a imagem da skin ficavam por baixo dele e so apareciam nas
    frestas. As laterais seguem opacas; o compositor e as tiles tambem. */
@@ -138,6 +140,10 @@ nav { flex: 1; padding: 16px 10px; overflow-y: auto; }
    grade): sem ele, a tile larga ficaria mais alta que a celula e o palco
    passaria a rolar. */
 .track-tile { aspect-ratio: 16 / 9; width: 100%; height: auto; min-height: 0; max-width: calc(var(--tile-altura, 100vh) * 16 / 9); margin: auto; border-radius: 14px; overflow: hidden; position: relative; background: #09090b; border: 1px solid var(--line); }
+/* Palco com teto por tile (`gridlayout.ts`): tiles da largura calculada,
+   centralizadas e no alto, ultima linha incompleta no meio; altura pelo 16:9. */
+.stage.grade-topo { display: flex; flex-wrap: wrap; justify-content: center; align-content: flex-start; padding-left: max(18px, calc((100% - var(--faixa-largura, 100%)) / 2)); padding-right: max(18px, calc((100% - var(--faixa-largura, 100%)) / 2)); }
+.stage.grade-topo .track-tile { flex: 0 0 auto; width: var(--tile-largura, 100%); max-width: none; margin: 0; }
 .track-tile video { width: 100%; height: 100%; object-fit: contain; display: block; }
 .track-tile label { position: absolute; left: 9px; bottom: 9px; margin: 0; padding: 4px 8px; background: rgba(0,0,0,.65); border-radius: 6px; font-size: 11px; }
 /* Convite para assistir: ocupa o lugar da transmissao ate alguem pedir. */
@@ -748,9 +754,10 @@ input[type="range"]::-webkit-slider-thumb {
 .seletor-gif .grade button:hover { outline: 2px solid var(--accent); }
 .seletor-gif .aviso { padding: 20px 8px; color: #8b8b95; text-align: center; }
 
-.seletor-emoji { display: flex; flex-wrap: wrap; gap: 2px; max-width: 190px; max-height: 260px; overflow-y: auto; padding: 6px; scrollbar-color: #29292f transparent; }
+.seletor-emoji { display: flex; flex-wrap: wrap; gap: 2px; max-width: 230px; max-height: 260px; overflow-y: auto; padding: 6px; scrollbar-color: #29292f transparent; }
 .seletor-emoji button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 7px; background: none; font-size: 16px; cursor: pointer; padding: 0; }
 .seletor-emoji button:hover { background: #2a2a31; }
+.seletor-emoji button:has(.emote-seletor) { width: 40px; height: 40px; }
 /* Separa os oito de sempre dos emotes desta casa. `flex-basis: 100%` e o que
    faz a linha ocupar a faixa inteira dentro do `flex-wrap`. */
 .seletor-risco { flex-basis: 100%; margin: 5px 2px; border: 0; border-top: 1px solid var(--line); }
@@ -759,12 +766,12 @@ input[type="range"]::-webkit-slider-thumb {
 /* No meio da frase: acompanha a linha do texto em vez de empurrar a altura
    dela. `vertical-align: -.25em` desce a imagem para a base das letras, onde o
    olho espera um simbolo. */
-.emote { height: 1.45em; width: auto; max-width: 140px; vertical-align: -.25em; object-fit: contain; }
+.emote { height: 2.2em; width: auto; max-width: 210px; vertical-align: -.25em; object-fit: contain; }
 /* Sozinho numa mensagem curta o emote merece tamanho de figurinha; no meio de
    um texto ele continua do tamanho da letra. */
-.message-body p > .emote:only-child { height: 3.2em; vertical-align: middle; }
-.emote-reacao { height: 1.1em; vertical-align: -.2em; }
-.emote-seletor { height: 22px; max-width: 22px; vertical-align: middle; }
+.message-body p > .emote:only-child { height: 4.8em; vertical-align: middle; }
+.emote-reacao { height: 1.65em; vertical-align: -.2em; }
+.emote-seletor { height: 33px; max-width: 33px; vertical-align: middle; }
 /* Lista de gerenciamento */
 .emotes-lista { display: flex; flex-wrap: wrap; gap: 8px; max-height: 260px; overflow-y: auto; padding: 4px 0; scrollbar-color: #29292f transparent; }
 .emote-item { position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; width: 86px; padding: 8px 4px; border: 1px solid var(--line); border-radius: 10px; background: #202025; }
@@ -778,7 +785,41 @@ input[type="range"]::-webkit-slider-thumb {
 /* Aparencia */
 .escolha { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
 .escolha input { margin: 0; }
-#skin-accent, #skin-bg { width: 46px; height: 28px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: #202025; cursor: pointer; }
+/* ---- dialogo de aparencia ---- */
+.skin-alvo { display: flex; gap: 4px; padding: 3px; margin: 4px 0 14px; border: 1px solid var(--line); border-radius: 10px; background: #111114; }
+.skin-alvo label { flex: 1; min-width: 0; cursor: pointer; }
+.skin-alvo input { position: absolute; opacity: 0; pointer-events: none; }
+.skin-alvo span { display: block; padding: 7px 10px; border-radius: 7px; color: var(--muted); font-size: 12px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skin-alvo label:hover span { color: #e6e6ea; }
+.skin-alvo input:checked + span { background: #29292f; color: #f3f3f4; }
+.skin-alvo input:focus-visible + span { outline: 2px solid var(--accent); }
+/* Previa: um pedaco de conversa com a cor, a imagem e a opacidade escolhidas,
+   para ver o resultado antes de salvar. */
+.skin-previa { position: relative; height: 190px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--skin-previa-bg, #111114); }
+.skin-previa-imagem { position: absolute; inset: 0; background-size: cover; background-position: center; opacity: var(--skin-previa-opacidade, .5); }
+.skin-previa-conteudo { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px; padding: 18px; }
+.skin-previa-msg { display: flex; align-items: center; gap: 10px; }
+.skin-previa-avatar { width: 28px; height: 28px; flex: 0 0 auto; border-radius: 50%; background: rgba(255,255,255,.18); }
+.skin-previa-linhas { display: flex; flex-direction: column; gap: 6px; }
+.skin-previa-linhas i { display: block; width: 180px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.28); }
+.skin-previa-linhas i + i { width: 120px; }
+.skin-previa-botao { align-self: flex-start; margin-top: auto; padding: 5px 12px; border-radius: 7px; background: var(--accent); color: #111; font-size: 11px; font-weight: 600; }
+.skin-previa-acoes { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 6px; }
+.skin-previa-acoes button { padding: 6px 11px; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; background: rgba(0,0,0,.6); color: #f3f3f4; font-size: 11px; cursor: pointer; backdrop-filter: blur(4px); }
+.skin-previa-acoes button:hover { background: rgba(0,0,0,.8); }
+.skin-previa-acoes button.danger { color: #ff9b9e; }
+.skin-campo { display: flex; align-items: center; gap: 12px; margin: 14px 0; font-size: 12px; }
+.skin-campo > span { flex: 0 0 auto; color: #c9c9d1; }
+.skin-campo input[type="range"] { flex: 1; width: auto; min-width: 0; padding: 0; border: 0; }
+.skin-campo output { width: 38px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.skin-campo.desligado { opacity: .4; }
+.skin-cores { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+.skin-cor { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: #1b1b20; font-size: 12px; }
+.skin-cor > span { flex: 1; min-width: 0; color: #c9c9d1; }
+.skin-cor .ghost-button { margin: 0; padding: 4px 8px; font-size: 10px; }
+#skin-accent, #skin-bg { width: 30px; height: 30px; flex: 0 0 auto; padding: 0; border: 1px solid rgba(255,255,255,.14); border-radius: 50%; background: none; cursor: pointer; overflow: hidden; }
+#skin-accent::-webkit-color-swatch-wrapper, #skin-bg::-webkit-color-swatch-wrapper { padding: 0; }
+#skin-accent::-webkit-color-swatch, #skin-bg::-webkit-color-swatch { border: 0; border-radius: 50%; }
 
 /* ---- estados de presença ---- */
 /* A bolinha mora sobre o canto da foto, com um anel da cor do painel atrás para
@@ -824,6 +865,7 @@ input[type="range"]::-webkit-slider-thumb {
 .mention-box { position: absolute; bottom: 100%; left: 0; max-width: 320px; width: 100%; margin-bottom: 6px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); box-shadow: 0 14px 34px rgba(0,0,0,.5); z-index: 40; }
 .mention-box .mention-item { width: 100%; height: auto; display: flex; align-items: center; justify-content: flex-start; gap: 8px; padding: 5px 7px; border: 0; border-radius: 7px; background: none; color: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .mention-box .mention-item .avatar { width: 22px; height: 22px; font-size: 10px; }
+.mention-box .mention-item .emote-sugestao { height: 26px; width: 26px; max-width: 26px; vertical-align: middle; }
 .mention-box .mention-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mention-box .mention-item:hover, .mention-box .mention-item.active { background: rgba(255,122,69,.16); }
 
@@ -860,6 +902,36 @@ input[type="range"]::-webkit-slider-thumb {
 .config-pane.ativo { display: flex; }
 /* A primeira legenda de secao nao precisa do respiro que separa as seguintes. */
 .config-pane .section-label:first-child { margin-top: 0; }
+/* Configuracoes do servidor: mesmo desenho das configuracoes do aplicativo,
+   com classes proprias porque o laco das abas de la pega toda `.config-tab`. */
+.servidor-dialog { padding: 20px 22px 22px; }
+.servidor-topo { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.servidor-topo h2 { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.servidor-fechar { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: transparent; color: #b9b9c4; font-size: 13px; cursor: pointer; }
+.servidor-fechar:hover { background: #29292f; color: #fff; }
+.servidor-nav { position: sticky; top: 0; }
+.servidor-aba { padding: 9px 11px; border: 0; border-radius: 9px; background: transparent; color: #b9b9c4; text-align: left; font-size: 13px; cursor: pointer; }
+.servidor-aba:hover { background: #26262c; color: #f3f3f4; }
+.servidor-aba.ativo { background: #34343b; color: #fff; }
+.servidor-aba.perigo { color: #ff9b9e; }
+.servidor-aba.perigo:hover { background: rgba(229,72,77,.14); color: #ffb3b5; }
+.servidor-nav-risco { height: 1px; margin: 8px 4px; background: var(--line); }
+.servidor-painel { display: none; flex-direction: column; gap: 10px; max-height: min(70vh, 620px); overflow-y: auto; padding-right: 4px; scrollbar-color: #29292f transparent; }
+.servidor-painel.ativo { display: flex; }
+/* Com rolagem propria, o flex encolheria banner e previa para caber. */
+.servidor-painel > * { flex-shrink: 0; }
+.servidor-painel textarea { width: 100%; resize: vertical; color: white; background: #0c0c0f; border: 1px solid var(--line); border-radius: 11px; padding: 11px 14px; outline: none; }
+.servidor-painel > .muted:first-child { margin: 0 0 4px; }
+.servidor-painel .dialog-actions { margin-top: 6px; }
+.servidor-painel .section-label { margin-bottom: 0; }
+.servidor-painel .dialog-row { flex-wrap: wrap; }
+/* Banner com o icone por cima, no canto: como o servidor aparece para quem entra. */
+.servidor-banner { position: relative; height: 130px; margin-bottom: 30px; }
+.servidor-banner .server-icon-preview { position: absolute; left: 16px; bottom: -26px; width: 64px; height: 64px; border: 4px solid #17171b; }
+.emote-novo { padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #1b1b20; }
+.emote-novo #emote-nome { padding: 9px 12px; }
+.emote-novo .primary { padding: 9px 16px; font-size: 13px; box-shadow: none; }
+.emotes-lista { max-height: none; }
 
 /* Medidor do microfone. A marca do limiar fica sobre a barra: e a unica forma
    de a pessoa entender "abre a partir daqui" sem ler texto nenhum. */

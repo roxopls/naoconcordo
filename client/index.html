@@ -208,7 +208,6 @@
         <button id="mic-button" class="control" title="Ativar microfone"><svg class="ic"><use href="#i-mic"/></svg><small>Microfone</small></button>
         <button id="cam-button" class="control" title="Ligar câmera"><svg class="ic"><use href="#i-cam"/></svg><small>Câmera</small></button>
         <button id="screen-button" class="control" title="Compartilhar tela"><svg class="ic"><use href="#i-screen"/></svg><small>Compartilhar</small></button>
-        <button id="screen-window" class="control" title="Abrir as transmissões numa janela redimensionável"><svg class="ic"><use href="#i-window"/></svg><small>Janela</small></button>
         <button id="audio-button" class="control" title="Silenciar áudio"><svg class="ic"><use href="#i-audio"/></svg><small>Áudio</small></button>
         <button id="devices-button" class="control" title="Escolher microfone, câmera e saída de áudio"><svg class="ic"><use href="#i-gear"/></svg><small>Dispositivos</small></button>
         <button id="leave-button" class="control danger" title="Sair da chamada"><svg class="ic"><use href="#i-hangup"/></svg><small>Desconectar</small></button>
@@ -286,21 +285,112 @@
       <div class="dialog-actions"><button id="close-friends" type="button">Fechar</button></div>
     </dialog>
 
-    <dialog id="members-dialog" class="wide-dialog">
-      <h2 id="members-title">Configurações do servidor</h2>
-      <p class="muted">Só quem está aqui vê este servidor.</p>
-      <p class="section-label">MEMBROS</p>
-      <div id="member-list" class="friend-rows"></div>
-      <p class="section-label">CONVIDAR UM AMIGO</p>
-      <div id="member-candidates" class="friend-rows"></div>
-      <p id="members-error" class="error"></p>
-      <div class="dialog-actions">
-        <button id="customize-server-btn" class="hidden" type="button">Personalizar</button>
-        <button id="emotes-btn" type="button">Emotes</button>
-        <button id="skin-btn" class="hidden" type="button">Aparência</button>
-        <button id="leave-server" type="button">Sair do servidor</button>
-        <button id="delete-server" class="danger-button hidden" type="button">Apagar servidor</button>
-        <button id="close-members" class="primary" type="button">Fechar</button>
+    <dialog id="members-dialog" class="wide-dialog config-dialog servidor-dialog">
+      <div class="servidor-topo">
+        <h2 id="members-title">Configurações do servidor</h2>
+        <button id="close-members" class="servidor-fechar" type="button" title="Fechar" aria-label="Fechar">✕</button>
+      </div>
+      <div class="config-layout">
+        <nav class="config-nav servidor-nav">
+          <button id="customize-server-btn" type="button" class="servidor-aba hidden" data-aba="geral">Geral</button>
+          <button id="membros-aba" type="button" class="servidor-aba" data-aba="membros">Membros</button>
+          <button id="emotes-btn" type="button" class="servidor-aba" data-aba="emotes">Emotes</button>
+          <button id="skin-btn" type="button" class="servidor-aba hidden" data-aba="aparencia">Aparência</button>
+          <span class="servidor-nav-risco"></span>
+          <button id="leave-server" type="button" class="servidor-aba perigo">Sair do servidor</button>
+          <button id="delete-server" type="button" class="servidor-aba perigo hidden">Apagar servidor</button>
+        </nav>
+
+        <div class="config-panes">
+          <section class="servidor-painel" data-aba="geral">
+            <p class="muted">Só o dono pode alterar.</p>
+            <div id="server-settings-banner-preview" class="banner-preview servidor-banner">
+              <div id="server-settings-icon-preview" class="server-icon-preview"></div>
+            </div>
+            <div class="dialog-row">
+              <button id="server-settings-banner-btn" type="button" class="ghost-button">Alterar banner</button>
+              <button id="server-settings-banner-remove" type="button" class="ghost-button danger hidden">Remover banner</button>
+              <button id="server-settings-icon-btn" type="button" class="ghost-button">Alterar ícone</button>
+              <button id="server-settings-icon-remove" type="button" class="ghost-button danger hidden">Remover ícone</button>
+            </div>
+            <input id="server-settings-banner-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+            <input id="server-settings-icon-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+            <label>Nome do servidor<input id="server-settings-name" type="text" maxlength="50" /></label>
+            <label>Descrição<textarea id="server-settings-description" maxlength="300" rows="3" placeholder="Do que se trata este servidor…"></textarea></label>
+            <small id="server-settings-desc-count" class="muted">0 / 300</small>
+            <div class="dialog-actions">
+              <button id="server-settings-save" class="primary" type="button">Salvar</button>
+            </div>
+          </section>
+
+          <section class="servidor-painel" data-aba="membros">
+            <p class="muted">Só quem está aqui vê este servidor.</p>
+            <p class="section-label">MEMBROS</p>
+            <div id="member-list" class="friend-rows"></div>
+            <p class="section-label">CONVIDAR UM AMIGO</p>
+            <div id="member-candidates" class="friend-rows"></div>
+            <p id="members-error" class="error"></p>
+          </section>
+
+          <section class="servidor-painel" data-aba="emotes">
+            <p class="muted">Escreva <code>:apelido:</code> na conversa, ou escolha na hora de reagir. Dono e moderador podem adicionar.</p>
+            <div id="emotes-admin" class="hidden">
+              <div class="dialog-row emote-novo">
+                <div id="emote-preview" class="emote-preview"></div>
+                <button id="emote-escolher" type="button" class="ghost-button">Escolher imagem</button>
+                <input id="emote-nome" type="text" maxlength="24" placeholder="apelido" />
+                <button id="emote-salvar" class="primary" type="button">Adicionar</button>
+              </div>
+              <!-- Restrito a imagem de proposito: o emote e desenhado num `<img>` no
+                   meio da frase, e a conversa aceitar qualquer arquivo nao muda isso. -->
+              <input id="emote-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+            </div>
+            <div id="emotes-lista" class="emotes-lista"></div>
+            <p id="emotes-error" class="error"></p>
+          </section>
+
+          <section class="servidor-painel" data-aba="aparencia">
+            <p class="muted">Dono e moderador. O canal manda no que ele definir; o resto vem do servidor.</p>
+            <div class="skin-alvo" role="radiogroup">
+              <label><input type="radio" name="skin-alvo" value="servidor" checked /><span>O servidor inteiro</span></label>
+              <label><input type="radio" name="skin-alvo" value="canal" /><span id="skin-alvo-canal">Só este canal</span></label>
+            </div>
+            <div id="skin-previa" class="skin-previa">
+              <div id="skin-imagem-preview" class="skin-previa-imagem"></div>
+              <div class="skin-previa-conteudo">
+                <div class="skin-previa-msg"><span class="skin-previa-avatar"></span><span class="skin-previa-linhas"><i></i><i></i></span></div>
+                <div class="skin-previa-msg"><span class="skin-previa-avatar"></span><span class="skin-previa-linhas"><i></i></span></div>
+                <span class="skin-previa-botao">Destaque</span>
+              </div>
+              <div class="skin-previa-acoes">
+                <button id="skin-imagem-btn" type="button">Escolher imagem</button>
+                <button id="skin-imagem-remove" type="button" class="danger hidden">Remover</button>
+              </div>
+            </div>
+            <div class="skin-campo">
+              <span>Opacidade da imagem</span>
+              <input id="skin-opacidade" type="range" min="0" max="100" step="5" value="50" />
+              <output id="skin-opacidade-valor">50%</output>
+            </div>
+            <div class="skin-cores">
+              <div class="skin-cor">
+                <input id="skin-accent" type="color" />
+                <span>Cor de destaque</span>
+                <button id="skin-accent-limpar" type="button" class="ghost-button">Padrão</button>
+              </div>
+              <div class="skin-cor">
+                <input id="skin-bg" type="color" />
+                <span>Cor de fundo</span>
+                <button id="skin-bg-limpar" type="button" class="ghost-button">Padrão</button>
+              </div>
+            </div>
+            <input id="skin-imagem-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+            <p id="skin-error" class="error"></p>
+            <div class="dialog-actions">
+              <button id="skin-salvar" class="primary" type="button">Salvar</button>
+            </div>
+          </section>
+        </div>
       </div>
     </dialog>
 
@@ -543,82 +633,6 @@
       <div class="dialog-actions">
         <button id="profile-edit-cancel" type="button">Cancelar</button>
         <button id="profile-edit-save" class="primary" type="button">Salvar</button>
-      </div>
-    </dialog>
-
-    <dialog id="server-settings-dialog" class="wide-dialog">
-      <h2>Configurar servidor</h2>
-      <p class="muted">Só o dono pode alterar.</p>
-      <div id="server-settings-banner-preview" class="banner-preview"></div>
-      <div class="dialog-row">
-        <button id="server-settings-banner-btn" type="button" class="ghost-button">Alterar banner</button>
-        <button id="server-settings-banner-remove" type="button" class="ghost-button danger hidden">Remover</button>
-      </div>
-      <input id="server-settings-banner-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
-      <div class="dialog-row">
-        <div id="server-settings-icon-preview" class="server-icon-preview"></div>
-        <button id="server-settings-icon-btn" type="button" class="ghost-button">Alterar ícone</button>
-        <button id="server-settings-icon-remove" type="button" class="ghost-button danger hidden">Remover</button>
-      </div>
-      <input id="server-settings-icon-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
-      <label>Nome do servidor<input id="server-settings-name" type="text" maxlength="50" /></label>
-      <label>Descrição<textarea id="server-settings-description" maxlength="300" rows="2" placeholder="Do que se trata este servidor…"></textarea></label>
-      <small id="server-settings-desc-count" class="muted">0 / 300</small>
-      <div class="dialog-actions">
-        <button id="server-settings-cancel" type="button">Cancelar</button>
-        <button id="server-settings-save" class="primary" type="button">Salvar</button>
-      </div>
-    </dialog>
-
-    <dialog id="skin-dialog" class="wide-dialog">
-      <h2>Aparência</h2>
-      <p class="muted">Dono e moderador. O canal manda no que ele definir; o resto vem do servidor.</p>
-      <div class="dialog-row">
-        <label class="escolha"><input type="radio" name="skin-alvo" value="servidor" checked /> O servidor inteiro</label>
-        <label class="escolha"><input type="radio" name="skin-alvo" value="canal" /> <span id="skin-alvo-canal">Só este canal</span></label>
-      </div>
-      <div class="dialog-row">
-        <label>Cor de destaque<input id="skin-accent" type="color" /></label>
-        <button id="skin-accent-limpar" type="button" class="ghost-button">Usar padrão</button>
-      </div>
-      <div class="dialog-row">
-        <label>Cor de fundo<input id="skin-bg" type="color" /></label>
-        <button id="skin-bg-limpar" type="button" class="ghost-button">Usar padrão</button>
-      </div>
-      <div class="dialog-row">
-        <div id="skin-imagem-preview" class="banner-preview"></div>
-      </div>
-      <div class="dialog-row">
-        <button id="skin-imagem-btn" type="button" class="ghost-button">Imagem de fundo</button>
-        <button id="skin-imagem-remove" type="button" class="ghost-button danger hidden">Remover imagem</button>
-      </div>
-      <input id="skin-imagem-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
-      <p id="skin-error" class="error"></p>
-      <div class="dialog-actions">
-        <button id="skin-cancelar" type="button">Cancelar</button>
-        <button id="skin-salvar" class="primary" type="button">Salvar</button>
-      </div>
-    </dialog>
-
-    <dialog id="emotes-dialog" class="wide-dialog">
-      <h2>Emotes do servidor</h2>
-      <p class="muted">Escreva <code>:apelido:</code> na conversa, ou escolha na hora de reagir. Dono e moderador podem adicionar.</p>
-      <div id="emotes-lista" class="emotes-lista"></div>
-      <div id="emotes-admin" class="hidden">
-        <p class="section-label">ADICIONAR</p>
-        <div class="dialog-row">
-          <div id="emote-preview" class="emote-preview"></div>
-          <button id="emote-escolher" type="button" class="ghost-button">Escolher imagem</button>
-          <input id="emote-nome" type="text" maxlength="24" placeholder="apelido" />
-          <button id="emote-salvar" class="primary" type="button">Adicionar</button>
-        </div>
-        <!-- Restrito a imagem de proposito: o emote e desenhado num `<img>` no
-             meio da frase, e a conversa aceitar qualquer arquivo nao muda isso. -->
-        <input id="emote-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
-      </div>
-      <p id="emotes-error" class="error"></p>
-      <div class="dialog-actions">
-        <button id="emotes-fechar" class="primary" type="button">Fechar</button>
       </div>
     </dialog>
 

@@ -16,6 +16,10 @@
 /// numero de faixas: ignorar isso faz a grade escolher uma divisao que so cabe
 /// no papel, e as tiles estouram o espaco disponivel.
 ///
+/// `teto` limita a largura de uma tile. Com ele, varias divisoes chegam ao
+/// mesmo tamanho, e a que tem menos linhas ganha: as tiles ficam lado a lado
+/// no alto do palco em vez de empilhadas.
+///
 /// Devolve 1 quando nao ha o que medir, para o chamador nunca dividir por zero.
 export function melhoresColunas(
   largura: number,
@@ -23,21 +27,26 @@ export function melhoresColunas(
   quantidade: number,
   proporcao: number,
   vao = 0,
+  teto = 0,
 ): number {
   if (quantidade <= 1 || largura <= 0 || altura <= 0) return 1;
 
   let melhor = 1;
   let maiorLado = 0;
+  let linhasDoMelhor = Infinity;
   for (let colunas = 1; colunas <= quantidade; colunas += 1) {
     const linhas = Math.ceil(quantidade / colunas);
     const larguraUtil = largura - vao * (colunas - 1);
     const alturaUtil = altura - vao * (linhas - 1);
     if (larguraUtil <= 0 || alturaUtil <= 0) continue;
     // O video ocupa o maior retangulo com a proporcao certa que cabe na celula.
-    const ladoUtil = Math.min(larguraUtil / colunas / proporcao, alturaUtil / linhas);
-    if (ladoUtil > maiorLado) {
+    let ladoUtil = Math.min(larguraUtil / colunas / proporcao, alturaUtil / linhas);
+    if (teto > 0) ladoUtil = Math.min(ladoUtil, teto / proporcao);
+    const empate = teto > 0 && Math.abs(ladoUtil - maiorLado) < 0.5 && linhas < linhasDoMelhor;
+    if (ladoUtil > maiorLado + (teto > 0 ? 0.5 : 0) || empate) {
       maiorLado = ladoUtil;
       melhor = colunas;
+      linhasDoMelhor = linhas;
     }
   }
   return melhor;
@@ -49,20 +58,41 @@ export function melhoresColunas(
 /// primeiro quadro chega: o chute inicial erra para quem tem webcam 16:9, e
 /// errar a proporcao aqui vira faixa preta sobrando na tile.
 ///
+/// Margem lateral minima do palco com teto; casa com `.stage.grade-topo`.
+const MARGEM_LATERAL = 18;
+
+/// Com `teto` (largura maxima de uma tile, em px) a grade fica no alto e
+/// centralizada, com colunas da largura exata da tile, como no palco do
+/// Discord; sem ele, as tiles crescem ate encher o espaco.
+///
 /// Devolve a funcao que refaz a conta, para quem adiciona ou remove uma tile
 /// poder chamar sem esperar o `ResizeObserver`.
 export function grade(
   container: HTMLElement,
   proporcao: number | (() => number) = 16 / 9,
+  teto = 0,
 ): () => void {
   const aplicar = () => {
+    // Modo grande e tela cheia mostram uma tile so, preenchendo: quem manda
+    // ali e o CSS, e colunas fixas em px deixariam a tile do tamanho da grade.
+    if (teto > 0 && (container.classList.contains("has-theater") || document.fullscreenElement === container)) {
+      container.classList.remove("grade-topo");
+      container.style.gridTemplateColumns = "";
+      container.style.gridTemplateRows = "";
+      return;
+    }
     const quantidade = container.children.length;
     if (!quantidade) return;
     const estilo = getComputedStyle(container);
     // `clientWidth` inclui o preenchimento; o espaco das tiles e o que sobra.
-    const largura = container.clientWidth
-      - (parseFloat(estilo.paddingLeft) || 0)
-      - (parseFloat(estilo.paddingRight) || 0);
+    // Com teto, o preenchimento lateral e o que centraliza a faixa e sai desta
+    // propria conta: medir por ele faria cada ajuste encolher o seguinte. Vale
+    // a margem fixa do palco.
+    const largura = teto > 0
+      ? container.clientWidth - MARGEM_LATERAL * 2
+      : container.clientWidth
+        - (parseFloat(estilo.paddingLeft) || 0)
+        - (parseFloat(estilo.paddingRight) || 0);
     const altura = container.clientHeight
       - (parseFloat(estilo.paddingTop) || 0)
       - (parseFloat(estilo.paddingBottom) || 0);
@@ -73,8 +103,26 @@ export function grade(
       quantidade,
       razao > 0 ? razao : 16 / 9,
       parseFloat(estilo.rowGap) || 0,
+      teto,
     );
     const linhas = Math.ceil(quantidade / colunas);
+    if (teto > 0) {
+      const vao = parseFloat(estilo.rowGap) || 0;
+      const larguraTile = Math.min(
+        teto,
+        (largura - vao * (colunas - 1)) / colunas,
+        ((altura - vao * (linhas - 1)) / linhas) * (razao > 0 ? razao : 16 / 9),
+      );
+      // Em flex, e nao em colunas de grade: assim a ultima linha incompleta
+      // fica centralizada, em vez de encostada na esquerda. A largura maxima da
+      // faixa segura a quantidade de colunas escolhida acima.
+      container.classList.add("grade-topo");
+      container.style.gridTemplateColumns = "";
+      container.style.gridTemplateRows = "";
+      container.style.setProperty("--tile-largura", Math.max(0, Math.floor(larguraTile)) + "px");
+      container.style.setProperty("--faixa-largura", Math.ceil(larguraTile * colunas + vao * (colunas - 1)) + "px");
+      return;
+    }
     container.style.gridTemplateColumns = `repeat(${colunas}, minmax(0, 1fr))`;
     container.style.gridTemplateRows = `repeat(${linhas}, minmax(0, 1fr))`;
     // Quanto sobra de altura para **uma** tile.
