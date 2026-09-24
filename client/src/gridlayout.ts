@@ -74,8 +74,18 @@ export function grade(
       razao > 0 ? razao : 16 / 9,
       parseFloat(estilo.rowGap) || 0,
     );
-    container.style.gridTemplateColumns = `repeat(${colunas}, 1fr)`;
-    container.style.gridTemplateRows = `repeat(${Math.ceil(quantidade / colunas)}, 1fr)`;
+    const linhas = Math.ceil(quantidade / colunas);
+    container.style.gridTemplateColumns = `repeat(${colunas}, minmax(0, 1fr))`;
+    container.style.gridTemplateRows = `repeat(${linhas}, minmax(0, 1fr))`;
+    // Quanto sobra de altura para **uma** tile.
+    //
+    // A celula da grade ocupa a altura toda, e uma tile que se estica com ela
+    // fica com a proporcao errada — alta e estreita na chamada de duas pessoas,
+    // que e o formato mais comum. Com esta medida publicada, o CSS limita a
+    // largura da tile a `altura * proporcao` e deixa o `aspect-ratio` cuidar do
+    // resto: a tile fica no formato certo e centralizada, em vez de preencher.
+    const vaoLinhas = (parseFloat(estilo.rowGap) || 0) * (linhas - 1);
+    container.style.setProperty("--tile-altura", Math.max(0, (altura - vaoLinhas) / linhas) + "px");
   };
   // O observador cobre o redimensionamento da janela e o arrasto da alca do
   // painel destacado, que nao emitem `resize` no elemento.

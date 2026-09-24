@@ -100,10 +100,16 @@ export type MessageNotice = {
   /// Substituto sem conteudo, para quando a previa esta desligada.
   privateBody: string;
   inCall: boolean;
+  /// A pessoa esta em "nao incomodar"? Quem decide e quem chama, porque o
+  /// estado de presenca mora no `main.ts` — aqui so se obedece.
+  naoPerturbe?: boolean;
 };
 
 /// Notifica uma mensagem nova, respeitando as tres chaves.
 export async function notifyMessage(notice: MessageNotice): Promise<boolean> {
+  // "Nao incomodar" vem antes de tudo: e o pedido mais explicito que existe, e
+  // ganha inclusive de quem ligou notificacao em chamada.
+  if (notice.naoPerturbe) return false;
   if (!desktopNotificationsOn()) return false;
   // Em chamada a pessoa ja esta no app; avisar de novo so atrapalha, a menos
   // que ela tenha pedido.

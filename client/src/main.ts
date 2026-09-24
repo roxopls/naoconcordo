@@ -28,6 +28,7 @@ import {
   sendTestNotification, setDesktopNotifications, setNotificationPreview, setNotificationsInCall,
 } from "./notifications";
 import { atualizarSelo } from "./selo";
+import { grade } from "./gridlayout";
 
 // Escolhido em tempo de execucao (veja `servidor.ts`), e nao mais fixado no
 // build. Lido uma vez: trocar de servidor recarrega a janela, porque sessao,
@@ -37,13 +38,17 @@ const WS = servidor.paraWs(API);
 type StoredFile = { id: string; name: string; mime: string; size: number; owner: string };
 type ChatMessage = { id: string; username: string; text: string; createdAt: string; editedAt?: string | null; roomId: string; attachments?: StoredFile[]; replyTo?: string | null; reactions?: Record<string, string[]>; pinned?: boolean };
 type AuthSession = { token: string; username: string; expiresAt: number };
-type ServerInfo = { id: string; name: string; iconFile?: string | null; bannerFile?: string | null; description?: string | null };
+type ServerInfo = { id: string; name: string; iconFile?: string | null; bannerFile?: string | null; description?: string | null } & Skin;
 type RoomKind = "text" | "voice";
-type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind; categoryId?: string | null; posicao?: number };
-type Profile = { username: string; avatar: string | null; avatarFile?: string | null; bio?: string | null; bannerFile?: string | null; color?: string | null };
+type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind; categoryId?: string | null; posicao?: number } & Skin;
+/// Cor e fundo de um servidor ou canal. Campos independentes: da para trocar so
+/// a cor de destaque, so o fundo, ou os dois.
+type Skin = { accent?: string | null; bgColor?: string | null; bgFile?: string | null };
+type Profile = { username: string; avatar: string | null; avatarFile?: string | null; bio?: string | null; bannerFile?: string | null; color?: string | null; recado?: string | null };
 type ServerRole = "owner" | "mod" | "member";
 type Categoria = { id: string; serverId: string; name: string; posicao: number };
-type Bootstrap = { servers: ServerInfo[]; rooms: RoomInfo[]; profiles: Profile[]; isOwner: boolean; isAdmin: boolean; roles: Record<string, ServerRole>; online: string[]; voice?: Record<string, string[]>; categorias?: Categoria[]; gifs?: boolean; dj?: boolean };
+type Emote = { id: string; serverId: string; name: string; fileId: string; createdBy: string; createdAt: string };
+type Bootstrap = { servers: ServerInfo[]; rooms: RoomInfo[]; profiles: Profile[]; isOwner: boolean; isAdmin: boolean; roles: Record<string, ServerRole>; online: string[]; voice?: Record<string, string[]>; categorias?: Categoria[]; estados?: Record<string, string>; emotes?: Emote[]; gifs?: boolean; dj?: boolean };
 type LivekitAccess = { token: string; url: string; room: string };
 type Friendship = { requester: string; addressee: string; status: "pending" | "accepted" };
 type FriendsData = { friends: string[]; incoming: Friendship[]; outgoing: Friendship[] };
@@ -86,6 +91,11 @@ let profiles = new Map<string, Profile>(), currentServerId = "", currentRoomId =
 /// servidor decidiu — ordenar de novo aqui so criaria uma segunda regra para
 /// discordar da primeira.
 let categorias: Categoria[] = [];
+/// Os emotes de todos os servidores que esta conta enxerga.
+///
+/// Uma lista so, e nao um mapa por servidor: a busca e sempre por apelido, e
+/// `emoteDe` e quem resolve a preferencia pelo servidor aberto.
+let emotes: Emote[] = [];
 /// Se o servidor deste endereco sabe o que sao categorias.
 let temCategorias = false;
 // Canal de voz onde a chamada esta, independente do canal de texto aberto.
@@ -94,6 +104,132 @@ let voiceRoomId = "";
 let view: "home" | "server" = "home";
 // Quem esta conectado agora, e a lista de membros do servidor aberto.
 const onlineUsers = new Set<string>();
+
+// --------------------------------------------------------- estados de presenca
+/// Os quatro estados. `invisivel` e o "aparecer offline": a pessoa continua
+/// usando tudo, e para os outros ela some da lista de quem esta online.
+type EstadoPresenca = "online" | "ausente" | "ocupado" | "invisivel";
+const ESTADOS: { id: EstadoPresenca; rotulo: string; dica: string }[] = [
+  { id: "online", rotulo: "Disponível", dica: "Todo mundo vê que você está aqui." },
+  { id: "ausente", rotulo: "Ausente", dica: "Some sozinho depois de 15 minutos parado." },
+  { id: "ocupado", rotulo: "Não incomodar", dica: "Sem som e sem aviso na tela." },
+  { id: "invisivel", rotulo: "Aparecer offline", dica: "Você continua usando tudo; os outros te veem na lista de offline." },
+];
+/// O estado de cada pessoa conectada. Quem nao esta aqui esta offline.
+const estadosDeGente = new Map<string, string>();
+const ESTADO_KEY = "naoconcordo.estado";
+
+/// O estado que **esta pessoa** escolheu, guardado na propria maquina.
+///
+/// Fica aqui e nao no servidor porque e uma escolha da maquina: o servidor
+/// esquece tudo ao reiniciar, e e o cliente que reanuncia ao reconectar — o
+/// mesmo acordo do canal de voz.
+function estadoEscolhido(): EstadoPresenca {
+  const salvo = localStorage.getItem(ESTADO_KEY);
+  return ESTADOS.some(item => item.id === salvo) ? salvo as EstadoPresenca : "online";
+}
+/// O estado que esta valendo agora, que pode ser a ausencia automatica.
+let estadoNoAr: EstadoPresenca = "online";
+
+/// Diz ao servidor em que estado esta pessoa esta.
+function anunciarEstado(estado: EstadoPresenca) {
+  estadoNoAr = estado;
+  if (session) estadosDeGente.set(key(session.username), estado);
+  if (chat?.readyState === WebSocket.OPEN) {
+    // Reaproveita `roomId` como carona do valor: o formato da mensagem do chat
+    // e fechado, e criar um campo so para isto pediria mexer nos dois lados.
+    chat.send(JSON.stringify({ type: "status", roomId: estado === "online" ? "" : estado }));
+  }
+  pintarMeuEstado();
+  renderPeople();
+}
+
+/// Não incomodar cala som e aviso na tela. É a única coisa que o estado muda
+/// no comportamento do aplicativo; o resto é o que os outros veem.
+const emNaoPerturbe = () => estadoNoAr === "ocupado";
+
+/// Ausência automática: 15 minutos parado viram "ausente", e mexer volta.
+///
+/// **Só quando o escolhido é "disponível".** Quem pediu "não incomodar" ou
+/// "aparecer offline" escolheu de propósito, e deixar o relógio sobrescrever
+/// isso seria desfazer a escolha da pessoa pelas costas — justamente no caso
+/// em que ela mais quer que seja respeitada.
+///
+/// A atividade é medida no aplicativo, e não no computador inteiro: um app sem
+/// privilégio nenhum não enxerga o que a pessoa faz nas outras janelas. Então
+/// "parado" aqui quer dizer "sem mexer no naoconcordo", que é o que o resto do
+/// mundo também chama de ausente. Estar numa chamada conta como atividade: quem
+/// está ouvindo sem digitar continua presente.
+const OCIOSO_MS = 15 * 60 * 1000;
+let ultimaAtividade = Date.now();
+
+/// Pinta a bolinha do rodapé com o estado que está valendo.
+function pintarMeuEstado() {
+  const botao = byId("estado-botao");
+  const atual = ESTADOS.find(item => item.id === estadoNoAr) || ESTADOS[0];
+  botao.dataset.estado = estadoNoAr;
+  // O escolhido vai no título junto quando a ausência automática está por cima:
+  // sem isso a pessoa vê "Ausente" e acha que alguém mexeu na escolha dela.
+  const escolhido = estadoEscolhido();
+  botao.title = atual.rotulo + (escolhido !== estadoNoAr ? " (automático — você escolheu " + (ESTADOS.find(i => i.id === escolhido)?.rotulo || "") + ")" : "");
+}
+
+/// O menu de estados, aberto pela bolinha.
+function abrirSeletorDeEstado(ancora: HTMLElement) {
+  closeUserMenu();
+  const caixa = document.createElement("div");
+  caixa.className = "user-menu seletor-estado";
+  const escolhido = estadoEscolhido();
+  for (const item of ESTADOS) {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.className = "estado-opcao" + (item.id === escolhido ? " ativo" : "");
+    const bolinha = document.createElement("span");
+    bolinha.className = "estado-dot estado-dot-menu";
+    bolinha.dataset.estado = item.id;
+    const texto = document.createElement("span");
+    const nome = document.createElement("strong");
+    nome.textContent = item.rotulo;
+    const dica = document.createElement("small");
+    dica.textContent = item.dica;
+    texto.append(nome, dica);
+    botao.append(bolinha, texto);
+    botao.onclick = () => {
+      closeUserMenu();
+      localStorage.setItem(ESTADO_KEY, item.id);
+      // Escolher qualquer coisa conta como sinal de vida: sem isso, escolher
+      // "disponível" depois de meia hora parado voltaria a "ausente" na
+      // próxima volta do relógio.
+      ultimaAtividade = Date.now();
+      anunciarEstado(item.id);
+    };
+    caixa.append(botao);
+  }
+  montarMenu(caixa, ancora);
+}
+
+byId("estado-botao")?.addEventListener("click", evento => {
+  evento.stopPropagation();
+  abrirSeletorDeEstado(byId("estado-botao"));
+});
+
+function vigiarOciosidade() {
+  const mexeu = () => {
+    ultimaAtividade = Date.now();
+    if (estadoNoAr === "ausente" && estadoEscolhido() === "online") anunciarEstado("online");
+  };
+  for (const evento of ["pointerdown", "keydown", "wheel", "mousemove", "focus"]) {
+    window.addEventListener(evento, mexeu, { passive: true });
+  }
+  window.setInterval(() => {
+    if (estadoEscolhido() !== "online") return;
+    // Numa chamada a pessoa está presente mesmo sem tocar no teclado.
+    if (room?.state === "connected") { ultimaAtividade = Date.now(); return; }
+    const parada = Date.now() - ultimaAtividade;
+    if (parada >= OCIOSO_MS && estadoNoAr !== "ausente") anunciarEstado("ausente");
+  }, 30_000);
+}
+vigiarOciosidade();
 let serverMembers: string[] = [];
 // Quem esta em cada canal de voz, na visao do servidor. Existe para a lista
 // aparecer **antes** de entrar na chamada: o LiveKit so conta quem esta na
@@ -118,7 +254,7 @@ function peopleInVoice(roomId: string): string[] {
   }
   return saida;
 }
-type ServerMember = { username: string; role: ServerRole; nickname?: string | null; avatarFile?: string | null };
+type ServerMember = { username: string; role: ServerRole; nickname?: string | null; avatarFile?: string | null; recado?: string | null };
 const serverMemberProfiles = new Map<string, ServerMember>();
 
 function getDisplayName(username: string) {
@@ -127,6 +263,19 @@ function getDisplayName(username: string) {
     if (mem?.nickname) return mem.nickname;
   }
   return username;
+}
+
+/// O recado a mostrar embaixo do nome, ou vazio.
+///
+/// Duas camadas, na mesma ordem do apelido e da foto: o desta casa vence o
+/// global. Fora de um servidor só existe o global, porque o recado de uma casa
+/// não é assunto das conversas privadas.
+function recadoDe(username: string): string {
+  if (view === "server" && currentServerId) {
+    const mem = serverMemberProfiles.get(key(username));
+    if (mem?.recado) return mem.recado;
+  }
+  return profiles.get(key(username))?.recado || "";
 }
 // Papel em cada servidor, vindo do backend. Guia o que a interface oferece.
 let roles: Record<string, ServerRole> = {};
@@ -489,10 +638,19 @@ async function enterApp() {
   // oferecer um botao cujo unico resultado seria erro.
   temCategorias = data.categorias !== undefined;
   categorias = data.categorias || [];
+  emotes = data.emotes || [];
   setVoicePresence(data.voice);
   byId("admin-button").classList.toggle("hidden", !isAdmin);
   onlineUsers.clear();
   for (const name of data.online || []) onlineUsers.add(key(name));
+  estadosDeGente.clear();
+  for (const [name, estado] of Object.entries(data.estados || {})) estadosDeGente.set(key(name), estado);
+  // Mesmo motivo do `presenceChanged`: invisivel, a pessoa nao vem na lista
+  // do servidor, mas para ela mesma continua conectada.
+  if (chat?.readyState === WebSocket.OPEN) {
+    onlineUsers.add(key(session.username));
+    estadosDeGente.set(key(session.username), estadoNoAr);
+  }
   profiles = new Map(data.profiles.map(profile => [profile.username.toLowerCase(), profile]));
   const restored = readNavigation(session.username);
   if (restored && servers.some(server => server.id === restored.serverId)) currentServerId = restored.serverId;
@@ -555,10 +713,60 @@ function renderRail() {
     return button;
   }));
 }
+// ------------------------------------------------------------ skins
+/// Junta a skin do canal com a do servidor, campo a campo.
+///
+/// Campo a campo, e nao tudo ou nada: um canal pode trocar so o fundo e seguir
+/// com a cor de destaque da casa. `null` no canal e diferente de ausente —
+/// significa "tirei esta, volta para a do servidor", que e o que o servidor
+/// grava quando alguem limpa um campo.
+function skinEmVigor(): Skin {
+  const servidor = servers.find(item => item.id === currentServerId);
+  const canal = rooms.find(item => item.id === currentRoomId && item.serverId === currentServerId);
+  return {
+    accent: canal?.accent ?? servidor?.accent ?? null,
+    bgColor: canal?.bgColor ?? servidor?.bgColor ?? null,
+    bgFile: canal?.bgFile ?? servidor?.bgFile ?? null,
+  };
+}
+
+/// Pinta a tela com a skin do lugar em que a pessoa esta.
+///
+/// Fora de um servidor nao ha skin: a tela de amigos e as conversas privadas
+/// nao pertencem a casa nenhuma, e herdar a cor do ultimo servidor aberto
+/// faria a mensagem privada parecer parte dele.
+function aplicarSkin() {
+  const alvo = byId("app-view");
+  const skin = view === "server" && currentServerId ? skinEmVigor() : {};
+  alvo.style.setProperty("--accent", skin.accent || "");
+  alvo.style.setProperty("--skin-bg", skin.bgColor || "");
+  alvo.classList.toggle("com-skin", Boolean(skin.bgColor));
+
+  if (!skin.bgFile) {
+    alvo.classList.remove("com-skin-imagem");
+    alvo.style.removeProperty("--skin-bg-imagem");
+    return;
+  }
+  // Pelo original e nao pela miniatura: fundo de tela inteira num JPEG de 300px
+  // fica borrado. E um arquivo so, carregado uma vez por canal.
+  void fileUrl(skin.bgFile).then(url => {
+    // A skin pode ter mudado enquanto o arquivo carregava.
+    if (skinEmVigor().bgFile !== skin.bgFile) return;
+    alvo.style.setProperty("--skin-bg-imagem", 'url("' + url + '")');
+    alvo.classList.add("com-skin-imagem");
+  }).catch(() => {
+    alvo.classList.remove("com-skin-imagem");
+  });
+}
+
 function renderNavigation() {
   updateUnreadTitle();
   renderRail();
   syncStagePlacement();
+  aplicarSkin();
+  // O botao de emote e por servidor, ao contrario do de GIF, que e da
+  // instancia inteira: por isso ele e reavaliado a cada troca de tela.
+  aplicarBotaoDeEmote();
   const emServidor = view === "server";
   byId("channels-pane").classList.toggle("hidden", !emServidor);
   byId("friends-pane").classList.toggle("hidden", emServidor);
@@ -721,12 +929,23 @@ function chamadaNaTela(): boolean {
 /// painel so mostra a chamada do proprio servidor; fora dela, o que estava
 /// sendo transmitido vai para a janela separada, que e o lugar que ja existe
 /// para assistir sem estar na tela da chamada.
+/// Refaz a divisao do palco. Ligada na primeira chamada e reaproveitada depois:
+/// o `ResizeObserver` de dentro cobre janela e arrasto, e esta funcao cobre
+/// entrar e sair de gente, que nao muda tamanho nenhum.
+let ajustarPalco: (() => void) | null = null;
+
 function syncStagePlacement() {
   // Antes de decidir o que mostrar: a tile grande pode ter acabado de sair.
   aplicarTeatro();
   const aqui = chamadaNaTela();
   if (!aqui && document.fullscreenElement === stage) void document.exitFullscreen();
   stage.classList.toggle("hidden", !aqui);
+  // A grade entra depois do `hidden`: com o palco escondido a medida sai zero,
+  // e a divisao escolhida com zero nao serve para nada.
+  if (aqui) {
+    ajustarPalco ||= grade(stage);
+    ajustarPalco();
+  }
   // Quem apaga a conversa e o CSS, e nao `setMode`: sao os mesmos elementos que
   // a conversa privada esconde, e dois donos para a mesma propriedade acabam
   // com um deles reacendendo o que o outro apagou.
@@ -1219,7 +1438,7 @@ function recordDirect(friend: string, message: DirectMessage) {
   if (openHere) { appendDirect(message); dmMessagesEl.scrollTop = dmMessagesEl.scrollHeight; }
   if (!fromMe && !looking) {
     unreadFriends.add(key(friend)); renderFriends(); updateUnreadTitle(); playPing();
-    const mostrou = notifyMessage({ title: friend, body: message.text, privateBody: "Nova mensagem privada", inCall: inCall() });
+    const mostrou = notifyMessage({ title: friend, body: message.text, privateBody: "Nova mensagem privada", inCall: inCall(), naoPerturbe: emNaoPerturbe() });
     void avisarOrigem(mostrou, "Mensagem privada de " + getDisplayName(friend), () => void openDirect(friend));
   }
 }
@@ -1309,7 +1528,10 @@ async function sessaoAindaVale(): Promise<boolean> {
 }
 
 function connectChat() {
-  if (!session) return; chat?.close(); const token = session.token; chat = new WebSocket(WS + "/ws?token=" + encodeURIComponent(token));
+  if (!session) return; chat?.close(); const token = session.token;
+  // O estado vai na propria conexao: mandado so depois de abrir, quem esta
+  // "aparecer offline" piscaria online para os outros nesse intervalo.
+  chat = new WebSocket(WS + "/ws?token=" + encodeURIComponent(token) + "&estado=" + encodeURIComponent(estadoEscolhido()));
   // O bootstrap acontece antes do socket abrir, entao a propria pessoa nao
   // aparecia na lista de online ate reiniciar o app.
   chat.onopen = () => {
@@ -1321,6 +1543,11 @@ function connectChat() {
     // sem reanunciar, os outros veem o canal esvaziar enquanto voce continua
     // falando, porque o servidor limpou a sala ao ver o socket antigo cair.
     if (voiceRoomId) announceVoice(voiceRoomId);
+    // Mesmo motivo do canal de voz: o servidor esquece o estado quando o socket
+    // cai, e sem reanunciar a pessoa voltaria "disponível" sem ter pedido.
+    // A ausência automática não é reanunciada de propósito — quem reconectou
+    // acabou de dar sinal de vida.
+    anunciarEstado(estadoEscolhido());
     renderPeople();
     if (view === "home" && mode === "room") renderMessages();
   };
@@ -1331,6 +1558,9 @@ function connectChat() {
       invite?: ServerInvite; inviteId?: string; accepted?: boolean; server?: ServerInfo; rooms?: RoomInfo[]; role?: ServerRole; serverId?: string;
       users?: string[];
       estado?: DjEstado; texto?: string;
+      /// O estado de presença de quem o evento fala. Nome diferente de `estado`
+      /// de propósito: aquele é a fila do DJ.
+      presenca?: string;
     };
     if (payload.type === "welcome") { history = payload.messages || []; renderMessages(); }
     if (payload.type === "message" && payload.message) {
@@ -1357,8 +1587,15 @@ function connectChat() {
       if (editingMessageId === payload.messageId) closeMessageEditor();
       refreshVisibleRoom(payload.roomId);
     }
-    if (payload.type === "presenceChanged" && payload.username) {
+    // A propria presenca nao vem do servidor: para os outros quem esta
+    // invisivel sai como offline, e aceitar isso aqui tiraria a pessoa da
+    // propria lista. Quem sabe o proprio estado e esta maquina.
+    if (payload.type === "presenceChanged" && payload.username && !(session && key(payload.username) === key(session.username))) {
       if (payload.online) onlineUsers.add(key(payload.username)); else onlineUsers.delete(key(payload.username));
+      // Quem saiu perde o estado junto: guardar "ocupado" de alguém que fechou
+      // o app faria a bolinha continuar vermelha na lista de offline.
+      if (payload.online) estadosDeGente.set(key(payload.username), payload.presenca || "online");
+      else estadosDeGente.delete(key(payload.username));
       renderPeople();
       if (view === "home" && mode === "room") renderMessages();
     }
@@ -1369,6 +1606,9 @@ function connectChat() {
     // operacoes diferentes. Reler o estado inteiro custa menos do que aplicar
     // cada mudanca na ordem certa — e nao tem como sair errado.
     if (payload.type === "canaisOrganizados") void recarregarOrganizacao();
+    // Mesmo acordo das categorias: reler a lista inteira e mais barato do que
+    // aplicar criacao e remocao na ordem certa, e nao tem como sair errado.
+    if (payload.type === "emotesMudaram") void recarregarEmotes();
     if (payload.type === "profileUpdated" && payload.profile) { profiles.set(payload.profile.username.toLowerCase(), payload.profile); renderMessages(); renderPeople(); if (payload.profile.username === session?.username) paintMyAvatars(payload.profile.username); }
     if (payload.type === "friendRequested" && payload.friendship) {
       if (key(payload.friendship.addressee) === key(session?.username || "")) showToast(payload.friendship.requester + " quer ser seu amigo.");
@@ -1387,7 +1627,7 @@ function connectChat() {
         renderServerInvites();
         showToast(convite.from + " convidou você para " + convite.serverName + ".");
         playPing();
-        void notifyMessage({ title: "Convite de servidor", body: convite.from + " convidou você para " + convite.serverName, privateBody: "Novo convite de servidor", inCall: inCall() });
+        void notifyMessage({ title: "Convite de servidor", body: convite.from + " convidou você para " + convite.serverName, privateBody: "Novo convite de servidor", inCall: inCall(), naoPerturbe: emNaoPerturbe() });
       } else showToast("Convite enviado para " + convite.to + ".");
     }
     if (payload.type === "serverInviteResolved" && payload.username) {
@@ -1744,7 +1984,10 @@ function faixaDeReacoes(message: ChatMessage): HTMLElement {
     chip.className = "reacao" + (meu ? " minha" : "");
     // Quem reagiu vai na dica: a contagem sozinha nao diz nada num grupo pequeno.
     chip.title = quem.map(getDisplayName).join(", ");
-    chip.append(document.createTextNode(emoji));
+    // A reacao pode ser um emote do servidor, guardado como `:apelido:`. Vale o
+    // mesmo acordo do texto: emote apagado volta a aparecer como o apelido cru.
+    const comoEmote = emoji.startsWith(":") && emoji.endsWith(":") ? emoteDe(emoji.slice(1, -1)) : undefined;
+    chip.append(comoEmote ? imagemDeEmote(comoEmote, "emote emote-reacao") : document.createTextNode(emoji));
     const conta = document.createElement("span");
     conta.textContent = String(quem.length);
     chip.append(conta);
@@ -1776,8 +2019,27 @@ function abrirSeletorDeEmoji(id: string, ancora: HTMLElement) {
     botao.onclick = () => { closeUserMenu(); alternarReacao(id, emoji); };
     caixa.append(botao);
   }
+  // Os emotes deste servidor entram depois dos oito de sempre, separados por
+  // uma linha: sao a parte que muda de casa para casa.
+  const daCasa = emotesDoServidor();
+  if (daCasa.length) {
+    const risco = document.createElement("hr");
+    risco.className = "seletor-risco";
+    caixa.append(risco);
+    for (const emote of daCasa) {
+      const botao = document.createElement("button");
+      botao.type = "button";
+      botao.append(imagemDeEmote(emote, "emote emote-seletor"));
+      botao.onclick = () => { closeUserMenu(); alternarReacao(id, ":" + emote.name + ":"); };
+      caixa.append(botao);
+    }
+  }
   montarMenu(caixa, ancora);
 }
+
+/// Os emotes do servidor aberto, em ordem de apelido.
+const emotesDoServidor = (serverId = currentServerId) =>
+  emotes.filter(emote => emote.serverId === serverId).sort((a, b) => a.name.localeCompare(b.name));
 
 // ------------------------------------------------------------- responder
 // Guarda so o id: o texto da citacao sai do historico na hora de desenhar,
@@ -3812,6 +4074,10 @@ async function renderMembers() {
       + (servers.find(item => item.id === currentServerId)?.name || "servidor");
     byId("delete-server").classList.toggle("hidden", !souDono);
     byId("customize-server-btn").classList.toggle("hidden", !souDono);
+    // Aparencia e mais solta que "Personalizar": nome e icone sao a identidade
+    // da casa e ficam com o dono; cor e fundo sao decoracao, e quem ja organiza
+    // os canais pode decorar.
+    byId("skin-btn").classList.toggle("hidden", !administro);
     list.replaceChildren(...data.members.map(member => {
       const eu = key(member.username) === key(session?.username || "");
       const acoes: { label: string; primary?: boolean; run: () => void }[] = [];
@@ -3892,6 +4158,7 @@ byId("profile-edit")?.addEventListener("click", () => {
   const bioInput = byId<HTMLTextAreaElement>("profile-edit-bio");
   bioInput.value = me?.bio || "";
   byId("profile-edit-bio-count").textContent = `${bioInput.value.length} / 190`;
+  byId<HTMLInputElement>("profile-edit-recado").value = me?.recado || "";
   const preview = byId("profile-edit-banner-preview");
   const removeBtn = byId("profile-edit-banner-remove");
   if (profileEditBannerFileId) {
@@ -3973,10 +4240,12 @@ byId("profile-edit-cancel")?.addEventListener("click", () => {
 
 byId("profile-edit-save")?.addEventListener("click", async () => {
   const bio = byId<HTMLTextAreaElement>("profile-edit-bio").value.trim();
+  const recado = byId<HTMLInputElement>("profile-edit-recado").value.trim();
   try {
-    const payload: { bio?: string | null; bannerFile?: string | null; color?: string | null } = {
+    const payload: { bio?: string | null; bannerFile?: string | null; color?: string | null; recado?: string | null } = {
       bio: bio || null,
       color: corEscolhida,
+      recado: recado || null,
     };
     if (profileEditBannerChanged) payload.bannerFile = profileEditBannerFileId;
     const updated = await api<Profile>("/api/profile", {
@@ -4150,6 +4419,7 @@ function openServerProfileDialog() {
   const mem = serverMemberProfiles.get(key(session.username));
   const nickInput = byId<HTMLInputElement>("server-profile-nickname");
   nickInput.value = mem?.nickname || "";
+  byId<HTMLInputElement>("server-profile-recado").value = mem?.recado || "";
   byId("server-profile-error").textContent = "";
 
   serverProfileAvatarFileId = mem?.avatarFile || null;
@@ -4209,10 +4479,12 @@ byId("server-profile-cancel")?.addEventListener("click", () => {
 byId("server-profile-save")?.addEventListener("click", async () => {
   if (view !== "server" || !currentServerId) return;
   const nickname = byId<HTMLInputElement>("server-profile-nickname").value.trim();
+  const recado = byId<HTMLInputElement>("server-profile-recado").value.trim();
   try {
-    const body: { nickname?: string | null; avatarFile?: string | null } = {
+    const body: { nickname?: string | null; avatarFile?: string | null; recado?: string | null } = {
       nickname: nickname || null,
       avatarFile: serverProfileAvatarFileId,
+      recado: recado || null,
     };
     const updated = await api<ServerMember>("/api/servers/" + encodeURIComponent(currentServerId) + "/member-profile", {
       method: "PUT",
@@ -5706,8 +5978,48 @@ const PARENT_TWITCH = location.hostname || "tauri.localhost";
 /// nada que a pessoa escrever vira marcacao. Um unico percurso resolve tudo —
 /// varrer o texto uma vez por recurso deixaria os recursos se comendo, com
 /// negrito dentro de URL e mencao dentro de bloco de codigo.
+/// O emote entra **no fim** da alternancia, e nao no comeco, por dois motivos.
+///
+/// O endereco vem antes porque `https://` tem dois-pontos, e um emote guloso
+/// comeria o comeco de todo link. E o bloco de codigo vem antes porque
+/// `` `:sino:` `` e alguem falando do apelido, nao usando ele.
 const RE_RICO =
-  /(https?:\/\/[^\s<>"']+)|`([^`\n]+)`|\*\*([^*\n]+)\*\*|\*([^*\n]+)\*|\|\|([^|\n]+)\|\||(?<![\w.@])@([\w.-]{2,32})/g;
+  /(https?:\/\/[^\s<>"']+)|`([^`\n]+)`|\*\*([^*\n]+)\*\*|\*([^*\n]+)\*|\|\|([^|\n]+)\|\||(?<![\w.@])@([\w.-]{2,32})|:([a-z0-9_]{2,24}):/g;
+
+/// O emote daquele apelido, ou `undefined` se ninguem cadastrou.
+///
+/// O servidor aberto tem preferencia: dois servidores podem ter um `:sino:`
+/// cada, e quem escreve numa conversa quer o daquela casa. Fora dela — numa
+/// conversa privada, por exemplo — vale o primeiro que existir, que e melhor
+/// do que nao desenhar nada.
+function emoteDe(nome: string): Emote | undefined {
+  const iguais = emotes.filter(emote => emote.name === nome);
+  return iguais.find(emote => emote.serverId === currentServerId) || iguais[0];
+}
+
+/// Desenha um emote. `tamanho` separa o do meio da frase do da lista de escolha.
+function imagemDeEmote(emote: Emote, classe = "emote"): HTMLImageElement {
+  const img = document.createElement("img");
+  img.className = classe;
+  img.alt = ":" + emote.name + ":";
+  img.title = ":" + emote.name + ":";
+  img.draggable = false;
+  // **GIF vai inteiro; o resto vai pela miniatura.**
+  //
+  // A miniatura e um JPEG, entao um emote animado passado por ela chegaria
+  // parado — o mesmo que o canvas fazia com os avatares antes de eles virarem
+  // id de arquivo. Para os demais formatos a miniatura continua valendo: ela e
+  // o que impede um PNG de 1 MB, desenhado em 22 px, de ser baixado inteiro
+  // dezenas de vezes numa conversa cheia.
+  //
+  // O tipo sai do proprio id, que e `<hash>.<extensao>` — o servidor nao manda
+  // o mime do emote e nao precisa mandar. WebP entra junto porque tambem pode
+  // ser animado, e o teto de 2 MB do emote segura o peso dos dois.
+  const animado = /\.(gif|webp)$/.test(emote.fileId.toLowerCase());
+  const endereco = animado ? fileUrl(emote.fileId) : miniaturaUrl(emote.fileId);
+  void endereco.then(url => { img.src = url; }).catch(() => { /* fica o alt */ });
+  return img;
+}
 
 function renderText(texto: string) {
   const paragrafo = document.createElement("p");
@@ -5723,7 +6035,7 @@ function renderText(texto: string) {
 }
 
 function pedacoRico(achado: RegExpMatchArray): Node {
-  const [inteiro, link, codigo, negrito, italico, spoiler, mencao] = achado;
+  const [inteiro, link, codigo, negrito, italico, spoiler, mencao, emote] = achado;
 
   if (link) {
     const a = document.createElement("a");
@@ -5772,6 +6084,13 @@ function pedacoRico(achado: RegExpMatchArray): Node {
     // ao rolar a conversa.
     if (key(mencao) === key(session?.username || "")) el.classList.add("mencao-eu");
     return el;
+  }
+  if (emote !== undefined) {
+    const achadoEmote = emoteDe(emote);
+    // Apelido que ninguem cadastrou — ou emote apagado depois da mensagem —
+    // volta a ser o texto que a pessoa escreveu. Reescrever historico para
+    // esconder isso seria mentir sobre o que foi dito.
+    return achadoEmote ? imagemDeEmote(achadoEmote) : document.createTextNode(inteiro);
   }
   return document.createTextNode(inteiro);
 }
@@ -6037,7 +6356,9 @@ function renderLinkEmbeds(texto: string, into: HTMLElement) {
 
 // ------------------------------------------------------------- arquivos
 // Os bytes vao crus no corpo: multipart e base64 so aumentariam o tamanho.
-const MAX_UPLOAD = 50 * 1024 * 1024;
+// Precisa casar com o `MAX_UPLOAD` do servidor: o teto de la e o que vale, e
+// conferir aqui so serve para avisar antes de subir 200 MB para levar um 413.
+const MAX_UPLOAD = 200 * 1024 * 1024;
 let pendingFiles: StoredFile[] = [];
 const blobCache = new Map<string, string>();
 /// O conteudo dos anexos ja baixados. Separado do `blobCache`, que guarda so o
@@ -6077,7 +6398,7 @@ function podarCache<T>(mapa: Map<string, T>, tamanho: (valor: T) => number, teto
 }
 
 async function uploadFile(file: File): Promise<StoredFile> {
-  if (file.size > MAX_UPLOAD) throw new Error(file.name + " passa de 50 MB.");
+  if (file.size > MAX_UPLOAD) throw new Error(file.name + " passa de 200 MB.");
   const response = await fetch(API + "/api/files", {
     method: "POST",
     headers: {
@@ -6546,12 +6867,64 @@ function menuDoAnexo(file: StoredFile, event: MouseEvent, deDentroDoVisualizador
   montarMenu(menu, ancora, { x: event.clientX, y: event.clientY });
 }
 
+/// Arquivos que executam ao abrir, ou que escondem o que executa.
+///
+/// Duas familias, pelo mesmo motivo. O primeiro grupo roda com dois cliques —
+/// e no Windows isso inclui coisas que nao parecem programa, como `.js`, `.scr`
+/// e `.lnk`. O segundo grupo esconde o conteudo ate ser aberto: o nome do
+/// pacote nao diz nada sobre o que ha dentro, e mandar o executavel dentro de
+/// um zip e exatamente como se escapa de qualquer filtro por extensao.
+///
+/// Documento com macro entra junto: `.docm` e `.xlsm` sao, para quem recebe,
+/// um programa com cara de planilha.
+const EXTENSOES_QUE_EXECUTAM = new Set([
+  "exe", "msi", "msp", "com", "scr", "pif", "bat", "cmd", "hta", "cpl", "msc",
+  "vbs", "vbe", "js", "jse", "wsf", "wsh", "ps1", "psm1", "reg", "lnk", "inf",
+  "dll", "sys", "jar", "apk", "app", "dmg", "deb", "rpm", "run", "appimage", "sh",
+  "docm", "xlsm", "pptm", "dotm", "xltm",
+]);
+const EXTENSOES_COMPACTADAS = new Set([
+  "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "tbz2", "xz", "zst", "cab",
+  "arj", "lzh", "ace", "iso", "img", "z",
+]);
+
+const extensaoDe = (nome: string) => (nome.includes(".") ? nome.split(".").pop() || "" : "").toLowerCase();
+
+/// Pede confirmacao antes de baixar arquivo de risco. `true` significa "pode ir".
+///
+/// **Isto nao e antivirus, e o aviso diz isso com todas as letras.** O servidor
+/// guarda os bytes e nao olha o que ha neles; ninguem aqui tem como saber se um
+/// `.exe` e um jogo ou um ladrao de senha. O que o aviso compra e a pausa antes
+/// do clique e a lembranca de quem mandou — que e a unica informacao que de
+/// fato ajuda a decidir, porque vem de uma pessoa conhecida ou nao vem.
+///
+/// Arquivo sem risco nao pergunta nada: aviso que aparece sempre vira barulho e
+/// deixa de ser lido justamente no dia em que importa.
+async function podeBaixar(file: StoredFile): Promise<boolean> {
+  const ext = extensaoDe(file.name);
+  const executa = EXTENSOES_QUE_EXECUTAM.has(ext);
+  const compacta = EXTENSOES_COMPACTADAS.has(ext);
+  if (!executa && !compacta) return true;
+
+  const dono = getDisplayName(file.owner) || file.owner || "alguém";
+  const oQueE = executa
+    ? "Arquivos assim rodam no seu computador assim que você abre."
+    : "Pacotes assim escondem o que têm dentro até serem abertos, e podem trazer um programa junto.";
+  return confirmAction(
+    "Baixar " + file.name + "?",
+    "Enviado por " + dono + ". " + oQueE,
+    "O naoconcordo não verifica vírus: ninguém aqui olhou o conteúdo deste arquivo. Só abra se você confia em quem mandou.",
+    "Baixar mesmo assim",
+  );
+}
+
 /// Guarda o anexo no computador.
 ///
 /// O arquivo ja esta em memoria como blob autenticado, entao salvar nao passa
 /// pela rede de novo. No aplicativo quem grava e o Rust, direto na pasta de
 /// Downloads; no navegador, o proprio download do navegador resolve.
 async function salvarAnexo(file: StoredFile) {
+  if (!await podeBaixar(file)) return;
   try {
     const dados = await arquivoBlob(file.id);
 
@@ -6675,12 +7048,18 @@ function renderAttachments(message: { attachments?: StoredFile[] }, into: HTMLEl
       // Mesmo motivo do link de texto: `window.open` nao sai daqui. Como o
       // arquivo ja e um blob local, um ancora com `download` baixa direto, com
       // o nome certo, sem passar pelo navegador.
-      link.onclick = () => void fileUrl(file.id).then(url => {
-        const baixar = document.createElement("a");
-        baixar.href = url;
-        baixar.download = file.name;
-        baixar.click();
-      }).catch(() => showToast("Nao foi possivel abrir o arquivo."));
+      // O mesmo portao do menu "Salvar": os dois caminhos levam o arquivo para
+      // o disco, entao os dois perguntam.
+      link.onclick = () => void (async () => {
+        if (!await podeBaixar(file)) return;
+        try {
+          const url = await fileUrl(file.id);
+          const baixar = document.createElement("a");
+          baixar.href = url;
+          baixar.download = file.name;
+          baixar.click();
+        } catch { showToast("Não foi possível abrir o arquivo."); }
+      })();
       box.append(link);
     }
     into.append(box);
@@ -6694,7 +7073,13 @@ const SOUND_KEY = "naoconcordo.som";
 const soundOn = () => localStorage.getItem(SOUND_KEY) !== "0";
 
 /// Bipe curto gerado na hora: evita carregar arquivo de audio no bundle.
+///
+/// É o som de **aviso** — mensagem nova, convite. Os sons da chamada (entrar,
+/// sair, abrir transmissão) passam por `playChime` e continuam tocando em "não
+/// incomodar": quem está numa chamada pediu para estar lá, e deixar de ouvir
+/// que alguém entrou seria esconder o que está acontecendo na sua frente.
 function playPing() {
+  if (emNaoPerturbe()) return;
   if (!soundOn()) return;
   try {
     const context = new AudioContext();
@@ -6806,6 +7191,7 @@ function noteUnread(message: ChatMessage, fromMe: boolean) {
   const mostrou = notifyMessage({
     title: (citado ? "@ " : "") + message.username + (channel ? " em #" + channel.name : ""),
     body, privateBody: citado ? "Citaram voce em um canal" : "Nova mensagem em um canal", inCall: inCall(),
+    naoPerturbe: emNaoPerturbe(),
   });
   void avisarOrigem(mostrou, (citado ? "Citaram você — " : "") + de, () => {
     if (channel && channel.serverId !== currentServerId) void selectServer(channel.serverId);
@@ -7726,6 +8112,20 @@ const podeOrganizar = () =>
 ///
 /// Reler tudo em vez de aplicar cada mudanca: sao quatro operacoes que mexem em
 /// duas listas, e a que aplicasse fora de ordem deixaria canal orfao na tela.
+/// Rebusca os emotes e redesenha o que os mostra.
+///
+/// A conversa tambem entra: uma mensagem antiga com `:sino:` passa a desenhar o
+/// emote assim que ele existe, sem ninguem precisar reenviar nada.
+async function recarregarEmotes() {
+  try {
+    const dados = await api<Bootstrap>("/api/bootstrap");
+    emotes = dados.emotes || [];
+    renderMessages();
+    aplicarBotaoDeEmote();
+    if (byId<HTMLDialogElement>("emotes-dialog").open) renderEmotesDialog();
+  } catch (erro) { console.warn("[emotes] recarregar", erro); }
+}
+
 async function recarregarOrganizacao() {
   try {
     const dados = await api<Bootstrap>("/api/bootstrap");
@@ -8011,6 +8411,317 @@ function menuDeCriar(evento: MouseEvent) {
 const podeCriarCanal = () =>
   roles[currentServerId] === "owner" || roles[currentServerId] === "mod";
 
+// ------------------------------------------------------- emotes do servidor
+/// O arquivo escolhido para virar emote, ainda nao enviado.
+let emoteEscolhido: File | null = null;
+
+/// Desenha a lista de emotes e liga o que cada papel pode fazer.
+///
+/// Todo mundo ve; so dono e moderador ganham o botao de apagar e a faixa de
+/// adicionar. A mesma regra de quem organiza canais — emote e personalizacao do
+/// servidor, e nao conteudo de mensagem.
+function renderEmotesDialog() {
+  const lista = byId("emotes-lista");
+  const manda = podeCriarCanal();
+  byId("emotes-admin").classList.toggle("hidden", !manda);
+  byId("emotes-error").textContent = "";
+  lista.replaceChildren();
+  // Criar o primeiro emote acende o botao do compositor; apagar o ultimo apaga.
+  aplicarBotaoDeEmote();
+
+  const daCasa = emotesDoServidor();
+  if (!daCasa.length) {
+    const vazio = document.createElement("p");
+    vazio.className = "muted";
+    vazio.textContent = manda
+      ? "Nenhum emote ainda. Escolha uma imagem abaixo para criar o primeiro."
+      : "Este servidor ainda não tem emotes.";
+    lista.append(vazio);
+    return;
+  }
+
+  for (const emote of daCasa) {
+    const item = document.createElement("div");
+    item.className = "emote-item";
+    item.append(imagemDeEmote(emote, "emote emote-lista"));
+    const nome = document.createElement("span");
+    nome.className = "emote-nome";
+    nome.textContent = ":" + emote.name + ":";
+    item.append(nome);
+    if (manda) {
+      const apagar = document.createElement("button");
+      apagar.type = "button";
+      apagar.className = "emote-apagar";
+      apagar.title = "Apagar";
+      apagar.setAttribute("aria-label", "Apagar :" + emote.name + ":");
+      apagar.textContent = "✕";
+      apagar.onclick = () => void apagarEmote(emote);
+      item.append(apagar);
+    }
+    lista.append(item);
+  }
+}
+
+async function apagarEmote(emote: Emote) {
+  const certeza = await confirmAction(
+    "Apagar :" + emote.name + "?",
+    "O emote sai da lista deste servidor.",
+    "As mensagens que já usaram ele voltam a mostrar o apelido escrito, em vez da imagem.",
+    "Apagar",
+  );
+  if (!certeza) return;
+  try {
+    await api<void>("/api/emotes/" + encodeURIComponent(emote.id), { method: "DELETE" });
+    // Sem esperar o evento: quem apagou merece ver o resultado na hora.
+    emotes = emotes.filter(item => item.id !== emote.id);
+    renderEmotesDialog(); renderMessages();
+  } catch (erro) {
+    byId("emotes-error").textContent = erro instanceof Error ? erro.message : "Não foi possível apagar.";
+  }
+}
+
+async function criarEmote() {
+  const erroEl = byId("emotes-error");
+  const campo = byId<HTMLInputElement>("emote-nome");
+  const nome = campo.value.trim().replace(/^:|:$/g, "").toLowerCase();
+  erroEl.textContent = "";
+  if (!emoteEscolhido) { erroEl.textContent = "Escolha uma imagem primeiro."; return; }
+  if (!/^[a-z0-9_]{2,24}$/.test(nome)) {
+    erroEl.textContent = "O apelido aceita de 2 a 24 letras minúsculas, números e _.";
+    return;
+  }
+  const salvar = byId<HTMLButtonElement>("emote-salvar");
+  salvar.disabled = true;
+  try {
+    // Mesma rota de qualquer anexo: o emote e um arquivo com apelido, e assim
+    // ganha de graca a deduplicacao por conteudo e a miniatura.
+    const arquivo = await uploadFile(emoteEscolhido);
+    const criado = await api<Emote>("/api/emotes", {
+      method: "POST",
+      body: JSON.stringify({ serverId: currentServerId, name: nome, fileId: arquivo.id }),
+    });
+    emotes.push(criado);
+    emoteEscolhido = null;
+    campo.value = "";
+    byId("emote-preview").style.backgroundImage = "";
+    byId("emote-preview").classList.remove("has-image");
+    renderEmotesDialog(); renderMessages();
+  } catch (erro) {
+    erroEl.textContent = erro instanceof Error ? erro.message : "Não foi possível criar o emote.";
+  } finally {
+    salvar.disabled = false;
+  }
+}
+
+byId("emotes-btn")?.addEventListener("click", () => {
+  if (!currentServerId) { showToast("Abra um servidor para ver os emotes dele."); return; }
+  byId<HTMLDialogElement>("members-dialog").close();
+  emoteEscolhido = null;
+  byId<HTMLInputElement>("emote-nome").value = "";
+  byId("emote-preview").style.backgroundImage = "";
+  byId("emote-preview").classList.remove("has-image");
+  renderEmotesDialog();
+  byId<HTMLDialogElement>("emotes-dialog").showModal();
+});
+byId("emotes-fechar")?.addEventListener("click", () => byId<HTMLDialogElement>("emotes-dialog").close());
+byId("emote-escolher")?.addEventListener("click", () => byId<HTMLInputElement>("emote-input").click());
+byId("emote-input")?.addEventListener("change", evento => {
+  const entrada = evento.target as HTMLInputElement;
+  const arquivo = entrada.files?.[0];
+  entrada.value = "";
+  if (!arquivo) return;
+  // Mesmo teto do servidor, dito antes de subir 2 MB a toa.
+  if (arquivo.size > 2 * 1024 * 1024) {
+    byId("emotes-error").textContent = "O emote pode ter no máximo 2 MB.";
+    return;
+  }
+  byId("emotes-error").textContent = "";
+  emoteEscolhido = arquivo;
+  const preview = byId("emote-preview");
+  preview.classList.add("has-image");
+  preview.style.backgroundImage = 'url("' + URL.createObjectURL(arquivo) + '")';
+  // Sugere o apelido a partir do nome do arquivo: quem baixou `sino.png` quase
+  // sempre quer `:sino:`, e digitar de novo e trabalho a toa.
+  const campo = byId<HTMLInputElement>("emote-nome");
+  if (!campo.value) {
+    campo.value = arquivo.name.replace(/\.[^.]+$/, "").toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 24);
+  }
+  campo.focus();
+});
+byId("emote-salvar")?.addEventListener("click", () => void criarEmote());
+
+/// Mostra o botao de emote so onde ha emote para escolher.
+function aplicarBotaoDeEmote() {
+  byId("emote-button").classList.toggle("hidden", !emotesDoServidor().length);
+}
+
+/// Seletor de emote do compositor: escreve `:apelido:` onde o cursor estiver.
+///
+/// Escreve o texto em vez de enviar direto, ao contrario do seletor de reacao:
+/// aqui a pessoa esta no meio de uma frase, e o emote quase sempre entra junto
+/// com ela.
+function abrirSeletorDeEmote(ancora: HTMLElement) {
+  closeUserMenu();
+  const daCasa = emotesDoServidor();
+  if (!daCasa.length) return;
+  const caixa = document.createElement("div");
+  caixa.className = "user-menu seletor-emoji";
+  for (const emote of daCasa) {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.title = ":" + emote.name + ":";
+    botao.append(imagemDeEmote(emote, "emote emote-seletor"));
+    botao.onclick = () => { closeUserMenu(); inserirNoCompositor(":" + emote.name + ": "); };
+    caixa.append(botao);
+  }
+  montarMenu(caixa, ancora);
+}
+
+/// Poe um texto onde o cursor esta, sem apagar o que ja foi escrito.
+function inserirNoCompositor(texto: string) {
+  const campo = byId<HTMLTextAreaElement>("message-input");
+  const inicio = campo.selectionStart ?? campo.value.length;
+  const fim = campo.selectionEnd ?? campo.value.length;
+  campo.value = campo.value.slice(0, inicio) + texto + campo.value.slice(fim);
+  const cursor = inicio + texto.length;
+  campo.setSelectionRange(cursor, cursor);
+  campo.focus();
+  // O redator cresce com o conteudo e guarda rascunho: os dois ouvem `input`,
+  // que digitacao por codigo nao dispara sozinha.
+  campo.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+byId("emote-button")?.addEventListener("click", evento => {
+  evento.stopPropagation();
+  abrirSeletorDeEmote(byId("emote-button"));
+});
+
+// ------------------------------------------------- aparencia do servidor
+/// O que o dialogo esta editando agora. Guardado aqui porque cada campo pode
+/// ser mexido em qualquer ordem, e so o Salvar decide o que vai ao servidor.
+let skinEditando: Skin = {};
+/// Imagem escolhida e ainda nao enviada. `null` sem escolha nova.
+let skinImagemNova: File | null = null;
+
+const skinAlvoEscolhido = (): "servidor" | "canal" =>
+  (document.querySelector<HTMLInputElement>('input[name="skin-alvo"]:checked')?.value === "canal") ? "canal" : "servidor";
+
+/// A skin crua do alvo escolhido, sem juntar com a do servidor: aqui se edita o
+/// que aquele objeto tem de proprio, e nao o resultado final.
+function skinDoAlvo(): Skin {
+  if (skinAlvoEscolhido() === "canal") {
+    const canal = rooms.find(item => item.id === currentRoomId);
+    return { accent: canal?.accent ?? null, bgColor: canal?.bgColor ?? null, bgFile: canal?.bgFile ?? null };
+  }
+  const servidor = servers.find(item => item.id === currentServerId);
+  return { accent: servidor?.accent ?? null, bgColor: servidor?.bgColor ?? null, bgFile: servidor?.bgFile ?? null };
+}
+
+function renderSkinDialog() {
+  skinEditando = skinDoAlvo();
+  skinImagemNova = null;
+  byId("skin-error").textContent = "";
+  byId<HTMLInputElement>("skin-accent").value = skinEditando.accent || "#ff7a45";
+  byId<HTMLInputElement>("skin-bg").value = skinEditando.bgColor || "#111114";
+  const canal = rooms.find(item => item.id === currentRoomId);
+  byId("skin-alvo-canal").textContent = canal ? "Só " + (canal.kind === "voice" ? "" : "#") + canal.name : "Só este canal";
+  pintarPreviaDaSkin();
+}
+
+function pintarPreviaDaSkin() {
+  const preview = byId("skin-imagem-preview");
+  const remover = byId("skin-imagem-remove");
+  if (skinImagemNova) {
+    preview.classList.add("has-image");
+    preview.style.backgroundImage = 'url("' + URL.createObjectURL(skinImagemNova) + '")';
+    remover.classList.remove("hidden");
+    return;
+  }
+  if (skinEditando.bgFile) {
+    preview.classList.add("has-image");
+    remover.classList.remove("hidden");
+    void fileUrl(skinEditando.bgFile).then(url => { preview.style.backgroundImage = 'url("' + url + '")'; }).catch(() => {});
+    return;
+  }
+  preview.classList.remove("has-image");
+  preview.style.backgroundImage = "";
+  remover.classList.add("hidden");
+}
+
+async function salvarSkin() {
+  const erroEl = byId("skin-error");
+  const salvar = byId<HTMLButtonElement>("skin-salvar");
+  erroEl.textContent = "";
+  salvar.disabled = true;
+  try {
+    let bgFile = skinEditando.bgFile ?? null;
+    if (skinImagemNova) bgFile = (await uploadFile(skinImagemNova)).id;
+    // Os tres campos vao sempre, inclusive como `null`: e assim que o servidor
+    // distingue "tirei esta cor" de "nao mexi nela".
+    const corpo = JSON.stringify({
+      accent: skinEditando.accent ?? null,
+      bgColor: skinEditando.bgColor ?? null,
+      bgFile,
+    });
+    if (skinAlvoEscolhido() === "canal") {
+      await api<void>("/api/rooms/" + encodeURIComponent(currentRoomId) + "/skin", { method: "PUT", body: corpo });
+      const canal = rooms.find(item => item.id === currentRoomId);
+      if (canal) Object.assign(canal, { accent: skinEditando.accent ?? null, bgColor: skinEditando.bgColor ?? null, bgFile });
+    } else {
+      const atualizado = await api<ServerInfo>("/api/servers/" + encodeURIComponent(currentServerId) + "/skin", { method: "PUT", body: corpo });
+      const indice = servers.findIndex(item => item.id === currentServerId);
+      if (indice >= 0) servers[indice] = atualizado;
+    }
+    byId<HTMLDialogElement>("skin-dialog").close();
+    renderNavigation();
+    showToast("Aparência salva.");
+  } catch (erro) {
+    erroEl.textContent = erro instanceof Error ? erro.message : "Não foi possível salvar.";
+  } finally {
+    salvar.disabled = false;
+  }
+}
+
+byId("skin-btn")?.addEventListener("click", () => {
+  if (!currentServerId) { showToast("Abra um servidor para mudar a aparência dele."); return; }
+  byId<HTMLDialogElement>("members-dialog").close();
+  renderSkinDialog();
+  byId<HTMLDialogElement>("skin-dialog").showModal();
+});
+for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="skin-alvo"]')) {
+  radio.addEventListener("change", renderSkinDialog);
+}
+byId("skin-accent")?.addEventListener("input", evento => {
+  skinEditando.accent = (evento.target as HTMLInputElement).value;
+});
+byId("skin-bg")?.addEventListener("input", evento => {
+  skinEditando.bgColor = (evento.target as HTMLInputElement).value;
+});
+byId("skin-accent-limpar")?.addEventListener("click", () => {
+  skinEditando.accent = null;
+  byId<HTMLInputElement>("skin-accent").value = "#ff7a45";
+});
+byId("skin-bg-limpar")?.addEventListener("click", () => {
+  skinEditando.bgColor = null;
+  byId<HTMLInputElement>("skin-bg").value = "#111114";
+});
+byId("skin-imagem-btn")?.addEventListener("click", () => byId<HTMLInputElement>("skin-imagem-input").click());
+byId("skin-imagem-input")?.addEventListener("change", evento => {
+  const entrada = evento.target as HTMLInputElement;
+  const arquivo = entrada.files?.[0];
+  entrada.value = "";
+  if (!arquivo) return;
+  skinImagemNova = arquivo;
+  pintarPreviaDaSkin();
+});
+byId("skin-imagem-remove")?.addEventListener("click", () => {
+  skinImagemNova = null;
+  skinEditando.bgFile = null;
+  pintarPreviaDaSkin();
+});
+byId("skin-cancelar")?.addEventListener("click", () => byId<HTMLDialogElement>("skin-dialog").close());
+byId("skin-salvar")?.addEventListener("click", () => void salvarSkin());
+
 // Na barra inteira, e nao so na lista: o espaco vazio embaixo dos canais fica
 // **fora** de `#channels-pane`, e e justamente onde a mao vai. A aba de amigos
 // entra no mesmo elemento, mas `menuDeCriar` sai fora quando nao ha servidor
@@ -8185,14 +8896,41 @@ function personRow(name: string, online: boolean, naChamada: boolean) {
   const row = document.createElement("div");
   row.className = "person" + (naChamada ? " in-call" : "");
   row.dataset.who = name;
+  // O avatar leva a bolinha junto, para o estado acompanhar a foto em vez de
+  // virar mais uma coluna que aperta o nome.
+  const retrato = document.createElement("div");
+  retrato.className = "avatar-wrap";
   const avatar = document.createElement("div");
   avatar.className = "avatar";
   paintAvatar(avatar, name);
+  retrato.append(avatar);
+  if (online) {
+    const bolinha = document.createElement("span");
+    bolinha.className = "estado-dot estado-dot-pessoa";
+    const estado = estadosDeGente.get(key(name)) || "online";
+    bolinha.dataset.estado = estado;
+    bolinha.title = ESTADOS.find(item => item.id === estado)?.rotulo || "Disponível";
+    retrato.append(bolinha);
+  }
   const text = document.createElement("span");
+  text.className = "person-texto";
   const disp = getDisplayName(name);
-  text.textContent = disp;
+  const nomeEl = document.createElement("span");
+  nomeEl.className = "person-nome";
+  nomeEl.textContent = disp;
+  text.append(nomeEl);
   if (disp !== name) text.title = "@" + name;
-  row.append(avatar, text);
+  // O recado vai embaixo do nome. Desenhado pelo mesmo caminho da mensagem, e
+  // nao como texto cru, porque ele aceita `:apelido:` de emote.
+  const recado = recadoDe(name);
+  if (recado) {
+    const linha = document.createElement("small");
+    linha.className = "person-recado";
+    linha.title = recado;
+    for (const no of renderText(recado).childNodes) linha.append(no);
+    text.append(linha);
+  }
+  row.append(retrato, text);
   if (naChamada) {
     const marks = document.createElement("span");
     marks.className = "person-marks";
@@ -8291,6 +9029,11 @@ function renderPeople() {
   const assinatura = currentServerId + "@" + view + "|" + unique.map(name => name
     + "~" + getDisplayName(name)
     + "~" + retratoDe(name)
+    // Estado e recado saem desenhados, então mudam o que está na tela: sem eles
+    // aqui, trocar para "não incomodar" só apareceria na próxima entrada ou
+    // saída de alguém.
+    + "~" + (estadosDeGente.get(key(name)) || "online")
+    + "~" + recadoDe(name)
     + (naChamada.has(key(name)) ? "!" : "")
     + (sharesAudio(name) ? "+t" : "")
     + (micMuted(name) ? "+m" : "")
@@ -8421,6 +9164,9 @@ async function avisarOrigem(
   texto: string,
   ir: () => void,
 ) {
+  // O aviso na tela é o "pop-up" que o não incomodar cala. Sai antes de esperar
+  // o sistema: com o estado ligado, `notifyMessage` já devolveu falso.
+  if (emNaoPerturbe()) return;
   if (await mostrouNoSistema) return;
   // Estando de olho na janela, o aviso e util; minimizado, quem resolve e a
   // notificacao do sistema, e ela ja foi decidida acima.

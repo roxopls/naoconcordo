@@ -122,7 +122,12 @@
           <div id="voice-users" class="voice-users hidden"></div>
         </nav>
         <footer class="profile">
-          <button id="avatar-button" class="avatar-button" title="Abrir meu perfil" aria-expanded="false"><span id="avatar" class="avatar"></span></button>
+          <!-- A bolinha é irmã do botão do perfil, e não filha: botão dentro de
+               botão é HTML inválido, e o clique de um comeria o do outro. -->
+          <div class="avatar-wrap">
+            <button id="avatar-button" class="avatar-button" title="Abrir meu perfil" aria-expanded="false"><span id="avatar" class="avatar"></span></button>
+            <button id="estado-botao" class="estado-dot" type="button" title="Mudar meu estado" aria-label="Mudar meu estado"></button>
+          </div>
           <input id="avatar-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
           <div class="profile-copy"><strong id="profile-name"></strong><small id="connection-state">fora da chamada</small></div>
           <small id="app-version" class="app-version"></small>
@@ -164,8 +169,14 @@
         <p id="typing-note" class="typing-note hidden"></p>
         <form id="message-form" class="composer">
           <button id="attach-button" class="composer-icon" type="button" title="Anexar arquivo"><svg class="ic ic-sm"><use href="#i-clip"/></svg></button>
-          <input id="attach-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,audio/mpeg,audio/ogg" multiple />
+          <!-- Sem `accept`: a conversa recebe arquivo de qualquer tipo. As
+               outras entradas de arquivo continuam restritas a imagem, porque
+               foto de perfil e icone de servidor so fazem sentido assim. -->
+          <input id="attach-input" class="hidden" type="file" multiple />
           <button id="gif-button" class="composer-icon composer-gif hidden" type="button" title="Procurar um GIF">GIF</button>
+          <!-- So aparece em servidor que tem emote: botao que nunca abre nada
+               e so mais um icone para ignorar. -->
+          <button id="emote-button" class="composer-icon hidden" type="button" title="Emotes do servidor">☺</button>
           <div class="composer-main">
             <div id="mention-box" class="mention-box hidden"></div>
             <div id="reply-bar" class="reply-bar hidden"></div>
@@ -285,6 +296,8 @@
       <p id="members-error" class="error"></p>
       <div class="dialog-actions">
         <button id="customize-server-btn" class="hidden" type="button">Personalizar</button>
+        <button id="emotes-btn" type="button">Emotes</button>
+        <button id="skin-btn" class="hidden" type="button">Aparência</button>
         <button id="leave-server" type="button">Sair do servidor</button>
         <button id="delete-server" class="danger-button hidden" type="button">Apagar servidor</button>
         <button id="close-members" class="primary" type="button">Fechar</button>
@@ -516,6 +529,8 @@
         <button id="profile-edit-banner-remove" type="button" class="ghost-button danger hidden">Remover banner</button>
       </div>
       <input id="profile-edit-banner-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+      <label>Recado<input id="profile-edit-recado" type="text" maxlength="60" placeholder="Uma linha embaixo do seu nome…" /></label>
+      <small class="muted">Aparece embaixo do seu nome na lista. Aceita emote do servidor: escreva <code>:apelido:</code>.</small>
       <label>Sobre mim<textarea id="profile-edit-bio" maxlength="190" rows="3" placeholder="Conte algo sobre você…"></textarea></label>
       <small id="profile-edit-bio-count" class="muted">0 / 190</small>
       <div class="cor-linha">
@@ -555,6 +570,58 @@
       </div>
     </dialog>
 
+    <dialog id="skin-dialog" class="wide-dialog">
+      <h2>Aparência</h2>
+      <p class="muted">Dono e moderador. O canal manda no que ele definir; o resto vem do servidor.</p>
+      <div class="dialog-row">
+        <label class="escolha"><input type="radio" name="skin-alvo" value="servidor" checked /> O servidor inteiro</label>
+        <label class="escolha"><input type="radio" name="skin-alvo" value="canal" /> <span id="skin-alvo-canal">Só este canal</span></label>
+      </div>
+      <div class="dialog-row">
+        <label>Cor de destaque<input id="skin-accent" type="color" /></label>
+        <button id="skin-accent-limpar" type="button" class="ghost-button">Usar padrão</button>
+      </div>
+      <div class="dialog-row">
+        <label>Cor de fundo<input id="skin-bg" type="color" /></label>
+        <button id="skin-bg-limpar" type="button" class="ghost-button">Usar padrão</button>
+      </div>
+      <div class="dialog-row">
+        <div id="skin-imagem-preview" class="banner-preview"></div>
+      </div>
+      <div class="dialog-row">
+        <button id="skin-imagem-btn" type="button" class="ghost-button">Imagem de fundo</button>
+        <button id="skin-imagem-remove" type="button" class="ghost-button danger hidden">Remover imagem</button>
+      </div>
+      <input id="skin-imagem-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+      <p id="skin-error" class="error"></p>
+      <div class="dialog-actions">
+        <button id="skin-cancelar" type="button">Cancelar</button>
+        <button id="skin-salvar" class="primary" type="button">Salvar</button>
+      </div>
+    </dialog>
+
+    <dialog id="emotes-dialog" class="wide-dialog">
+      <h2>Emotes do servidor</h2>
+      <p class="muted">Escreva <code>:apelido:</code> na conversa, ou escolha na hora de reagir. Dono e moderador podem adicionar.</p>
+      <div id="emotes-lista" class="emotes-lista"></div>
+      <div id="emotes-admin" class="hidden">
+        <p class="section-label">ADICIONAR</p>
+        <div class="dialog-row">
+          <div id="emote-preview" class="emote-preview"></div>
+          <button id="emote-escolher" type="button" class="ghost-button">Escolher imagem</button>
+          <input id="emote-nome" type="text" maxlength="24" placeholder="apelido" />
+          <button id="emote-salvar" class="primary" type="button">Adicionar</button>
+        </div>
+        <!-- Restrito a imagem de proposito: o emote e desenhado num `<img>` no
+             meio da frase, e a conversa aceitar qualquer arquivo nao muda isso. -->
+        <input id="emote-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+      </div>
+      <p id="emotes-error" class="error"></p>
+      <div class="dialog-actions">
+        <button id="emotes-fechar" class="primary" type="button">Fechar</button>
+      </div>
+    </dialog>
+
     <dialog id="server-profile-dialog" class="wide-dialog">
       <h2>Perfil no servidor</h2>
       <p class="muted">Personalize seu apelido e foto apenas neste servidor.</p>
@@ -565,6 +632,7 @@
       </div>
       <input id="server-profile-avatar-input" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
       <label>Apelido no servidor<input id="server-profile-nickname" type="text" maxlength="32" placeholder="Deixe vazio para usar seu nome padrão" /></label>
+      <label>Recado neste servidor<input id="server-profile-recado" type="text" maxlength="60" placeholder="Deixe vazio para usar o recado global" /></label>
       <p id="server-profile-error" class="error"></p>
       <div class="dialog-actions">
         <button id="server-profile-cancel" type="button">Cancelar</button>

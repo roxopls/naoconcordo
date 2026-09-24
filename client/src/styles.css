@@ -13,6 +13,26 @@
   --green: #54d18b;
 }
 
+/* Skin do servidor ou do canal.
+
+   Aplicada em `#app-view` e nao em `:root` de proposito: a tela de entrada, os
+   dialogos do sistema e a janela de atualizacao continuam com o tema da casa.
+   Trocar a cor no `:root` faria a skin de um servidor pintar coisas que nao
+   pertencem a ele.
+
+   Os valores chegam como variaveis inline, postas pelo cliente. Sem nenhuma
+   skin nao ha nada inline e tudo cai no tema padrao herdado do `:root`. */
+#app-view.com-skin { background-color: var(--skin-bg, transparent); }
+/* A imagem de fundo vai numa camada propria, atras de tudo, para o texto nao
+   herdar transparencia e continuar legivel por cima dela. */
+#app-view.com-skin-imagem::before {
+  content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background-image: var(--skin-bg-imagem); background-size: cover; background-position: center;
+  opacity: .5;
+}
+#app-view.com-skin-imagem { position: relative; }
+#app-view.com-skin-imagem > * { position: relative; z-index: 1; }
+
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 900px; min-height: 620px; overflow: hidden; }
 button, input, textarea { font: inherit; }
@@ -103,8 +123,16 @@ nav { flex: 1; padding: 16px 10px; overflow-y: auto; }
 .ghost-button.so-icone { width: 30px; height: 30px; padding: 0; justify-content: center; gap: 0; }
 .status-pill { color: #aaaab4; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; border: 1px solid var(--line); border-radius: 999px; padding: 5px 9px; }
 .status-pill.online { color: var(--green); border-color: rgba(84,209,139,.28); background: rgba(84,209,139,.07); }
+/* As colunas e as linhas vem do `gridlayout.ts`: `auto-fit` so sabe encher da
+   esquerda para a direita e escolhia divisoes ruins em palco alto e estreito.
+   O `repeat(auto-fit, ...)` fica como reserva para o primeiro quadro, antes de
+   o observador medir. */
 .stage { height: 47vh; min-height: 140px; padding: 14px 18px 4px; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; overflow: auto; }
-.track-tile { min-height: 180px; border-radius: 14px; overflow: hidden; position: relative; background: #09090b; border: 1px solid var(--line); }
+/* Tile sempre em 16:9, centralizada na celula em vez de esticada ate embaixo.
+   O teto de largura vem da altura da linha (`--tile-altura`, publicada pela
+   grade): sem ele, a tile larga ficaria mais alta que a celula e o palco
+   passaria a rolar. */
+.track-tile { aspect-ratio: 16 / 9; width: 100%; height: auto; min-height: 0; max-width: calc(var(--tile-altura, 100vh) * 16 / 9); margin: auto; border-radius: 14px; overflow: hidden; position: relative; background: #09090b; border: 1px solid var(--line); }
 .track-tile video { width: 100%; height: 100%; object-fit: contain; display: block; }
 .track-tile label { position: absolute; left: 9px; bottom: 9px; margin: 0; padding: 4px 8px; background: rgba(0,0,0,.65); border-radius: 6px; font-size: 11px; }
 /* Convite para assistir: ocupa o lugar da transmissao ate alguem pedir. */
@@ -271,13 +299,17 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 .stage.has-theater { grid-template-columns: 1fr; }
 .stage.has-theater .track-tile:not(.theater) { display: none; }
 .main-panel.theater-mode > .stage { flex: 1 1 auto; height: auto; max-height: none; min-height: 0; resize: none; }
-.track-tile.theater { min-height: 0; height: 100%; }
+/* Modo grande e tela cheia mandam a tile **preencher**, que e o contrario do
+   16:9 centralizado do palco normal — entao a proporcao e o teto de largura
+   saem aqui. O video continua em `object-fit: contain`, e quem cuida das
+   faixas pretas e ele. */
+.track-tile.theater { min-height: 0; height: 100%; aspect-ratio: auto; max-width: none; margin: 0; }
 /* Tela cheia acontece no proprio `stage`, com a tile escolhida ocupando tudo.
    O `stage` sobrevive as trocas de transmissao, e por isso a barra de chamada
    pode morar dentro dele sem ser apagada junto com as tiles. */
 .stage:fullscreen { height: 100%; max-height: none; padding: 0; grid-template-columns: 1fr; resize: none; background: #000; }
 .stage:fullscreen .track-tile:not(.cheia) { display: none; }
-.stage:fullscreen .track-tile.cheia { min-height: 0; height: 100%; border: 0; border-radius: 0; }
+.stage:fullscreen .track-tile.cheia { min-height: 0; height: 100%; aspect-ratio: auto; max-width: none; margin: 0; border: 0; border-radius: 0; }
 .stage:fullscreen .track-tile video { object-fit: contain; background: #000; }
 /* O deslocamento normal da barra supoe as duas colunas da esquerda, que em
    tela cheia nao existem: aqui ela e centralizada de verdade. */
@@ -348,8 +380,30 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 .volume-row { display: flex; align-items: center; gap: 7px; padding: 2px 8px 2px 47px; }
 .volume-label { width: 22px; color: #6f6f7a; font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
 .volume-value { width: 32px; color: #6f6f7a; font-size: 9px; text-align: right; }
-.volume-row input[type="range"] { flex: 1; height: 3px; appearance: none; border-radius: 999px; background: #2f2f37; cursor: pointer; }
-.volume-row input[type="range"]::-webkit-slider-thumb { appearance: none; width: 11px; height: 11px; border-radius: 50%; background: var(--accent); border: 0; }
+/* Controle deslizante, em todo lugar.
+
+   O polegar e posicionado pelo **centro** e o navegador o mantem dentro da
+   caixa: ele passeia de `raio` ate `largura - raio` e nunca encosta nas pontas
+   do trilho. Com o trilho pintado de ponta a ponta sobra um dedo dos dois lados
+   no maximo e no minimo, e parece que o controle nao chegou ao fim.
+
+   Entao o trilho e pintado por gradiente, com a largura exata do passeio do
+   polegar. As pontas do que se ve passam a ser as pontas do que da para
+   escolher. `--polegar` e o tamanho do polegar, e quem muda ele acerta os dois
+   de uma vez. */
+input[type="range"] {
+  --polegar: 14px;
+  appearance: none; -webkit-appearance: none;
+  width: 100%; height: var(--polegar); margin: 0;
+  background: linear-gradient(#2f2f37, #2f2f37) no-repeat center / calc(100% - var(--polegar)) 3px;
+  border-radius: 999px; cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none; -webkit-appearance: none;
+  width: var(--polegar); height: var(--polegar);
+  border-radius: 50%; background: var(--accent); border: 0;
+}
+.volume-row input[type="range"] { --polegar: 11px; flex: 1; width: auto; }
 
 /* papeis dentro do servidor */
 .role-tag { padding: 2px 7px; border-radius: 999px; font-size: 9px; text-transform: uppercase; letter-spacing: .06em; background: #29292f; color: #9a9aa4; }
@@ -359,8 +413,9 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 
 /* escolha de qualidade da transmissao */
 .quality-options { margin: 12px 0 14px; }
-.quality-range { width: 100%; height: 3px; appearance: none; border-radius: 999px; background: #2f2f37; cursor: pointer; }
-.quality-range::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); border: 0; }
+/* Herda o trilho encolhido de `input[type="range"]`; aqui so o tamanho do
+   polegar, que neste dialogo e maior. */
+.quality-range { --polegar: 14px; }
 .quality-ticks { display: flex; justify-content: space-between; margin-top: 8px; }
 /* Os rotulos das pontas encostariam na borda do dialogo alinhados ao centro. */
 .quality-ticks span { flex: 1; text-align: center; font-size: 11px; color: var(--muted); cursor: pointer; }
@@ -688,9 +743,70 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 .seletor-gif .grade button:hover { outline: 2px solid var(--accent); }
 .seletor-gif .aviso { padding: 20px 8px; color: #8b8b95; text-align: center; }
 
-.seletor-emoji { display: flex; flex-wrap: wrap; gap: 2px; max-width: 190px; padding: 6px; }
-.seletor-emoji button { width: 30px; height: 30px; border: 0; border-radius: 7px; background: none; font-size: 16px; cursor: pointer; }
+.seletor-emoji { display: flex; flex-wrap: wrap; gap: 2px; max-width: 190px; max-height: 260px; overflow-y: auto; padding: 6px; scrollbar-color: #29292f transparent; }
+.seletor-emoji button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 7px; background: none; font-size: 16px; cursor: pointer; padding: 0; }
 .seletor-emoji button:hover { background: #2a2a31; }
+/* Separa os oito de sempre dos emotes desta casa. `flex-basis: 100%` e o que
+   faz a linha ocupar a faixa inteira dentro do `flex-wrap`. */
+.seletor-risco { flex-basis: 100%; margin: 5px 2px; border: 0; border-top: 1px solid var(--line); }
+
+/* ---- emotes do servidor ---- */
+/* No meio da frase: acompanha a linha do texto em vez de empurrar a altura
+   dela. `vertical-align: -.25em` desce a imagem para a base das letras, onde o
+   olho espera um simbolo. */
+.emote { height: 1.45em; width: auto; max-width: 140px; vertical-align: -.25em; object-fit: contain; }
+/* Sozinho numa mensagem curta o emote merece tamanho de figurinha; no meio de
+   um texto ele continua do tamanho da letra. */
+.message-body p > .emote:only-child { height: 3.2em; vertical-align: middle; }
+.emote-reacao { height: 1.1em; vertical-align: -.2em; }
+.emote-seletor { height: 22px; max-width: 22px; vertical-align: middle; }
+/* Lista de gerenciamento */
+.emotes-lista { display: flex; flex-wrap: wrap; gap: 8px; max-height: 260px; overflow-y: auto; padding: 4px 0; scrollbar-color: #29292f transparent; }
+.emote-item { position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; width: 86px; padding: 8px 4px; border: 1px solid var(--line); border-radius: 10px; background: #202025; }
+.emote-lista { height: 34px; max-width: 34px; vertical-align: middle; }
+.emote-nome { max-width: 78px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
+.emote-apagar { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 5px; background: rgba(0,0,0,.5); color: #ff9b9e; font-size: 10px; cursor: pointer; opacity: 0; }
+.emote-item:hover .emote-apagar { opacity: 1; }
+.emote-preview { width: 42px; height: 42px; flex: 0 0 auto; border: 1px dashed var(--line); border-radius: 9px; background-size: contain; background-position: center; background-repeat: no-repeat; }
+.emote-preview.has-image { border-style: solid; }
+#emote-nome { flex: 1; min-width: 0; }
+/* Aparencia */
+.escolha { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+.escolha input { margin: 0; }
+#skin-accent, #skin-bg { width: 46px; height: 28px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: #202025; cursor: pointer; }
+
+/* ---- estados de presença ---- */
+/* A bolinha mora sobre o canto da foto, com um anel da cor do painel atrás para
+   se destacar de qualquer avatar — claro, escuro ou cheio de detalhe. */
+.avatar-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+.estado-dot { position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; padding: 0; border: 2px solid var(--panel); border-radius: 50%; background: #6a6a75; cursor: pointer; }
+.estado-dot[data-estado="online"] { background: var(--green); }
+/* Âmbar para ausente e vermelho para ocupado seguem o que todo mundo já
+   conhece de outros aplicativos — aqui não é hora de inventar vocabulário. */
+.estado-dot[data-estado="ausente"] { background: #e8b04b; }
+.estado-dot[data-estado="ocupado"] { background: var(--danger, #e0564f); }
+/* Invisível fica oco: é o mesmo cinza de offline, mas com o miolo vazado, para
+   a própria pessoa distinguir "estou escondido" de "caí". Ninguém mais vê. */
+.estado-dot[data-estado="invisivel"] { background: transparent; box-shadow: inset 0 0 0 2px #6a6a75; }
+.estado-dot-pessoa { pointer-events: none; width: 11px; height: 11px; border-color: var(--panel-2); }
+.estado-dot-menu { position: static; width: 10px; height: 10px; border: 0; flex: 0 0 auto; }
+
+.seletor-estado { min-width: 246px; padding: 5px; }
+.estado-opcao { display: flex; align-items: flex-start; gap: 9px; width: 100%; padding: 7px 8px; border: 0; border-radius: 8px; background: none; text-align: left; cursor: pointer; }
+.estado-opcao:hover { background: #2a2a31; }
+.estado-opcao.ativo { background: #26262c; }
+.estado-opcao .estado-dot-menu { margin-top: 4px; }
+.estado-opcao strong { display: block; font-size: 12px; font-weight: 600; }
+.estado-opcao small { display: block; color: var(--muted); font-size: 10px; line-height: 1.35; }
+
+/* ---- recado embaixo do nome ---- */
+.person-texto { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.person-nome { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Uma linha só, cortada com reticências: o recado não pode empurrar a lista.
+   `display: block` em vez de flex para o corte funcionar com o emote dentro. */
+.person-recado { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; line-height: 1.3; }
+.person-recado p { display: inline; margin: 0; }
+.person-recado .emote { height: 1.2em; vertical-align: -.22em; }
 
 /* ---- digitando ---- */
 .typing-note { margin: 0; padding: 0 18px 3px; height: 15px; color: var(--muted); font-size: 11px; font-style: italic; }

@@ -28,8 +28,13 @@ type HmacSha256 = Hmac<Sha256>;
 const DEFAULT_ROOM: &str = "geral";
 const MAX_MESSAGES: usize = 2_000;
 const MAX_ENVELOPES: usize = 5_000;
-/// Teto por arquivo: 50 MB.
-const MAX_UPLOAD: usize = 50 * 1024 * 1024;
+/// Teto por arquivo: 200 MB.
+///
+/// O corpo do upload e lido inteiro na memoria antes de ir ao disco, entao este
+/// numero e tambem o pico de memoria por envio simultaneo. Com a casa cheia sao
+/// poucos envios ao mesmo tempo e o servidor aguenta; se um dia virar problema,
+/// o conserto e gravar em fluxo, nao baixar o teto.
+const MAX_UPLOAD: usize = 200 * 1024 * 1024;
 const SESSION_SECONDS: u64 = 7 * 24 * 60 * 60;
 const PASSWORD_ITERATIONS: u32 = 210_000;
 /// Teto das preferencias de uma conta. Elas seguem a pessoa entre computadores,
@@ -69,6 +74,14 @@ struct AppState {
     server_invites: Arc<RwLock<Vec<ServerInvite>>>,
     // Quantos sockets abertos cada pessoa tem. Zero significa offline.
     online: Arc<RwLock<HashMap<String, usize>>>,
+    /// O estado que cada pessoa escolheu: `ausente`, `ocupado` ou `invisivel`.
+    /// Quem nao aparece aqui esta em `online`, que e o normal.
+    ///
+    /// So em memoria, como a lista de voz: estado de presenca nao sobrevive a um
+    /// restart porque ninguem esta conectado depois dele. Quem escolheu guarda a
+    /// escolha na propria maquina e reanuncia ao reconectar — o mesmo acordo do
+    /// canal de voz.
+    estados: Arc<RwLock<HashMap<String, String>>>,
     // Quem esta em cada canal de voz, para a lista aparecer antes de entrar na
     // chamada. So existe em memoria: chamada nao sobrevive a um restart, e
     // gravar isso deixaria gente presa numa sala que nao existe mais.
@@ -86,6 +99,7 @@ struct AppState {
     // levar isso junto escolheria um microfone que nao existe do outro lado.
     preferencias: Arc<RwLock<HashMap<String, BTreeMap<String, String>>>>,
     categorias: Arc<RwLock<Vec<Categoria>>>,
+    emotes: Arc<RwLock<Vec<Emote>>>,
     friendships: Arc<RwLock<Vec<Friendship>>>,
     envelopes: Arc<RwLock<Vec<Envelope>>>,
     /// A fila do DJ por canal de voz, como o bot a descreveu por ultimo.
@@ -139,6 +153,12 @@ struct RoomInfo {
     /// mantem exatamente a ordem que eles ja tinham — ninguem ve a lista mudar
     /// sozinha por causa desta atualizacao.
     #[serde(default)] posicao: i32,
+    /// A roupa deste canal, quando ele quer uma so dele.
+    ///
+    /// Campo a campo sobre a do servidor, e nao tudo ou nada: um canal pode
+    /// trocar so o fundo e continuar com a cor de destaque da casa. Ver
+    /// `Skin` e, no cliente, como as duas se juntam.
+    #[serde(default, flatten)] skin: Skin,
 }
 
 /// Um grupo de canais dentro de um servidor.
@@ -157,6 +177,44 @@ struct Categoria {
     name: String,
     posicao: i32,
 }
+/// Um emote do servidor: um apelido curto que vira imagem na conversa.
+///
+/// Guarda o `file_id` de um anexo ja enviado, e nao bytes proprios: assim um
+/// emote e um arquivo como qualquer outro — mesma deduplicacao por conteudo,
+/// mesmo disco, mesma rota de entrega, mesma miniatura. O que ha de novo aqui
+/// e so o apelido.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Emote {
+    id: String,
+    server_id: String,
+    /// Sem os dois-pontos. Quem escreve `:sino:` na mensagem tem `sino` aqui.
+    name: String,
+    file_id: String,
+    created_by: String,
+    created_at: DateTime<Utc>,
+}
+
+/// Teto por servidor. Existe porque a lista inteira viaja no `bootstrap` de
+/// todo mundo que participa: sem teto, um servidor com mil emotes deixaria a
+/// entrada de cada pessoa lenta para sempre.
+const MAX_EMOTES: usize = 100;
+/// Teto de cada emote. GIF e WebP vao inteiros para a tela, sem miniatura.
+const MAX_EMOTE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// O apelido de um emote, normalizado, ou `None` se nao serve.
+///
+/// Minuscula, numero e `_`, de 2 a 24 caracteres. A regra e apertada de
+/// proposito: o apelido aparece dentro de `:...:` no meio do texto, e qualquer
+/// coisa que possa ser confundida com pontuacao — espaco, acento, dois-pontos —
+/// tornaria impossivel saber onde o emote termina e a frase recomeca.
+fn nome_de_emote(bruto: &str) -> Option<String> {
+    let limpo: String = bruto.trim().trim_matches(':').to_lowercase();
+    let valido = limpo.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !valido || limpo.len() < 2 || limpo.len() > 24 { return None; }
+    Some(limpo)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ServerInfo {
@@ -164,6 +222,31 @@ struct ServerInfo {
     #[serde(default)] icon_file: Option<String>,
     #[serde(default)] banner_file: Option<String>,
     #[serde(default)] description: Option<String>,
+    /// A roupa do servidor. Ver `Skin`: aqui ela vale para todos os canais que
+    /// nao tiverem uma propria.
+    #[serde(default, flatten)] skin: Skin,
+}
+
+/// Cor e fundo de um servidor ou de um canal.
+///
+/// Os tres campos sao independentes e todos opcionais: da para trocar so a cor
+/// de destaque, so o fundo, ou os dois. Vazio em tudo significa "usa o tema
+/// padrao", e e como todo servidor comeca.
+///
+/// **As cores sao validadas no servidor**, com `cor_valida`, pelo mesmo motivo
+/// da cor do perfil: este valor termina dentro de um estilo no navegador de
+/// todo mundo que entra no canal, e aceitar texto livre seria deixar dono e
+/// moderador escreverem CSS na tela dos outros.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Skin {
+    /// Cor de destaque: botoes, marcas de selecao, anel de quem fala.
+    #[serde(default, skip_serializing_if = "Option::is_none")] accent: Option<String>,
+    /// Cor de fundo do painel.
+    #[serde(default, skip_serializing_if = "Option::is_none")] bg_color: Option<String>,
+    /// Imagem de fundo, como id de anexo. Convive com `bg_color`, que fica por
+    /// baixo enquanto a imagem carrega e aparece nas bordas se ela nao cobrir.
+    #[serde(default, skip_serializing_if = "Option::is_none")] bg_file: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -180,7 +263,19 @@ struct Profile {
     #[serde(default)] avatar_file: Option<String>,
     #[serde(default)] bio: Option<String>,
     #[serde(default)] banner_file: Option<String>,
+    /// Recado curto, mostrado embaixo do nome na lista de gente.
+    ///
+    /// Separado da `bio`: a bio e um paragrafo que so aparece quando alguem
+    /// abre o perfil, e o recado e uma linha que todo mundo ve o tempo todo.
+    /// Aceita `:apelido:` de emote, entao o cliente desenha em vez de mostrar
+    /// texto cru.
+    #[serde(default)] recado: Option<String>,
 }
+
+/// Teto do recado. Curto de proposito: ele mora numa linha embaixo do nome,
+/// numa coluna estreita, e texto que nao cabe ali vira reticencias para todo
+/// mundo — o limite e mais honesto do que o corte.
+const MAX_RECADO: usize = 60;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UserAccount { username: String, password_salt: String, verifier: String, recovery_salt: String, recovery_verifier: String, created_at: DateTime<Utc> }
@@ -215,6 +310,9 @@ struct Member {
     role: ServerRole,
     #[serde(default)] nickname: Option<String>,
     #[serde(default)] avatar_file: Option<String>,
+    /// O recado desta pessoa **nesta casa**. Vence o recado global, como o
+    /// apelido e a foto do servidor ja vencem os do perfil.
+    #[serde(default)] recado: Option<String>,
 }
 
 /// Convite de servidor pendente. Entrar deixou de ser automatico: quem convida
@@ -241,6 +339,7 @@ impl From<StoredMembers> for Vec<Member> {
                     role: if index == 0 { ServerRole::Owner } else { ServerRole::Member },
                     nickname: None,
                     avatar_file: None,
+                    recado: None,
                 }).collect(),
         }
     }
@@ -336,8 +435,19 @@ enum ServerEvent {
     /// duas listas, e mandar o estado inteiro de volta pelo `bootstrap` custa
     /// menos do que quatro eventos que precisam ser aplicados na ordem certa.
     CanaisOrganizados { server_id: String },
+    /// Emote criado ou apagado. Sem detalhe do que mudou, pelo mesmo motivo de
+    /// `CanaisOrganizados`: o cliente rebusca o `bootstrap`, que ja traz a
+    /// lista inteira, e ninguem precisa aplicar eventos na ordem certa.
+    EmotesMudaram { server_id: String },
     RoleChanged { server_id: String, role: ServerRole },
-    PresenceChanged { username: String, online: bool },
+    /// `online` continua sendo o que sempre foi: "tem socket aberto e nao esta
+    /// invisivel". **Nao mexer nele.** Os clientes 0.7.40 estao no ar contra
+    /// este mesmo servidor e so entendem esse campo; o estado novo vai ao lado,
+    /// e quem nao sabe o que e ignora.
+    /// `presenca` e nao `estado`: o evento do DJ ja usa `estado` para a fila, e
+    /// dois campos de mesmo nome com significados diferentes no mesmo fluxo de
+    /// eventos e pedir para alguem ler o errado.
+    PresenceChanged { username: String, online: bool, presenca: String },
     VoiceChanged { room_id: String, users: Vec<String> },
     // Efemero: nao e guardado nem reenviado. Quem entrar depois nao ve.
     Typing { username: String, room_id: String },
@@ -375,7 +485,7 @@ impl Broadcast {
 struct RegisterInput { username: String, nonce: String, invite_proof: String, verifier: String, recovery_verifier: String }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")]
 struct RecoverInput { username: String, nonce: String, recovery_proof: String, verifier: String, recovery_verifier: String }
-#[derive(Deserialize)] struct WsQuery { token: String }
+#[derive(Deserialize)] struct WsQuery { token: String, #[serde(default)] estado: Option<String> }
 #[derive(Deserialize)] struct EditMessageInput { text: String }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")] struct ClientMessage { #[serde(rename = "type")] kind: String, text: Option<String>, room_id: Option<String>, #[serde(default)] attachments: Vec<String>, #[serde(default)] reply_to: Option<Uuid>,
     // Usados por "react" e "pin": qual mensagem e qual emoji.
@@ -464,6 +574,7 @@ struct ProfileInput {
     #[serde(default, deserialize_with = "double_option")] bio: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")] banner_file: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")] color: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")] recado: Option<Option<String>>,
 }
 
 /// `#rrggbb`, e nada mais. Curto de proposito: qualquer coisa alem disso vira
@@ -486,6 +597,44 @@ struct CustomizeServerInput {
     #[serde(default, deserialize_with = "double_option")] description: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")] icon_file: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")] banner_file: Option<Option<String>>,
+}
+
+/// A parte de skin de um pedido de personalizacao, de servidor ou de canal.
+///
+/// `double_option` em tudo pelo mesmo motivo do icone: sem distinguir "nao
+/// mandei este campo" de "mandei null", nao haveria como **tirar** uma cor
+/// depois de posta — so trocar por outra.
+#[derive(Default, Deserialize)] #[serde(rename_all = "camelCase")]
+struct SkinInput {
+    #[serde(default, deserialize_with = "double_option")] accent: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")] bg_color: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")] bg_file: Option<Option<String>>,
+}
+
+/// Confere as cores e a imagem, e aplica o que veio sobre a skin atual.
+///
+/// Devolve o erro pronto em vez de um booleano: sao tres campos com tres
+/// recados diferentes, e quem chama nao tem nada a decidir depois disso.
+async fn aplicar_skin(state: &AppState, alvo: &mut Skin, pedido: SkinInput) -> Result<(), Response> {
+    for (valor, recado) in [(&pedido.accent, "A cor de destaque"), (&pedido.bg_color, "A cor de fundo")] {
+        if let Some(Some(cor)) = valor {
+            if !cor_valida(cor) {
+                return Err(error(StatusCode::BAD_REQUEST, match recado {
+                    "A cor de destaque" => "Cor de destaque invalida.",
+                    _ => "Cor de fundo invalida.",
+                }));
+            }
+        }
+    }
+    if let Some(Some(file_id)) = &pedido.bg_file {
+        if !arquivo_e_imagem(state, file_id).await {
+            return Err(error(StatusCode::BAD_REQUEST, "O fundo precisa ser uma imagem."));
+        }
+    }
+    if let Some(valor) = pedido.accent { alvo.accent = valor; }
+    if let Some(valor) = pedido.bg_color { alvo.bg_color = valor; }
+    if let Some(valor) = pedido.bg_file { alvo.bg_file = valor; }
+    Ok(())
 }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")]
 struct LivekitInput { room_id: String, #[serde(default)] viewer: bool, #[serde(default)] screen: bool }
@@ -511,11 +660,15 @@ struct MemberEntry {
     role: ServerRole,
     #[serde(default)] nickname: Option<String>,
     #[serde(default)] avatar_file: Option<String>,
+    #[serde(default)] recado: Option<String>,
 }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")]
 struct ServerMemberProfileInput {
     nickname: Option<String>,
     avatar_file: Option<String>,
+    /// Ausente nao mexe: cliente anterior ao recado salva o perfil sem este
+    /// campo, e trata-lo como "vazio" apagaria o recado de quem ja tinha um.
+    #[serde(default, deserialize_with = "double_option")] recado: Option<Option<String>>,
 }
 #[derive(Serialize)] #[serde(rename_all = "camelCase")]
 struct ChallengeOutput {
@@ -534,6 +687,14 @@ struct ChallengeOutput {
 #[derive(Serialize)] struct WelcomeOutput { #[serde(rename = "type")] kind: &'static str, messages: Vec<ChatMessage> }
 #[derive(Serialize)] #[serde(rename_all = "camelCase")] struct BootstrapOutput { servers: Vec<ServerInfo>, rooms: Vec<RoomInfo>, profiles: Vec<Profile>, is_owner: bool, is_admin: bool, roles: HashMap<String, ServerRole>, online: Vec<String>, voice: HashMap<String, Vec<String>>,
     categorias: Vec<Categoria>,
+    /// O estado de cada pessoa que aparece em `online`. Campo novo: o cliente
+    /// 0.7.40 nao le e nao precisa, porque `online` continua significando o
+    /// mesmo que antes.
+    estados: HashMap<String, String>,
+    /// Os emotes dos servidores que esta pessoa enxerga. Viajam na entrada
+    /// porque a conversa precisa deles para desenhar `:nome:` na primeira
+    /// mensagem que aparecer, sem uma ida extra ao servidor por canal aberto.
+    emotes: Vec<Emote>,
     /// Se este servidor tem busca de GIF. Sem isso o cliente mostraria um botao
     /// que so sabe dar erro.
     gifs: bool,
@@ -599,12 +760,14 @@ async fn main() {
         memberships: Arc::new(RwLock::new(load_memberships(&config.data_dir).await)),
         server_invites: Arc::new(RwLock::new(load_json(&config.data_dir, "server-invites.json").await)),
         online: Default::default(),
+        estados: Default::default(),
         voice: Default::default(),
         files: Arc::new(RwLock::new(load_json(&config.data_dir, "files.json").await)),
         keys: Arc::new(RwLock::new(load_json(&config.data_dir, "keys.json").await)),
         cofres: Arc::new(RwLock::new(load_json(&config.data_dir, "cofres.json").await)),
         preferencias: Arc::new(RwLock::new(load_json(&config.data_dir, "preferencias.json").await)),
         categorias: Arc::new(RwLock::new(load_json(&config.data_dir, "categorias.json").await)),
+        emotes: Arc::new(RwLock::new(load_json(&config.data_dir, "emotes.json").await)),
         friendships: Arc::new(RwLock::new(load_json(&config.data_dir, "friends.json").await)),
         envelopes: Arc::new(RwLock::new(load_envelopes(&config.data_dir).await)),
         dj_estado: Default::default(),
@@ -641,6 +804,10 @@ async fn main() {
         .route("/api/categorias", post(criar_categoria))
         .route("/api/categorias/{id}", put(renomear_categoria).delete(apagar_categoria))
         .route("/api/categorias/{id}/mover", post(mover_categoria))
+        .route("/api/emotes", post(criar_emote))
+        .route("/api/emotes/{id}", axum::routing::delete(apagar_emote))
+        .route("/api/servers/{id}/skin", put(skin_do_servidor))
+        .route("/api/rooms/{id}/skin", put(skin_do_canal))
         .route("/api/servers/{id}/organizacao", put(reorganizar))
         .route("/api/profile/avatar", put(update_avatar))
         .route("/api/profile", put(update_profile))
@@ -754,7 +921,7 @@ async fn create_session(state: &AppState, username: String) -> Response {
     state.sessions.write().await.insert(token.clone(), Session { username: username.clone(), expires_at, is_owner: false });
     let mut profiles = state.profiles.write().await;
     if !profiles.contains_key(&profile_key(&username)) {
-        profiles.insert(profile_key(&username), Profile { username: username.clone(), color: None, avatar: None, avatar_file: None, bio: None, banner_file: None });
+        profiles.insert(profile_key(&username), Profile { username: username.clone(), color: None, avatar: None, avatar_file: None, bio: None, banner_file: None, recado: None });
         persist_json(&state.config.data_dir, "profiles.json", &*profiles).await;
     }
     Json(LoginOutput { token, username, expires_at }).into_response()
@@ -887,15 +1054,28 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Respons
     // Ordenadas aqui para todo cliente desenhar igual, sem cada um inventar a
     // sua regra de desempate.
     categorias.sort_by(|a, b| a.posicao.cmp(&b.posicao).then_with(|| a.name.cmp(&b.name)));
+    let mut emotes: Vec<Emote> = state.emotes.read().await.iter()
+        .filter(|emote| visible.contains(&emote.server_id)).cloned().collect();
+    emotes.sort_by(|a, b| a.name.cmp(&b.name));
     let roles: HashMap<String, ServerRole> = servers.iter()
         .filter_map(|server| role_of(&memberships, &server.id, &session.username).map(|role| (server.id.clone(), role)))
         .collect();
     // So a presenca de quem tem relacao com a pessoa: colegas de servidor e
     // amigos. Antes ia a lista inteira de conectados do sistema.
     let relacionados = presence_audience(&state, &session.username).await;
+    let estados_todos = state.estados.read().await.clone();
+    // `online` guarda exatamente o que sempre guardou, porque o cliente 0.7.40
+    // continua lendo este campo: quem tem socket aberto **e nao esta
+    // invisivel**. Quem se escondeu simplesmente nao esta aqui.
     let online: Vec<String> = state.online.read().await.iter()
         .filter(|(name, count)| **count > 0 && relacionados.contains(name))
+        .filter(|(name, _)| estados_todos.get(*name).map(String::as_str) != Some("invisivel"))
         .map(|(name, _)| name.clone()).collect();
+    // O estado de cada um, para quem sabe ler. So de quem aparece como online:
+    // mandar o estado de quem esta invisivel entregaria o esconderijo.
+    let estados: HashMap<String, String> = online.iter()
+        .map(|name| (name.clone(), estados_todos.get(name).cloned().unwrap_or_else(|| "online".to_string())))
+        .collect();
     // So os canais de voz que a pessoa enxerga; o resto nao e da conta dela.
     let visiveis: Vec<String> = rooms.iter().map(|room| room.id.clone()).collect();
     let voice: HashMap<String, Vec<String>> = state.voice.read().await.iter()
@@ -906,6 +1086,8 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Respons
         profiles: state.profiles.read().await.values().cloned().collect(),
         is_owner: session.is_owner, is_admin: is_admin(&state, &session.username), roles, online, voice,
         categorias,
+        estados,
+        emotes,
         gifs: state.config.gif_key.is_some(),
         dj: state.config.dj.is_some(),
     }).into_response()
@@ -973,17 +1155,17 @@ async fn create_server(State(state): State<AppState>, headers: HeaderMap, Json(b
     if name.chars().count() < 2 || base.len() < 2 { return error(StatusCode::BAD_REQUEST, "O nome precisa ter pelo menos 2 caracteres."); }
     let mut servers = state.servers.write().await; let mut id = base.clone(); let mut suffix = 2;
     while servers.iter().any(|server| server.id == id) { id = format!("{base}-{suffix}"); suffix += 1; }
-    let server = ServerInfo { id: id.clone(), name, created_at: Utc::now(), icon_file: None, banner_file: None, description: None };
+    let server = ServerInfo { id: id.clone(), name, created_at: Utc::now(), icon_file: None, banner_file: None, description: None, skin: Skin::default() };
     servers.push(server.clone()); persist_json(&state.config.data_dir, "servers.json", &*servers).await;
     // Quem cria e o primeiro membro; ninguem mais enxerga ate ser convidado.
     let mut memberships = state.memberships.write().await;
-    memberships.insert(id.clone(), vec![Member { username: profile_key(&session.username), role: ServerRole::Owner, nickname: None, avatar_file: None }]);
+    memberships.insert(id.clone(), vec![Member { username: profile_key(&session.username), role: ServerRole::Owner, nickname: None, avatar_file: None, recado: None }]);
     persist_json(&state.config.data_dir, "memberships.json", &*memberships).await;
     drop(memberships);
     // Servidor novo nasce com um canal de texto e um de voz, como no Discord.
     let mut rooms = state.rooms.write().await;
-    rooms.push(RoomInfo { id: format!("{id}-geral"), name: "geral".into(), created_at: Utc::now(), server_id: id.clone(), kind: RoomKind::Text, category_id: None, posicao: 0 });
-    rooms.push(RoomInfo { id: format!("{id}-voz-geral"), name: "Geral".into(), created_at: Utc::now(), server_id: id, kind: RoomKind::Voice, category_id: None, posicao: 0 });
+    rooms.push(RoomInfo { id: format!("{id}-geral"), name: "geral".into(), created_at: Utc::now(), server_id: id.clone(), kind: RoomKind::Text, category_id: None, posicao: 0, skin: Skin::default() });
+    rooms.push(RoomInfo { id: format!("{id}-voz-geral"), name: "Geral".into(), created_at: Utc::now(), server_id: id, kind: RoomKind::Voice, category_id: None, posicao: 0, skin: Skin::default() });
     persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
     Json(server).into_response()
 }
@@ -1017,6 +1199,7 @@ async fn create_room(State(state): State<AppState>, headers: HeaderMap, Json(bod
         id, name, created_at: Utc::now(), server_id: body.server_id, kind: body.kind,
         category_id: body.category_id.filter(|valor| !valor.is_empty()),
         posicao,
+        skin: Skin::default(),
     };
     rooms.push(room.clone()); persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
     let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &room.server_id) };
@@ -1030,11 +1213,11 @@ async fn update_avatar(State(state): State<AppState>, headers: HeaderMap, Json(b
         if !ok || a.len() > 420_000 { return error(StatusCode::BAD_REQUEST, "Imagem invalida ou muito grande."); }
     }
     if let Some(id) = &body.avatar_file {
-        if !state.files.read().await.contains_key(id) { return error(StatusCode::NOT_FOUND, "Arquivo nao encontrado."); }
+        if !arquivo_e_imagem(&state, id).await { return error(StatusCode::BAD_REQUEST, "A foto precisa ser uma imagem."); }
     }
     let mut profiles = state.profiles.write().await;
     let key = profile_key(&s.username);
-    let mut profile = profiles.get(&key).cloned().unwrap_or_else(|| Profile { username: s.username.clone(), color: None, avatar: None, avatar_file: None, bio: None, banner_file: None });
+    let mut profile = profiles.get(&key).cloned().unwrap_or_else(|| Profile { username: s.username.clone(), color: None, avatar: None, avatar_file: None, bio: None, banner_file: None, recado: None });
     profile.avatar = body.avatar;
     profile.avatar_file = body.avatar_file;
     profiles.insert(key, profile.clone());
@@ -1048,17 +1231,23 @@ async fn update_profile(State(state): State<AppState>, headers: HeaderMap, Json(
         if bio.chars().count() > 190 { return error(StatusCode::BAD_REQUEST, "Biografia muito longa."); }
     }
     if let Some(Some(id)) = &body.banner_file {
-        if !state.files.read().await.contains_key(id) { return error(StatusCode::NOT_FOUND, "Arquivo nao encontrado."); }
+        if !arquivo_e_imagem(&state, id).await { return error(StatusCode::BAD_REQUEST, "O banner precisa ser uma imagem."); }
     }
     if let Some(Some(cor)) = &body.color {
         if !cor_valida(cor) { return error(StatusCode::BAD_REQUEST, "Cor invalida."); }
     }
+    if let Some(Some(recado)) = &body.recado {
+        if recado.chars().count() > MAX_RECADO { return error(StatusCode::BAD_REQUEST, "O recado é muito longo."); }
+    }
     let mut profiles = state.profiles.write().await;
     let key = profile_key(&s.username);
-    let mut profile = profiles.get(&key).cloned().unwrap_or_else(|| Profile { username: s.username.clone(), color: None, avatar: None, avatar_file: None, bio: None, banner_file: None });
+    let mut profile = profiles.get(&key).cloned().unwrap_or_else(|| Profile { username: s.username.clone(), color: None, avatar: None, avatar_file: None, bio: None, banner_file: None, recado: None });
     if let Some(bio) = body.bio { profile.bio = bio; }
     if let Some(banner) = body.banner_file { profile.banner_file = banner; }
     if let Some(cor) = body.color { profile.color = cor; }
+    // Recado vazio e o mesmo que sem recado: uma linha em branco embaixo do
+    // nome seria so um buraco na lista.
+    if let Some(recado) = body.recado { profile.recado = recado.filter(|texto| !texto.trim().is_empty()); }
     profiles.insert(key, profile.clone());
     persist_json(&state.config.data_dir, "profiles.json", &*profiles).await;
     let _ = state.events.send(Broadcast::all(ServerEvent::ProfileUpdated { profile: profile.clone() }));
@@ -1287,6 +1476,7 @@ async fn list_members(State(state): State<AppState>, headers: HeaderMap, axum::e
         role: member.role,
         nickname: member.nickname.clone(),
         avatar_file: member.avatar_file.clone(),
+        recado: member.recado.clone(),
     }).collect()).unwrap_or_default();
     let my_role = role_of(&memberships, &server_id, &session.username).unwrap_or(ServerRole::Member);
     Json(MembersOutput { members, my_role }).into_response()
@@ -1307,8 +1497,13 @@ async fn update_server_member_profile(
         }
     }
     if let Some(id) = &body.avatar_file {
-        if !state.files.read().await.contains_key(id) {
-            return error(StatusCode::NOT_FOUND, "Arquivo de foto nao encontrado.");
+        if !arquivo_e_imagem(&state, id).await {
+            return error(StatusCode::BAD_REQUEST, "A foto precisa ser uma imagem.");
+        }
+    }
+    if let Some(Some(recado)) = &body.recado {
+        if recado.chars().count() > MAX_RECADO {
+            return error(StatusCode::BAD_REQUEST, "O recado é muito longo.");
         }
     }
     let user_key = profile_key(&session.username);
@@ -1328,11 +1523,20 @@ async fn update_server_member_profile(
         let t = a.trim().to_string();
         if t.is_empty() { None } else { Some(t) }
     });
+    // Vazio limpa, como o apelido: e assim que se volta ao recado global depois
+    // de ter posto um so desta casa.
+    if let Some(recado) = body.recado {
+        member.recado = recado.and_then(|r| {
+            let t = r.trim().to_string();
+            if t.is_empty() { None } else { Some(t) }
+        });
+    }
     let updated_entry = MemberEntry {
         username: session.username.clone(),
         role: member.role,
         nickname: member.nickname.clone(),
         avatar_file: member.avatar_file.clone(),
+        recado: member.recado.clone(),
     };
     persist_json(&state.config.data_dir, "memberships.json", &*memberships).await;
     let audience = members_of(&memberships, &server_id);
@@ -1395,7 +1599,7 @@ async fn accept_server_invite(State(state): State<AppState>, headers: HeaderMap,
         let mut memberships = state.memberships.write().await;
         let list = memberships.entry(invite.server_id.clone()).or_default();
         if !list.iter().any(|member| member.username == profile_key(&session.username)) {
-            list.push(Member { username: profile_key(&session.username), role: ServerRole::Member, nickname: None, avatar_file: None });
+            list.push(Member { username: profile_key(&session.username), role: ServerRole::Member, nickname: None, avatar_file: None, recado: None });
         }
         persist_json(&state.config.data_dir, "memberships.json", &*memberships).await;
         members_of(&memberships, &invite.server_id)
@@ -1527,6 +1731,58 @@ async fn delete_server(State(state): State<AppState>, headers: HeaderMap, Json(b
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Troca a roupa do servidor inteiro. Dono **e moderador**, ao contrario de
+/// `customize_server`, que e so do dono: nome e icone sao a identidade da casa,
+/// e cor de fundo e decoracao — quem ja organiza os canais pode decorar.
+async fn skin_do_servidor(State(state): State<AppState>, headers: HeaderMap, Caminho(id): Caminho<String>, Json(body): Json<SkinInput>) -> Response {
+    if let Err(resposta) = pode_organizar(&state, &headers, &id).await { return resposta; }
+    let atual = {
+        let servers = state.servers.read().await;
+        let Some(server) = servers.iter().find(|s| s.id == id) else { return error(StatusCode::NOT_FOUND, "Servidor nao encontrado."); };
+        server.skin.clone()
+    };
+    let mut nova = atual;
+    if let Err(resposta) = aplicar_skin(&state, &mut nova, body).await { return resposta; }
+    let updated = {
+        let mut servers = state.servers.write().await;
+        let Some(server) = servers.iter_mut().find(|s| s.id == id) else { return error(StatusCode::NOT_FOUND, "Servidor nao encontrado."); };
+        server.skin = nova;
+        let updated = server.clone();
+        persist_json(&state.config.data_dir, "servers.json", &*servers).await;
+        updated
+    };
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::ServerUpdated { server: updated.clone() }));
+    Json(updated).into_response()
+}
+
+/// Troca a roupa de um canal so. Sobrepoe a do servidor campo a campo.
+async fn skin_do_canal(State(state): State<AppState>, headers: HeaderMap, Caminho(id): Caminho<String>, Json(body): Json<SkinInput>) -> Response {
+    if let Err(resposta) = tem_sessao(&state, &headers).await { return resposta; }
+    let Some(server_id) = state.rooms.read().await.iter().find(|r| r.id == id).map(|r| r.server_id.clone()) else {
+        return error(StatusCode::NOT_FOUND, "Canal nao encontrado.");
+    };
+    if let Err(resposta) = pode_organizar(&state, &headers, &server_id).await { return resposta; }
+    let atual = {
+        let rooms = state.rooms.read().await;
+        let Some(room) = rooms.iter().find(|r| r.id == id) else { return error(StatusCode::NOT_FOUND, "Canal nao encontrado."); };
+        room.skin.clone()
+    };
+    let mut nova = atual;
+    if let Err(resposta) = aplicar_skin(&state, &mut nova, body).await { return resposta; }
+    {
+        let mut rooms = state.rooms.write().await;
+        let Some(room) = rooms.iter_mut().find(|r| r.id == id) else { return error(StatusCode::NOT_FOUND, "Canal nao encontrado."); };
+        room.skin = nova;
+        persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
+    }
+    // `CanaisOrganizados` em vez de um evento proprio: ele ja manda o cliente
+    // reler a lista de canais inteira, que e onde a skin viaja.
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
 async fn customize_server(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<String>, Json(body): Json<CustomizeServerInput>) -> Response {
     let Some((_, session)) = authenticated(&state, &headers).await else { return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."); };
     
@@ -1542,14 +1798,11 @@ async fn customize_server(State(state): State<AppState>, headers: HeaderMap, axu
     if let Some(Some(desc)) = &body.description {
         if desc.chars().count() > 300 { return error(StatusCode::BAD_REQUEST, "Descricao muito longa."); }
     }
-    {
-        let files = state.files.read().await;
-        if let Some(Some(file_id)) = &body.icon_file {
-            if !files.contains_key(file_id) { return error(StatusCode::NOT_FOUND, "Arquivo de icone nao encontrado."); }
-        }
-        if let Some(Some(file_id)) = &body.banner_file {
-            if !files.contains_key(file_id) { return error(StatusCode::NOT_FOUND, "Arquivo de banner nao encontrado."); }
-        }
+    if let Some(Some(file_id)) = &body.icon_file {
+        if !arquivo_e_imagem(&state, file_id).await { return error(StatusCode::BAD_REQUEST, "O icone precisa ser uma imagem."); }
+    }
+    if let Some(Some(file_id)) = &body.banner_file {
+        if !arquivo_e_imagem(&state, file_id).await { return error(StatusCode::BAD_REQUEST, "O banner precisa ser uma imagem."); }
     }
     
     let updated = {
@@ -1570,7 +1823,25 @@ async fn customize_server(State(state): State<AppState>, headers: HeaderMap, axu
 }
 
 
-/// Tipos aceitos. GIF entra na lista para o avatar animado funcionar.
+/// Aquele anexo existe **e** e imagem?
+///
+/// Foto de perfil, icone e banner apontam para um anexo ja enviado, e ate a
+/// 0.7.40 bastava existir, porque o upload so aceitava midia. Agora que a
+/// conversa recebe qualquer arquivo, sem esta conferencia daria para pendurar
+/// um `.exe` de 200 MB como avatar: o `<img>` nao mostraria nada e o servidor
+/// serviria o arquivo inteiro a cada vez que alguem abrisse a lista de membros.
+async fn arquivo_e_imagem(state: &AppState, id: &str) -> bool {
+    state.files.read().await.get(id)
+        .is_some_and(|file| tipo_para_mostrar(&file.mime).is_some_and(|t| t.starts_with("image/")))
+}
+
+/// Tipos de midia conhecidos, e a extensao de cada um.
+///
+/// **Isto nao e mais o porteiro do chat**: anexo de conversa aceita qualquer
+/// arquivo, e a extensao dele sai do proprio nome. Esta lista continua valendo
+/// para o que o servidor busca sozinho na internet (o GIF escolhido na busca) e
+/// para o que vira imagem de perfil ou de servidor, onde receber um executavel
+/// nao faria sentido nenhum.
 fn allowed_mime(mime: &str) -> Option<&'static str> {
     match mime {
         "image/png" => Some("png"),
@@ -1620,13 +1891,43 @@ fn nome_de_anexo(bruto: &str, ext: &str) -> String {
     if resultado.is_empty() { format!("arquivo.{ext}") } else { resultado }
 }
 
+/// A extensao que vai para o nome em disco, tirada do nome que a pessoa enviou.
+///
+/// O id de um anexo e `<hash>.<ext>`, ou seja **isto vira nome de arquivo no
+/// disco do servidor**. Por isso o filtro e por lista do que entra, e nao do que
+/// sai: so letra e numero ASCII, minusculo, ate dez caracteres. Qualquer outra
+/// coisa — ponto, barra, dois-pontos, acento — nao passa, e o que sobra vazio
+/// vira `bin`.
+///
+/// Note que isto nao e uma defesa contra arquivo perigoso: `.exe` passa, e tem
+/// de passar. O aviso de "isto pode ter virus" e do cliente, na hora de baixar.
+/// Aqui a unica preocupacao e o arquivo cair onde deve, com um nome inofensivo.
+fn extensao_de_nome(nome: &str) -> String {
+    let bruta = nome.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+    let limpa: String = bruta.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .take(10)
+        .collect();
+    if limpa.is_empty() { "bin".to_string() } else { limpa }
+}
+
 async fn upload_file(State(state): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
     let Some((_, session)) = authenticated(&state, &headers).await else { return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."); };
+    // O tipo declarado vira **dica**, nao permissao: quem envia escolhe este
+    // cabecalho, entao ele nunca decide sozinho nada que importe. Quem decide o
+    // que o navegador pode mostrar e `tipo_para_mostrar`, na hora de servir.
     let mime = headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-    let Some(ext) = allowed_mime(&mime) else { return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Tipo de arquivo nao aceito."); };
+    let mime = if mime.trim().is_empty() { "application/octet-stream".to_string() } else { mime };
     if body.is_empty() { return error(StatusCode::BAD_REQUEST, "Arquivo vazio."); }
-    if body.len() > MAX_UPLOAD { return error(StatusCode::PAYLOAD_TOO_LARGE, "O limite e de 50 MB por arquivo."); }
-    let name = headers.get("x-file-name").and_then(|v| v.to_str().ok())
+    if body.len() > MAX_UPLOAD { return error(StatusCode::PAYLOAD_TOO_LARGE, "O limite e de 200 MB por arquivo."); }
+    let enviado = headers.get("x-file-name").and_then(|v| v.to_str().ok()).unwrap_or("");
+    // A extensao sai do nome, e nao do tipo declarado: para `.zip`, `.exe` ou
+    // `.psd` nao ha tabela que sirva, e o nome e o que a pessoa vai reconhecer
+    // quando salvar.
+    let ext = extensao_de_nome(enviado);
+    let name = Some(enviado)
+        .filter(|value| !value.is_empty())
         .map(|value| nome_de_anexo(value, &ext))
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("arquivo.{ext}"));
@@ -1826,6 +2127,72 @@ async fn pode_organizar(state: &AppState, headers: &HeaderMap, server_id: &str) 
         return Err(error(StatusCode::FORBIDDEN, "Somente dono ou moderador organiza os canais."));
     }
     Ok(())
+}
+
+#[derive(Deserialize)] #[serde(rename_all = "camelCase")]
+struct CriarEmote { server_id: String, name: String, file_id: String }
+
+/// Cria um emote do servidor. Dono e moderador, a mesma regra de quem organiza
+/// os canais: e personalizacao do servidor, nao conteudo de mensagem.
+async fn criar_emote(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<CriarEmote>) -> Response {
+    if let Err(resposta) = pode_organizar(&state, &headers, &body.server_id).await { return resposta; }
+    let Some(name) = nome_de_emote(&body.name) else {
+        return error(StatusCode::BAD_REQUEST, "O apelido aceita de 2 a 24 letras minusculas, numeros e _.");
+    };
+    // Imagem, e nao "arquivo que existe": o emote e desenhado num `<img>` no
+    // meio da frase, e um `.zip` ali seria um quadrado quebrado para sempre.
+    if !arquivo_e_imagem(&state, &body.file_id).await {
+        return error(StatusCode::BAD_REQUEST, "O emote precisa ser uma imagem.");
+    }
+    // Emote animado vai inteiro para cada mensagem que o usa, sem miniatura no
+    // meio; sem teto, um GIF de 150 MB (o anexo agora aceita) viraria emote.
+    let tamanho = state.files.read().await.get(&body.file_id).map(|file| file.size).unwrap_or(0);
+    if tamanho > MAX_EMOTE_BYTES {
+        return error(StatusCode::BAD_REQUEST, "O emote pode ter no máximo 2 MB.");
+    }
+    let mut emotes = state.emotes.write().await;
+    let deste: Vec<&Emote> = emotes.iter().filter(|e| e.server_id == body.server_id).collect();
+    if deste.len() >= MAX_EMOTES {
+        return error(StatusCode::BAD_REQUEST, "Este servidor chegou ao limite de emotes.");
+    }
+    if deste.iter().any(|e| e.name == name) {
+        return error(StatusCode::CONFLICT, "Ja existe um emote com esse apelido neste servidor.");
+    }
+    let Some((_, session)) = authenticated(&state, &headers).await else {
+        return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
+    };
+    let server_id = body.server_id.clone();
+    let emote = Emote {
+        id: Uuid::new_v4().to_string(),
+        server_id: server_id.clone(),
+        name,
+        file_id: body.file_id,
+        created_by: session.username.clone(),
+        created_at: Utc::now(),
+    };
+    emotes.push(emote.clone());
+    persist_json(&state.config.data_dir, "emotes.json", &*emotes).await;
+    drop(emotes);
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::EmotesMudaram { server_id }));
+    (StatusCode::CREATED, Json(emote)).into_response()
+}
+
+/// Apaga um emote. As mensagens antigas que o usam continuam com o texto
+/// `:nome:` cru — nao ha reescrita de historico aqui, e nem deveria haver.
+async fn apagar_emote(State(state): State<AppState>, Caminho(id): Caminho<String>, headers: HeaderMap) -> Response {
+    if let Err(resposta) = tem_sessao(&state, &headers).await { return resposta; }
+    let Some(server_id) = state.emotes.read().await.iter().find(|e| e.id == id).map(|e| e.server_id.clone()) else {
+        return error(StatusCode::NOT_FOUND, "Emote nao encontrado.");
+    };
+    if let Err(resposta) = pode_organizar(&state, &headers, &server_id).await { return resposta; }
+    let mut emotes = state.emotes.write().await;
+    emotes.retain(|e| e.id != id);
+    persist_json(&state.config.data_dir, "emotes.json", &*emotes).await;
+    drop(emotes);
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::EmotesMudaram { server_id }));
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn criar_categoria(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<CriarCategoria>) -> Response {
@@ -2341,18 +2708,53 @@ async fn download_file(State(state): State<AppState>, headers: HeaderMap, axum::
 async fn servir_arquivo(state: &AppState, id: &str, privado: bool) -> Response {
     let Some(file) = state.files.read().await.get(id).cloned() else { return error(StatusCode::NOT_FOUND, "Arquivo nao encontrado."); };
     let dir = if file.disk == "fallback" { &state.config.upload_fallback_dir } else { &state.config.upload_dir };
+    let mostrar = tipo_para_mostrar(&file.mime);
     match fs::read(dir.join(&file.id)).await {
         Ok(bytes) => ([
-            (axum::http::header::CONTENT_TYPE, file.mime.clone()),
+            // Nunca o tipo que veio no upload: ou um da lista conhecida, ou
+            // bytes sem tipo nenhum.
+            (axum::http::header::CONTENT_TYPE,
+                mostrar.unwrap_or("application/octet-stream").to_string()),
             (axum::http::header::CACHE_CONTROL,
                 if privado { "private, max-age=31536000, immutable".to_string() }
                 else { "public, max-age=31536000, immutable".to_string() }),
-            // O navegador mostra imagem, video e PDF na propria aba, e oferece
-            // salvar o resto com o nome que a pessoa enviou, em vez do
-            // identificador interno.
-            (axum::http::header::CONTENT_DISPOSITION, disposicao(&file)),
+            // Sem adivinhacao de tipo. E o cabecalho que fecha o buraco de
+            // verdade: os bytes gravados nunca foram conferidos contra o tipo
+            // declarado, entao um arquivo anunciado como `image/png` pode ser
+            // HTML por dentro. Sem `nosniff` o navegador percebe isso sozinho,
+            // decide que e uma pagina e a executa na nossa origem.
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (axum::http::header::CONTENT_DISPOSITION, disposicao(&file, mostrar.is_some())),
         ], bytes).into_response(),
         Err(_) => error(StatusCode::NOT_FOUND, "Arquivo nao encontrado no disco."),
+    }
+}
+
+/// O que o navegador pode abrir na propria aba, e com que tipo.
+///
+/// Lista curta e fechada de proposito, agora que a conversa aceita arquivo de
+/// qualquer tipo. O `Content-Type` de um anexo e texto escolhido por quem
+/// enviou e os bytes nunca foram conferidos contra ele, entao mostrar na aba o
+/// que o remetente pediu seria deixar outra pessoa escolher o que roda em
+/// `naoconcordo.com.br` — e o token de sessao de quem clicasse mora nessa
+/// origem. Fora desta lista, tudo desce como bytes para salvar.
+///
+/// **`image/svg+xml` esta fora, e nao por esquecimento.** SVG e um documento
+/// que executa script; um "desenho" enviado no chat viraria pagina nossa.
+fn tipo_para_mostrar(mime: &str) -> Option<&'static str> {
+    match mime {
+        "image/png" => Some("image/png"),
+        "image/jpeg" => Some("image/jpeg"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "video/mp4" => Some("video/mp4"),
+        "video/webm" => Some("video/webm"),
+        "audio/mpeg" => Some("audio/mpeg"),
+        "audio/ogg" => Some("audio/ogg"),
+        // O leitor de PDF do navegador roda na caixa de areia dele, e nao na
+        // nossa origem: script dentro do PDF nao alcanca a sessao.
+        "application/pdf" => Some("application/pdf"),
+        _ => None,
     }
 }
 
@@ -2401,11 +2803,12 @@ fn responder_miniatura(bytes: Vec<u8>) -> Response {
 }
 
 /// `inline` para o que o navegador sabe mostrar, `attachment` para o resto.
-fn disposicao(file: &StoredFile) -> String {
-    let mostra = file.mime.starts_with("image/")
-        || file.mime.starts_with("video/")
-        || file.mime.starts_with("audio/")
-        || file.mime == "application/pdf";
+///
+/// Quem decide `mostra` e `tipo_para_mostrar`, e o mesmo julgamento vale para o
+/// `Content-Type`: os dois cabecalhos precisam concordar. Deixar `inline` num
+/// corpo que foi servido como `application/octet-stream` nao e perigoso, mas e
+/// confuso — o navegador baixa assim mesmo.
+fn disposicao(file: &StoredFile, mostra: bool) -> String {
     // O nome vai codificado: acento e espaco quebram o cabecalho, e aspas no
     // nome permitiriam sair do campo.
     let seguro: String = file.name.chars()
@@ -2730,7 +3133,48 @@ async fn delete_message(State(state): State<AppState>, headers: HeaderMap, axum:
 async fn websocket(State(state): State<AppState>, Query(query): Query<WsQuery>, ws: WebSocketUpgrade) -> Response {
     let Some(s) = state.sessions.read().await.get(&query.token).cloned() else { return StatusCode::UNAUTHORIZED.into_response(); };
     if s.expires_at < now() { return StatusCode::UNAUTHORIZED.into_response(); }
-    ws.on_upgrade(move |socket| handle_socket(socket, state, s)).into_response()
+    ws.on_upgrade(move |socket| handle_socket(socket, state, s, query.estado)).into_response()
+}
+
+/// Os estados que uma pessoa pode escolher. Qualquer outra coisa vira `online`.
+///
+/// `invisivel` e o "aparecer offline": a pessoa continua conectada e usando
+/// tudo, mas para os outros ela some da lista de quem esta online. Por isso ele
+/// nunca e anunciado como estado — seria a mesma coisa que dizer "estou
+/// escondido", e a lista passaria a distinguir quem se escondeu de quem
+/// realmente fechou o aplicativo.
+fn estado_valido(bruto: &str) -> Option<&'static str> {
+    match bruto {
+        "ausente" => Some("ausente"),
+        "ocupado" => Some("ocupado"),
+        "invisivel" => Some("invisivel"),
+        _ => None,
+    }
+}
+
+/// O que os **outros** enxergam desta pessoa: (aparece online, estado).
+///
+/// Quem esta invisivel sai igual a quem nao esta conectado, e de proposito: se
+/// o estado vazasse, bastaria olhar a diferenca entre "sem estado" e
+/// "invisivel" para saber quem se escondeu.
+fn presenca_visivel(conectado: bool, estado: Option<&String>) -> (bool, String) {
+    match estado.map(String::as_str) {
+        Some("invisivel") => (false, String::new()),
+        Some(outro) if conectado => (true, outro.to_string()),
+        _ if conectado => (true, "online".to_string()),
+        _ => (false, String::new()),
+    }
+}
+
+/// Anuncia a presenca de alguem para quem tem relacao com a pessoa.
+async fn anunciar_presenca(state: &AppState, username: &str) {
+    let conectado = state.online.read().await.get(&profile_key(username)).is_some_and(|n| *n > 0);
+    let estado = state.estados.read().await.get(&profile_key(username)).cloned();
+    let (online, presenca) = presenca_visivel(conectado, estado.as_ref());
+    let audience = presence_audience(state, username).await;
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::PresenceChanged {
+        username: username.to_string(), online, presenca,
+    }));
 }
 
 /// Quem tem relacao com a pessoa: colegas de servidor mais amigos aceitos.
@@ -2752,21 +3196,30 @@ async fn presence_audience(state: &AppState, username: &str) -> Vec<String> {
     audience
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session) {
+async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session, estado_inicial: Option<String>) {
     // A inscricao vem antes do anuncio: se anunciasse primeiro, este socket
     // perderia o proprio evento e a pessoa se veria offline.
     let mut events = state.events.subscribe();
     // Presenca: o primeiro socket da pessoa avisa que ela ficou online.
-    {
+    let primeiro_socket = {
         let mut online = state.online.write().await;
         let count = online.entry(profile_key(&session.username)).or_insert(0);
         *count += 1;
-        if *count == 1 {
-            let audience = presence_audience(&state, &session.username).await;
-            let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::PresenceChanged {
-                username: session.username.clone(), online: true,
-            }));
+        *count == 1
+    };
+    if primeiro_socket {
+        // O estado chega junto com a conexao, e nao numa mensagem depois dela:
+        // se viesse depois, quem esta invisivel apareceria online para todo
+        // mundo no intervalo. Sem estado na conexao (cliente antigo) entra
+        // limpo — quem fechou o app "ocupado" nao volta ocupado sem ter pedido.
+        {
+            let mut estados = state.estados.write().await;
+            match estado_inicial.as_deref().and_then(estado_valido) {
+                Some(valor) => { estados.insert(profile_key(&session.username), valor.to_string()); }
+                None => { estados.remove(&profile_key(&session.username)); }
+            }
         }
+        anunciar_presenca(&state, &session.username).await;
     }
     // O historico tambem precisa ser filtrado: antes ia tudo para todos.
     let visible_rooms: Vec<String> = {
@@ -2812,6 +3265,22 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session)
                     set_voice(&state, &session.username, socket_id, &mut sala_de_voz, destino).await;
                     continue;
                 }
+                // O estado escolhido pela pessoa, ou a ausencia automatica que o
+                // cliente detectou. Quem decide e a maquina dela: o servidor nao
+                // tem como saber se alguem saiu para o almoco.
+                if input.kind == "status" {
+                    let pedido = input.room_id.clone().unwrap_or_default();
+                    {
+                        let mut estados = state.estados.write().await;
+                        match estado_valido(&pedido) {
+                            Some(valor) => { estados.insert(profile_key(&session.username), valor.to_string()); }
+                            // Volta a `online`, que e a ausencia de estado.
+                            None => { estados.remove(&profile_key(&session.username)); }
+                        }
+                    }
+                    anunciar_presenca(&state, &session.username).await;
+                    continue;
+                }
                 // "typing" e efemero: nunca e guardado, entao quem chega depois
                 // nao ve um aviso de digitacao que ja morreu.
                 if input.kind == "typing" {
@@ -2832,9 +3301,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session)
                 }
                 if input.kind == "react" {
                     let (Some(alvo), Some(emoji)) = (input.message_id, input.emoji) else { continue; };
-                    // Um emoji e um punhado de bytes; limitar evita que alguem
-                    // guarde um texto inteiro no lugar do simbolo.
-                    let emoji: String = emoji.chars().take(8).collect();
+                    // Limitado para ninguem guardar um texto inteiro no lugar
+                    // do simbolo. Eram 8 caracteres, o que cabia so o emoji do
+                    // Unicode; agora reagir tambem aceita emote do servidor, e
+                    // `:apelido_bem_comprido:` sao 26 no maximo pela regra de
+                    // `nome_de_emote` mais os dois-pontos.
+                    let emoji: String = emoji.chars().take(26).collect();
                     if emoji.trim().is_empty() { continue; }
                     let atualizada = {
                         let mut historico = state.messages.write().await;
@@ -2960,17 +3432,21 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session)
     set_voice(&state, &session.username, socket_id, &mut sala_de_voz, None).await;
 
     // Saiu: o ultimo socket fechado marca offline.
-    let mut online = state.online.write().await;
-    if let Some(count) = online.get_mut(&profile_key(&session.username)) {
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-            online.remove(&profile_key(&session.username));
-            drop(online);
-            let audience = presence_audience(&state, &session.username).await;
-            let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::PresenceChanged {
-                username: session.username.clone(), online: false,
-            }));
+    let ultimo_socket = {
+        let mut online = state.online.write().await;
+        match online.get_mut(&profile_key(&session.username)) {
+            Some(count) => {
+                *count = count.saturating_sub(1);
+                if *count == 0 { online.remove(&profile_key(&session.username)); true } else { false }
+            }
+            None => false,
         }
+    };
+    if ultimo_socket {
+        // O estado sai junto com a ultima conexao: ele descreve quem esta aqui,
+        // e quem fechou o aplicativo nao esta "ocupado", esta fora.
+        state.estados.write().await.remove(&profile_key(&session.username));
+        anunciar_presenca(&state, &session.username).await;
     }
 }
 

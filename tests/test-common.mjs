@@ -112,8 +112,8 @@ export async function entrarNoServidor(serverId, quemConvida, convidado) {
 }
 
 /// WebSocket com fila: cada waitFor consome o primeiro evento daquele tipo.
-export function socketFor(token) {
-  const ws = new WebSocket(wsBase + "/ws?token=" + encodeURIComponent(token));
+export function socketFor(token, consulta = "") {
+  const ws = new WebSocket(wsBase + "/ws?token=" + encodeURIComponent(token) + consulta);
   const queued = [];
   const waiters = [];
   ws.onmessage = event => {
