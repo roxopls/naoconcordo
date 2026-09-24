@@ -32,6 +32,11 @@
 }
 #app-view.com-skin-imagem { position: relative; }
 #app-view.com-skin-imagem > * { position: relative; z-index: 1; }
+/* A area da conversa e da chamada tem fundo proprio e opaco: sem abrir esse
+   fundo, a cor e a imagem da skin ficavam por baixo dele e so apareciam nas
+   frestas. As laterais seguem opacas; o compositor e as tiles tambem. */
+#app-view.com-skin .main-panel,
+#app-view.com-skin-imagem .main-panel { background: transparent; }
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 900px; min-height: 620px; overflow: hidden; }
