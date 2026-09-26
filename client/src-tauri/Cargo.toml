@@ -1,6 +1,6 @@
 [package]
 name = "naoconcordo-app"
-version = "0.7.45"
+version = "0.7.46"
 description = "naoconcordo - sala privada de voz e tela"
 authors = ["naoconcordo"]
 edition = "2024"
@@ -71,3 +71,9 @@ windows = { version = "0.62", features = [
     "Win32_System_Variant",
 ] }
 
+# Copia do webrtc-sys com uma linha a mais: o encoder de passagem declara
+# controle de taxa confiavel. Sem isso o WebRTC descarta quadros ja
+# comprimidos pela placa quando a taxa estoura, e a tela esfarela ate o proximo
+# quadro-chave. Ver vendor/webrtc-sys/src/passthrough_video_encoder.cpp.
+[patch.crates-io]
+webrtc-sys = { path = "vendor/webrtc-sys" }

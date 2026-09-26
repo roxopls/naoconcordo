@@ -2983,7 +2983,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "naoconcordo-app"
-version = "0.7.45"
+version = "0.7.46"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -6196,8 +6196,6 @@ dependencies = [
 [[package]]
 name = "webrtc-sys"
 version = "0.3.42"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bd328126bc3653b10eab635579f74a562a472ff032ff09b5d1681d35e6201fd"
 dependencies = [
  "cc",
  "cxx",
