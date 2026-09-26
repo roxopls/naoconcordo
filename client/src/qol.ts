@@ -17,6 +17,8 @@ export type Navigation = {
   serverId: string;
   roomId: string;
   friend: string;
+  /// Grupo privado aberto. Opcional: navegacao gravada antes dos grupos nao tem.
+  grupo?: string;
 };
 
 const NAV_KEY = "naoconcordo.navegacao.";
@@ -41,6 +43,7 @@ export function readNavigation(username: string): Navigation | null {
       serverId: String(parsed.serverId || ""),
       roomId: String(parsed.roomId || ""),
       friend: String(parsed.friend || ""),
+      grupo: String(parsed.grupo || ""),
     };
   } catch {
     return null;

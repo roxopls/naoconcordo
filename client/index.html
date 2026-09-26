@@ -21,6 +21,7 @@
       <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.5-1.5"/></symbol>
       <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></symbol>
       <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></symbol>
+      <symbol id="i-phone" viewBox="0 0 24 24"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></symbol>
       <symbol id="i-hangup" viewBox="0 0 24 24"><path d="M2.5 14.5c4-4.7 15-4.7 19 0"/><path d="M6.2 12.4l-1.6 2.6-2.1-.8"/><path d="M17.8 12.4l1.6 2.6 2.1-.8"/><path d="M4 20L20 4"/></symbol>
       <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></symbol>
       <symbol id="i-reply" viewBox="0 0 24 24"><path d="M9 17l-6-5 6-5"/><path d="M3 12h9a8 8 0 0 1 8 8v1"/></symbol>
@@ -95,6 +96,7 @@
         <button id="home-button" class="rail-button home" title="Amigos e mensagens">
           <img class="rail-logo" src="logo.png" alt="naoconcordo" />
         </button>
+        <div id="rail-privadas" class="rail-privadas"></div>
         <div class="rail-divider"></div>
         <div id="server-rail" class="rail-servers"></div>
         <button id="server-invites-button" class="rail-button hidden" title="Convites de servidor"><svg class="ic"><use href="#i-inbox"/></svg><span id="server-invites-count" class="rail-badge">0</span></button>
@@ -116,10 +118,17 @@
             <div id="category-list"></div>
           </div>
           <div id="friends-pane">
+            <div class="section-title"><p class="section-label">GRUPOS</p><button id="add-grupo" class="add-room" title="Criar grupo privado"><svg class="ic"><use href="#i-plus"/></svg></button></div>
+            <div id="grupo-list"></div>
             <div class="section-title"><p class="section-label">AMIGOS</p><button id="add-friend" class="add-room" title="Procurar amigos"><svg class="ic"><use href="#i-user-plus"/></svg></button></div>
             <div id="friend-list"></div>
           </div>
           <div id="voice-users" class="voice-users hidden"></div>
+          <div id="chamada-mini" class="chamada-mini hidden">
+            <div class="chamada-mini-textos"><strong>Chamada privada</strong><span id="chamada-mini-titulo"></span><small id="chamada-mini-quantos"></small></div>
+            <button id="chamada-mini-voltar" type="button" class="ghost-button">Voltar</button>
+            <button id="chamada-mini-sair" type="button" class="ghost-button so-icone perigo" title="Sair da chamada"><svg class="ic ic-sm"><use href="#i-hangup"/></svg></button>
+          </div>
         </nav>
         <footer class="profile">
           <!-- A bolinha é irmã do botão do perfil, e não filha: botão dentro de
@@ -157,6 +166,8 @@
             <button id="update-pill" class="ghost-button update-pill hidden" type="button" title="Novidades desta versão"><svg class="ic ic-sm"><use href="#i-spark"/></svg> <span id="update-pill-text">Atualizado</span></button>
             <button id="fixadas-abrir" class="ghost-button so-icone" type="button" title="Mensagens fixadas neste canal"><svg class="ic ic-sm"><use href="#i-pin"/></svg></button>
             <button id="busca-abrir" class="ghost-button so-icone" type="button" title="Buscar nas mensagens (Ctrl+F)"><svg class="ic ic-sm"><use href="#i-search"/></svg></button>
+            <button id="chamada-ligar" class="ghost-button so-icone hidden" type="button" title="Iniciar chamada"><svg class="ic ic-sm"><use href="#i-phone"/></svg></button>
+            <button id="grupo-config" class="ghost-button hidden" type="button" title="Membros e nome do grupo"><svg class="ic ic-sm"><use href="#i-user-plus"/></svg> Grupo</button>
             <button id="fingerprint-button" class="ghost-button hidden" title="Conferir identidade"><svg class="ic ic-sm"><use href="#i-lock"/></svg> Identidade</button>
             <div id="status-pill" class="status-pill">offline</div>
           </div>
@@ -165,6 +176,10 @@
         <section id="dj-panel" class="dj-panel hidden" aria-label="Fila do DJ"></section>
         <div id="camera-mini" class="camera-mini hidden"></div>
         <section id="messages" class="messages" aria-live="polite"></section>
+        <section id="chamada-privada" class="chamada-privada hidden" aria-label="Chamada privada">
+          <div id="chamada-palco" class="stage chamada-palco"></div>
+          <div id="chamada-controles" class="chamada-controles"></div>
+        </section>
         <section id="dm-messages" class="messages hidden" aria-live="polite"></section>
         <p id="typing-note" class="typing-note hidden"></p>
         <form id="message-form" class="composer">
@@ -213,6 +228,12 @@
         <button id="leave-button" class="control danger" title="Sair da chamada"><svg class="ic"><use href="#i-hangup"/></svg><small>Desconectar</small></button>
       </div>
       <div id="toast" class="toast hidden"></div>
+      <div id="chamada-toque" class="chamada-toque hidden" role="alert">
+        <svg class="ic"><use href="#i-phone"/></svg>
+        <span id="chamada-toque-texto"></span>
+        <button id="chamada-atender" type="button" class="primary">Atender</button>
+        <button id="chamada-recusar" type="button" class="ghost-button">Recusar</button>
+      </div>
     </div>
 
     <dialog id="message-edit-dialog" class="wide-dialog">
@@ -391,6 +412,36 @@
             </div>
           </section>
         </div>
+      </div>
+    </dialog>
+
+    <dialog id="grupo-criar-dialog" class="wide-dialog">
+      <h2>Novo grupo privado</h2>
+      <p class="muted">Até 10 pessoas, só entre amigos. A conversa é cifrada de ponta a ponta.</p>
+      <label>Nome (opcional)<input id="grupo-criar-nome" type="text" maxlength="50" placeholder="Sem nome, aparece o nome de quem está no grupo" /></label>
+      <p class="section-label">AMIGOS</p>
+      <div id="grupo-criar-amigos" class="grupo-criar-amigos"></div>
+      <p id="grupo-criar-erro" class="error" role="alert"></p>
+      <div class="dialog-actions">
+        <button id="grupo-criar-cancelar" type="button">Cancelar</button>
+        <button id="grupo-criar-ok" class="primary" type="button">Criar grupo</button>
+      </div>
+    </dialog>
+
+    <dialog id="grupo-dialog" class="wide-dialog">
+      <h2 id="grupo-dialog-titulo">Grupo</h2>
+      <div class="dialog-row grupo-nome-linha">
+        <input id="grupo-nome" type="text" maxlength="50" placeholder="Nome do grupo" />
+        <button id="grupo-nome-salvar" type="button" class="ghost-button">Salvar nome</button>
+      </div>
+      <p class="section-label">MEMBROS</p>
+      <div id="grupo-membros" class="friend-rows"></div>
+      <p class="section-label">ADICIONAR AMIGO</p>
+      <div id="grupo-candidatos" class="friend-rows"></div>
+      <p id="grupo-erro" class="error" role="alert"></p>
+      <div class="dialog-actions">
+        <button id="grupo-sair" class="danger-button" type="button">Sair do grupo</button>
+        <button id="grupo-fechar" class="primary" type="button">Fechar</button>
       </div>
     </dialog>
 

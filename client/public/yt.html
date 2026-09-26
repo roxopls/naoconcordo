@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Ponte do player do YouTube.
+         Dentro do aplicativo a janela se chama `tauri.localhost`, e o YouTube
+         recusa tocar para quem ele nao reconhece ("Erro 153"). Servida pelo
+         dominio do servidor, esta pagina e quem embute o player: o YouTube ve
+         um site de verdade como origem e toca. -->
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <title>YouTube</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+      iframe { border: 0; width: 100%; height: 100%; display: block; }
+      p { color: #bbb; font: 13px system-ui, sans-serif; text-align: center; margin-top: 40vh; }
+    </style>
+  </head>
+  <body>
+    <script>
+      // So id de video e tempo de inicio entram na URL do player: nada do que
+      // veio na query passa adiante sem ser conferido.
+      const q = new URLSearchParams(location.search);
+      const id = q.get("v") || "";
+      const inicio = Math.max(0, parseInt(q.get("t") || "0", 10) || 0);
+      if (/^[\w-]{11}$/.test(id)) {
+        const f = document.createElement("iframe");
+        f.src = "https://www.youtube-nocookie.com/embed/" + id + "?autoplay=1&rel=0&playsinline=1" + (inicio ? "&start=" + inicio : "");
+        f.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+        f.allowFullscreen = true;
+        f.referrerPolicy = "strict-origin-when-cross-origin";
+        document.body.append(f);
+      } else {
+        const p = document.createElement("p");
+        p.textContent = "Link de vídeo inválido.";
+        document.body.append(p);
+      }
+    </script>
+  </body>
+</html>

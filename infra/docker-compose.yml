@@ -28,6 +28,13 @@ services:
       # Bot DJ. Sem o segredo, `/tocar` volta a ser mensagem comum e o painel de
       # fila nao aparece — o mesmo acordo da busca de GIF.
       DJ_SECRET: ${DJ_SECRET:-}
+      # Chamadas privadas P2P (grupos e conversas a dois). A midia vai direto
+      # entre as pessoas; estes enderecos so ajudam a achar o caminho. Sem
+      # TURN_SECRET vai so o STUN, e quem esta atras de NAT dificil fica sem
+      # repasse. Veja o servico `coturn` abaixo.
+      STUN_URLS: ${STUN_URLS:-}
+      TURN_URLS: ${TURN_URLS:-}
+      TURN_SECRET: ${TURN_SECRET:-}
       DATA_DIR: /app/data
       UPLOAD_DIR: /app/uploads
       UPLOAD_FALLBACK_DIR: /app/uploads-fallback
@@ -57,6 +64,36 @@ services:
       DJ_BACKEND_URL: ${DJ_BACKEND_URL:-http://127.0.0.1:3040}
       DJ_SECRET: ${DJ_SECRET:-}
     depends_on: [livekit, app]
+
+  # Repasse das chamadas privadas, para quando as duas pontas nao conseguem se
+  # ver direto. So repassa pacote ja cifrado (DTLS-SRTP): nao ve nem ouve nada.
+  # A credencial e temporaria, emitida pelo `app` com o mesmo TURN_SECRET.
+  #
+  # Porta propria, fora da 3478 que o LiveKit ja usa. Precisa de
+  # encaminhamento, em UDP e TCP, da 3479 e da faixa de repasse.
+  coturn:
+    image: coturn/coturn:4.6
+    container_name: naoconcordo-coturn
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --listening-port=3479
+      - --min-port=49160
+      - --max-port=49200
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET}
+      - --realm=${TURN_REALM:-naoconcordo}
+      - --external-ip=${TURN_EXTERNAL_IP}
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      # Repasse so para fora: sem isto o TURN serviria de ponte para a rede de
+      # casa de quem hospeda.
+      - --no-multicast-peers
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --fingerprint
 
   caddy:
     image: ghcr.io/caddybuilds/caddy-cloudflare:latest

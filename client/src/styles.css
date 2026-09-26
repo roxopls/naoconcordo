@@ -754,10 +754,12 @@ input[type="range"]::-webkit-slider-thumb {
 .seletor-gif .grade button:hover { outline: 2px solid var(--accent); }
 .seletor-gif .aviso { padding: 20px 8px; color: #8b8b95; text-align: center; }
 
-.seletor-emoji { display: flex; flex-wrap: wrap; gap: 2px; max-width: 230px; max-height: 260px; overflow-y: auto; padding: 6px; scrollbar-color: #29292f transparent; }
+/* `flex-direction: row` explicito: o seletor tambem e `.user-menu`, que e coluna,
+   e sem isto os emotes saiam um embaixo do outro. */
+.seletor-emoji { display: flex; flex-direction: row; flex-wrap: wrap; align-content: flex-start; gap: 4px; max-width: 340px; max-height: 320px; overflow-y: auto; padding: 6px; scrollbar-color: #29292f transparent; }
 .seletor-emoji button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 7px; background: none; font-size: 16px; cursor: pointer; padding: 0; }
 .seletor-emoji button:hover { background: #2a2a31; }
-.seletor-emoji button:has(.emote-seletor) { width: 40px; height: 40px; }
+.seletor-emoji button:has(.emote-seletor) { width: 74px; height: 74px; }
 /* Separa os oito de sempre dos emotes desta casa. `flex-basis: 100%` e o que
    faz a linha ocupar a faixa inteira dentro do `flex-wrap`. */
 .seletor-risco { flex-basis: 100%; margin: 5px 2px; border: 0; border-top: 1px solid var(--line); }
@@ -766,12 +768,12 @@ input[type="range"]::-webkit-slider-thumb {
 /* No meio da frase: acompanha a linha do texto em vez de empurrar a altura
    dela. `vertical-align: -.25em` desce a imagem para a base das letras, onde o
    olho espera um simbolo. */
-.emote { height: 2.2em; width: auto; max-width: 210px; vertical-align: -.25em; object-fit: contain; }
+.emote { height: 3.75em; width: auto; max-width: 357px; vertical-align: -.25em; object-fit: contain; }
 /* Sozinho numa mensagem curta o emote merece tamanho de figurinha; no meio de
    um texto ele continua do tamanho da letra. */
-.message-body p > .emote:only-child { height: 4.8em; vertical-align: middle; }
-.emote-reacao { height: 1.65em; vertical-align: -.2em; }
-.emote-seletor { height: 33px; max-width: 33px; vertical-align: middle; }
+.message-body p > .emote:only-child { height: 8.15em; vertical-align: middle; }
+.emote-reacao { height: 2.8em; vertical-align: -.2em; }
+.emote-seletor { height: 66px; max-width: 66px; vertical-align: middle; }
 /* Lista de gerenciamento */
 .emotes-lista { display: flex; flex-wrap: wrap; gap: 8px; max-height: 260px; overflow-y: auto; padding: 4px 0; scrollbar-color: #29292f transparent; }
 .emote-item { position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; width: 86px; padding: 8px 4px; border: 1px solid var(--line); border-radius: 10px; background: #202025; }
@@ -866,6 +868,11 @@ input[type="range"]::-webkit-slider-thumb {
 .mention-box .mention-item { width: 100%; height: auto; display: flex; align-items: center; justify-content: flex-start; gap: 8px; padding: 5px 7px; border: 0; border-radius: 7px; background: none; color: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .mention-box .mention-item .avatar { width: 22px; height: 22px; font-size: 10px; }
 .mention-box .mention-item .emote-sugestao { height: 26px; width: 26px; max-width: 26px; vertical-align: middle; }
+/* Emotes lado a lado: a imagem e o que se procura, e em coluna cabiam poucos. */
+.mention-box.emotes-lado { display: flex; flex-wrap: wrap; gap: 4px; max-width: 460px; }
+.mention-box.emotes-lado .mention-item { width: 84px; flex-direction: column; justify-content: center; gap: 4px; padding: 6px 4px; }
+.mention-box.emotes-lado .emote-sugestao { height: 52px; width: 52px; max-width: 52px; }
+.mention-box.emotes-lado .mention-item span { max-width: 76px; font-size: 10px; color: var(--muted); }
 .mention-box .mention-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mention-box .mention-item:hover, .mention-box .mention-item.active { background: rgba(255,122,69,.16); }
 
@@ -1062,3 +1069,50 @@ body.com-barra .cameras-status { top: 32px; }
 .servidor-troca .small { margin: 0; min-height: 15px; }
 .servidor-troca .ok { color: var(--green, #54d18b); }
 .servidor-troca .ruim { color: #e55; }
+
+/* ---- grupos privados ---- */
+.grupo-icone { display: grid; place-items: center; background: #34343b; background-size: cover; background-position: center; color: #e6e6ea; font-size: 11px; font-weight: 700; }
+.grupo-textos { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+.grupo-nome { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grupo-textos small { color: var(--muted); font-size: 10px; }
+.grupo-criar-amigos { display: flex; flex-direction: column; gap: 2px; max-height: 280px; overflow-y: auto; scrollbar-color: #29292f transparent; }
+.grupo-escolha { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+.grupo-escolha:hover { background: #202025; }
+.grupo-escolha input { width: auto; margin: 0; accent-color: var(--accent); }
+.grupo-escolha .avatar { width: 26px; height: 26px; font-size: 11px; }
+.grupo-nome-linha input { flex: 1; min-width: 0; padding: 9px 12px; }
+
+/* ---- chamada privada (P2P) ---- */
+.chamada-privada { flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px; padding: 10px 0 12px; border-bottom: 1px solid var(--line); background: #0d0d10; }
+.chamada-palco.stage { height: 38vh; min-height: 160px; padding-top: 4px; }
+.chamada-palco .track-tile.tela { outline: 1px solid rgba(255,255,255,.12); }
+.chamada-controles { display: flex; justify-content: center; gap: 8px; }
+.chamada-controles .control { width: 46px; height: 46px; }
+.chamada-mini { margin: 8px; padding: 10px; display: flex; align-items: center; gap: 6px; border: 1px solid rgba(84,209,139,.3); border-radius: 10px; background: rgba(84,209,139,.07); }
+.chamada-mini-textos { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.2; }
+.chamada-mini-textos strong { color: var(--green); font-size: 11px; }
+.chamada-mini-textos span { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chamada-mini-textos small { color: var(--muted); font-size: 10px; }
+.chamada-mini .ghost-button { margin: 0; }
+.chamada-mini .perigo { color: #ff9b9e; }
+.chamada-toque { position: fixed; z-index: 150; top: 16px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid rgba(84,209,139,.4); border-radius: 14px; background: #17171b; box-shadow: 0 18px 40px rgba(0,0,0,.5); font-size: 13px; }
+.chamada-toque > .ic { color: var(--green); }
+.chamada-toque .ghost-button { margin: 0; }
+.em-chamada-marca { margin-left: auto; color: var(--green); font-size: 10px; font-weight: 600; }
+.p2p-estado { position: absolute; top: 8px; left: 8px; padding: 3px 8px; border-radius: 6px; background: rgba(0,0,0,.7); color: #ffcf8a; font-size: 11px; }
+
+/* Player do YouTube dentro do cartao: 16:9 na largura do cartao. */
+.cartao-capa.tocando { aspect-ratio: 16 / 9; height: auto; }
+/* Classe propria: `cartao-youtube` ja e o cartao inteiro (`cartao-<fonte>`), e
+   dar esse nome ao player esticava o cartao todo em altura e largura. */
+.cartao-player { width: 100%; height: 100%; border: 0; display: block; }
+/* Tocando, o cartao cresce para o video ficar legivel, e so ai. */
+.cartao-link:has(.cartao-capa.tocando) { width: min(640px, 100%); }
+.cartao-capa-vazia { aspect-ratio: 16 / 9; display: grid; place-items: center; background: #0b0b0e; }
+
+/* Conversas privadas e grupos por ler, na barra da esquerda. */
+.rail-privadas { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.rail-privadas:empty { display: none; }
+.rail-pessoa { background: transparent; padding: 0; }
+.rail-pessoa .avatar { width: 46px; height: 46px; border-radius: 50%; font-size: 15px; }
+.rail-pessoa .rail-badge { top: auto; bottom: -2px; right: -3px; border: 3px solid #0a0a0c; height: 22px; min-width: 22px; border-radius: 11px; }

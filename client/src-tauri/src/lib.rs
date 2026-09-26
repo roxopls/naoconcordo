@@ -55,6 +55,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(screen::ShareState::default())
+        .manage(screen::p2p::TelaP2pState::default())
         .invoke_handler(tauri::generate_handler![
             uso::uso_de_recursos,
             salvar::salvar_em_downloads,
@@ -68,6 +69,15 @@ pub fn run() {
             screen::screen_target_alive,
             screen::screen_share_stats,
             screen::screen_share_stop,
+            screen::p2p::tela_p2p_iniciar,
+            screen::p2p::tela_p2p_ofertar,
+            screen::p2p::tela_p2p_resposta,
+            screen::p2p::tela_p2p_candidato,
+            screen::p2p::tela_p2p_remover,
+            screen::p2p::tela_p2p_trocar,
+            screen::p2p::tela_p2p_pausar,
+            screen::p2p::tela_p2p_parar,
+            screen::p2p::tela_p2p_viva,
         ])
         // Fechar esconde em vez de encerrar: quem fecha a janela quase sempre
         // quer parar de ver, nao sair da chamada nem deixar de receber

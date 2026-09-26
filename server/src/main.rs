@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 mod dj;
 mod gifs;
+mod grupos;
+mod chamadas;
 mod miniatura;
 mod previa;
 mod registro;
@@ -102,6 +104,11 @@ struct AppState {
     emotes: Arc<RwLock<Vec<Emote>>>,
     friendships: Arc<RwLock<Vec<Friendship>>>,
     envelopes: Arc<RwLock<Vec<Envelope>>>,
+    /// Grupos privados e as mensagens cifradas deles (ver `grupos.rs`).
+    grupos: Arc<RwLock<Vec<grupos::GrupoPrivado>>>,
+    grupos_mensagens: Arc<RwLock<Vec<grupos::GrupoMensagem>>>,
+    /// Chamadas privadas em curso. So em memoria, como a lista de voz.
+    chamadas_privadas: Arc<RwLock<HashMap<String, Vec<chamadas::Participante>>>>,
     /// A fila do DJ por canal de voz, como o bot a descreveu por ultimo.
     ///
     /// So em memoria, e de proposito: fila de musica nao sobrevive a um restart
@@ -438,6 +445,19 @@ enum ServerEvent {
     /// duas listas, e mandar o estado inteiro de volta pelo `bootstrap` custa
     /// menos do que quatro eventos que precisam ser aplicados na ordem certa.
     CanaisOrganizados { server_id: String },
+    /// O grupo privado como esta pessoa o ve (com os embrulhos dela).
+    GrupoAtualizado { grupo: grupos::GrupoParaMim },
+    /// Esta pessoa saiu ou foi tirada do grupo.
+    GrupoRemovido { grupo_id: String },
+    GrupoMensagem { mensagem: grupos::GrupoMensagem },
+    GrupoMensagemEditada { mensagem: grupos::GrupoMensagem },
+    GrupoMensagemApagada { grupo_id: String, mensagem_id: Uuid },
+    /// Quem esta numa chamada privada agora (lista vazia = acabou).
+    ChamadaEstado { chamada: String, participantes: Vec<chamadas::Participante> },
+    /// Alguem abriu uma chamada privada: toca para os outros.
+    ChamadaTocando { chamada: String, de: String },
+    /// Sinalizacao WebRTC de um socket para outro. Opaco para o servidor.
+    Sinal { chamada: String, de: String, de_sessao: u64, dados: serde_json::Value },
     /// Emote criado ou apagado. Sem detalhe do que mudou, pelo mesmo motivo de
     /// `CanaisOrganizados`: o cliente rebusca o `bootstrap`, que ja traz a
     /// lista inteira, e ninguem precisa aplicar eventos na ordem certa.
@@ -464,18 +484,26 @@ enum ServerEvent {
 
 /// Evento mais a lista de quem pode receber. `audience: None` significa todos.
 #[derive(Clone)]
-struct Broadcast { audience: Option<Vec<String>>, event: ServerEvent }
+struct Broadcast {
+    audience: Option<Vec<String>>, event: ServerEvent,
+    /// So este socket da pessoa: sinal de chamada vai para a maquina que esta
+    /// na chamada, e nao para todas as que ela tem abertas.
+    socket: Option<u64>,
+}
 impl Broadcast {
-    fn all(event: ServerEvent) -> Self { Self { audience: None, event } }
+    fn all(event: ServerEvent) -> Self { Self { audience: None, event, socket: None } }
+    fn para_socket(user: &str, socket: u64, event: ServerEvent) -> Self {
+        Self { audience: Some(vec![profile_key(user)]), event, socket: Some(socket) }
+    }
     fn to(users: [&str; 2], event: ServerEvent) -> Self {
-        Self { audience: Some(users.iter().map(|u| profile_key(u)).collect()), event }
+        Self { audience: Some(users.iter().map(|u| profile_key(u)).collect()), event, socket: None }
     }
     fn to_many(users: Vec<String>, event: ServerEvent) -> Self {
-        Self { audience: Some(users.iter().map(|u| profile_key(u)).collect()), event }
+        Self { audience: Some(users.iter().map(|u| profile_key(u)).collect()), event, socket: None }
     }
     /// Evento de uma pessoa so: papel mudou, entrou ou saiu de um servidor.
     fn to_one(user: &str, event: ServerEvent) -> Self {
-        Self { audience: Some(vec![profile_key(user)]), event }
+        Self { audience: Some(vec![profile_key(user)]), event, socket: None }
     }
     fn allows(&self, username: &str) -> bool {
         match &self.audience { None => true, Some(list) => list.contains(&profile_key(username)) }
@@ -492,7 +520,12 @@ struct RecoverInput { username: String, nonce: String, recovery_proof: String, v
 #[derive(Deserialize)] struct EditMessageInput { text: String }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")] struct ClientMessage { #[serde(rename = "type")] kind: String, text: Option<String>, room_id: Option<String>, #[serde(default)] attachments: Vec<String>, #[serde(default)] reply_to: Option<Uuid>,
     // Usados por "react" e "pin": qual mensagem e qual emoji.
-    #[serde(default)] message_id: Option<Uuid>, #[serde(default)] emoji: Option<String> }
+    #[serde(default)] message_id: Option<Uuid>, #[serde(default)] emoji: Option<String>,
+    // Chamada privada (ver `chamadas.rs`): qual, para qual socket, o sinal
+    // opaco e o estado de midia de quem manda.
+    #[serde(default)] chamada: Option<String>, #[serde(default)] para: Option<u64>,
+    #[serde(default)] dados: Option<serde_json::Value>,
+    #[serde(default)] mudo: Option<bool>, #[serde(default)] camera: Option<bool>, #[serde(default)] tela: Option<bool> }
 
 /// Uma pessoa num canal de voz, e **por qual socket** ela se anunciou.
 ///
@@ -655,7 +688,11 @@ struct LivekitInput { room_id: String, #[serde(default)] viewer: bool, #[serde(d
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")] struct EditDirectInput { ciphertext: String, nonce: String }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")] struct DirectHistoryQuery { with: String }
 #[derive(Serialize)] struct ErrorBody { error: String }
-#[derive(Serialize)] #[serde(rename_all = "camelCase")] struct FriendsOutput { friends: Vec<String>, incoming: Vec<Friendship>, outgoing: Vec<Friendship> }
+#[derive(Serialize)] #[serde(rename_all = "camelCase")] struct FriendsOutput { friends: Vec<String>, incoming: Vec<Friendship>, outgoing: Vec<Friendship>,
+    /// Hora da ultima mensagem privada com cada amigo (chave em minusculas). So
+    /// metadado que o servidor ja guarda — remetente, destinatario e hora —,
+    /// nunca o conteudo. A lista chega ordenada por isso, mais recente primeiro.
+    atividade: HashMap<String, DateTime<Utc>> }
 #[derive(Serialize)] #[serde(rename_all = "camelCase")] struct DirectHistoryOutput { envelopes: Vec<Envelope> }
 #[derive(Serialize)] #[serde(rename_all = "camelCase")] struct SearchOutput { users: Vec<String> }
 #[derive(Serialize)] #[serde(rename_all = "camelCase")] struct MembersOutput { members: Vec<MemberEntry>, my_role: ServerRole }
@@ -694,7 +731,9 @@ struct ChallengeOutput {
 #[derive(Serialize)] struct SessionOutput { username: String }
 #[derive(Serialize)] struct HealthOutput { ok: bool, service: &'static str, time: DateTime<Utc> }
 #[derive(Serialize)] struct LivekitOutput { token: String, url: String, room: String }
-#[derive(Serialize)] struct WelcomeOutput { #[serde(rename = "type")] kind: &'static str, messages: Vec<ChatMessage> }
+#[derive(Serialize)] struct WelcomeOutput { #[serde(rename = "type")] kind: &'static str, messages: Vec<ChatMessage>,
+    /// Numero deste socket: e como os outros enderecam sinal de chamada para ca.
+    sessao: u64 }
 #[derive(Serialize)] #[serde(rename_all = "camelCase")] struct BootstrapOutput { servers: Vec<ServerInfo>, rooms: Vec<RoomInfo>, profiles: Vec<Profile>, is_owner: bool, is_admin: bool, roles: HashMap<String, ServerRole>, online: Vec<String>, voice: HashMap<String, Vec<String>>,
     categorias: Vec<Categoria>,
     /// O estado de cada pessoa que aparece em `online`. Campo novo: o cliente
@@ -760,6 +799,7 @@ async fn main() {
     let mut auth_key = [0_u8; 32];
     pbkdf2_hmac::<Sha256>(access_password.as_bytes(), config.auth_salt.as_bytes(), 150_000, &mut auth_key);
     let (events, _) = broadcast::channel(256);
+    let (grupos_carregados, mensagens_de_grupo) = grupos::carregar(&config.data_dir).await;
     let state = AppState {
         messages: Arc::new(RwLock::new(load_messages(&config.data_dir).await)),
         rooms: Arc::new(RwLock::new(load_rooms(&config.data_dir).await)),
@@ -780,6 +820,9 @@ async fn main() {
         emotes: Arc::new(RwLock::new(load_json(&config.data_dir, "emotes.json").await)),
         friendships: Arc::new(RwLock::new(load_json(&config.data_dir, "friends.json").await)),
         envelopes: Arc::new(RwLock::new(load_envelopes(&config.data_dir).await)),
+        grupos: Arc::new(RwLock::new(grupos_carregados)),
+        grupos_mensagens: Arc::new(RwLock::new(mensagens_de_grupo)),
+        chamadas_privadas: Default::default(),
         dj_estado: Default::default(),
         config, auth_key, sessions: Default::default(), challenges: Default::default(), events,
     };
@@ -860,6 +903,15 @@ async fn main() {
         .route("/api/friends/remove", post(friend_remove))
         .route("/api/dm", get(direct_history).post(send_direct))
         .route("/api/dm/{id}", put(edit_direct).delete(delete_direct))
+        .route("/api/grupos", get(grupos::listar).post(grupos::criar))
+        .route("/api/chamadas", get(chamadas::listar))
+        .route("/api/ice", get(chamadas::ice))
+        .route("/api/grupos/{id}", put(grupos::editar))
+        .route("/api/grupos/{id}/membros", post(grupos::adicionar))
+        .route("/api/grupos/{id}/membros/{pessoa}", axum::routing::delete(grupos::remover))
+        .route("/api/grupos/{id}/chave", post(grupos::rotacionar))
+        .route("/api/grupos/{id}/mensagens", get(grupos::historico).post(grupos::enviar))
+        .route("/api/grupos/{id}/mensagens/{mensagem_id}", put(grupos::editar_mensagem).delete(grupos::apagar_mensagem))
         .route("/ws", get(websocket))
         // O axum tem um teto proprio de 2 MB para o corpo, e o
         // `RequestBodyLimitLayer` **nao** o substitui: os dois valem, e o menor
@@ -2880,8 +2932,12 @@ async fn get_key(State(state): State<AppState>, headers: HeaderMap, axum::extrac
     let target = normalize_name(&username);
     // A chave so e visivel para o proprio dono ou para quem ja tem vinculo com ele,
     // aceito ou pendente. Isso evita virar diretorio publico de chaves.
+    // Dividir um grupo privado tambem conta: la dentro ha quem nao e amigo de
+    // todo mundo, e cada um precisa da chave dos outros para abrir a chave do
+    // grupo.
     let related = profile_key(&target) == profile_key(&session.username)
-        || state.friendships.read().await.iter().any(|f| pair_matches(f, &session.username, &target));
+        || state.friendships.read().await.iter().any(|f| pair_matches(f, &session.username, &target))
+        || grupos::compartilham(&state, &session.username, &target).await;
     if !related { return error(StatusCode::FORBIDDEN, "Voce nao tem vinculo com este usuario."); }
     match state.keys.read().await.get(&profile_key(&target)) {
         Some(key) => Json(key.clone()).into_response(),
@@ -2916,8 +2972,19 @@ async fn list_friends(State(state): State<AppState>, headers: HeaderMap) -> Resp
             FriendStatus::Pending => outgoing.push(item),
         }
     }
-    friends.sort_by_key(|name| name.to_lowercase());
-    Json(FriendsOutput { friends, incoming, outgoing }).into_response()
+    let mut atividade: HashMap<String, DateTime<Utc>> = HashMap::new();
+    for e in state.envelopes.read().await.iter() {
+        let outro = if profile_key(&e.from) == me { profile_key(&e.to) }
+            else if profile_key(&e.to) == me { profile_key(&e.from) } else { continue };
+        let hora = atividade.entry(outro).or_insert(e.created_at);
+        if e.created_at > *hora { *hora = e.created_at; }
+    }
+    // Quem conversou por ultimo em cima; quem nunca conversou, por nome.
+    friends.sort_by(|a, b| {
+        let (ha, hb) = (atividade.get(&profile_key(a)), atividade.get(&profile_key(b)));
+        hb.cmp(&ha).then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+    });
+    Json(FriendsOutput { friends, incoming, outgoing, atividade }).into_response()
 }
 async fn friend_request(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<UsernameInput>) -> Response {
     let Some((_, session)) = authenticated(&state, &headers).await else { return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."); };
@@ -3238,8 +3305,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session,
             .filter(|room| is_member(&memberships, &room.server_id, &session.username))
             .map(|room| room.id.clone()).collect()
     };
+    let socket_id = PROXIMO_SOCKET.fetch_add(1, Ordering::Relaxed);
     let welcome = WelcomeOutput {
-        kind: "welcome",
+        kind: "welcome", sessao: socket_id,
         messages: state.messages.read().await.iter()
             .filter(|message| visible_rooms.contains(&message.room_id)).cloned().collect(),
     };
@@ -3251,12 +3319,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session,
     // O numero acompanha a anotacao ate a lista de voz, que tambem passou a
     // guardar por socket — so a variavel local nao bastava, porque quem apagava
     // era a lista, e la a chave era o nome.
-    let socket_id = PROXIMO_SOCKET.fetch_add(1, Ordering::Relaxed);
     let mut sala_de_voz: Option<String> = None;
     loop { tokio::select! {
         incoming = socket.recv() => match incoming {
             Some(Ok(WsMessage::Text(text))) => {
                 let Ok(input) = serde_json::from_str::<ClientMessage>(&text) else { continue; };
+                if chamadas::tratar(&state, &session.username, socket_id, &input).await { continue; }
                 if input.kind == "voice" {
                     let pedida = input.room_id.unwrap_or_default();
                     // Sala vazia = saiu. Sala cheia so vale se for de voz e a
@@ -3431,6 +3499,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session,
         event = events.recv() => match event {
             // Eventos privados (amizade e mensagem direta) so chegam a quem esta na audiencia.
             Ok(broadcast) => if broadcast.allows(&session.username)
+                && broadcast.socket.is_none_or(|alvo| alvo == socket_id)
                 && socket.send(WsMessage::Text(serde_json::to_string(&broadcast.event).unwrap_or_default().into())).await.is_err() { break; },
             Err(broadcast::error::RecvError::Closed) => break,
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -3440,6 +3509,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session,
     // Fechou o app ou caiu: sai da chamada tambem, senao fica um fantasma na
     // lista do canal de voz ate o servidor reiniciar.
     set_voice(&state, &session.username, socket_id, &mut sala_de_voz, None).await;
+    chamadas::sair(&state, socket_id).await;
 
     // Saiu: o ultimo socket fechado marca offline.
     let ultimo_socket = {

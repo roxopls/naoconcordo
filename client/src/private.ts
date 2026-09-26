@@ -114,6 +114,46 @@ export async function openMessage(identity: Identity, friendPublicKey: string, f
   return decoder.decode(opened);
 }
 
+// ------------------------------------------------------------ grupos
+//
+// Num grupo a chave nao sai de um par: alguem sorteia 32 bytes e entrega a
+// cada membro embrulhados com `sealMessage` — o mesmo ECDH das conversas a
+// dois, entre quem embrulhou e quem recebe. Quem recebe desembrulha com
+// `openMessage` e a chave publica de quem embrulhou.
+
+/// Uma chave de grupo nova, em base64url.
+export function novaChaveDeGrupo() {
+  return toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+// Grupo, autor e epoca entram como dado autenticado: um envelope nao pode ser
+// levado para outro grupo, atribuido a outra pessoa nem trocado de epoca.
+function dadosDoGrupo(grupoId: string, from: string, epoca: number) {
+  return encoder.encode("grupo:" + grupoId + ":" + from.toLowerCase() + ":" + epoca);
+}
+async function importarChaveDeGrupo(chave: string) {
+  return crypto.subtle.importKey("raw", fromBase64Url(chave) as BufferSource, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+export async function selarNoGrupo(chave: string, grupoId: string, from: string, epoca: number, text: string) {
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: nonce, additionalData: dadosDoGrupo(grupoId, from, epoca) },
+    await importarChaveDeGrupo(chave),
+    encoder.encode(text),
+  );
+  return { ciphertext: toBase64Url(new Uint8Array(sealed)), nonce: toBase64Url(nonce) };
+}
+
+export async function abrirNoGrupo(chave: string, grupoId: string, from: string, epoca: number, ciphertext: string, nonce: string) {
+  const opened = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: fromBase64Url(nonce) as BufferSource, additionalData: dadosDoGrupo(grupoId, from, epoca) },
+    await importarChaveDeGrupo(chave),
+    fromBase64Url(ciphertext) as BufferSource,
+  );
+  return decoder.decode(opened);
+}
+
 /// Impressao digital curta da chave, para conferir por outro canal.
 export async function fingerprint(publicKey: string) {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", fromBase64Url(publicKey) as BufferSource));

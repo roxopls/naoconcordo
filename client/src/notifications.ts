@@ -103,6 +103,10 @@ export type MessageNotice = {
   /// A pessoa esta em "nao incomodar"? Quem decide e quem chama, porque o
   /// estado de presenca mora no `main.ts` — aqui so se obedece.
   naoPerturbe?: boolean;
+  /// Falado direto com a pessoa: mensagem privada, de grupo, ligacao. Isso
+  /// avisa mesmo em chamada — quem esta numa chamada de servidor e o caso mais
+  /// comum aqui, e a regra de canal deixava o privado mudo justamente ali.
+  direta?: boolean;
 };
 
 /// Notifica uma mensagem nova, respeitando as tres chaves.
@@ -113,7 +117,7 @@ export async function notifyMessage(notice: MessageNotice): Promise<boolean> {
   if (!desktopNotificationsOn()) return false;
   // Em chamada a pessoa ja esta no app; avisar de novo so atrapalha, a menos
   // que ela tenha pedido.
-  if (notice.inCall && !notificationsInCallOn()) return false;
+  if (notice.inCall && !notice.direta && !notificationsInCallOn()) return false;
 
   try {
     // A permissao pode ter sido revogada nas configuracoes do Windows depois

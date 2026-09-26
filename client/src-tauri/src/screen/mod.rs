@@ -4,6 +4,7 @@ pub mod audio;
 pub mod capture;
 pub mod dxgi;
 pub mod encoder;
+pub mod p2p;
 pub mod publisher;
 pub mod sources;
 pub mod thumbnail;

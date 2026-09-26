@@ -116,48 +116,8 @@ pub async fn start(
         .map_err(|e| format!("Nao foi possivel entrar na sala: {e}"))?;
     let room = Arc::new(room);
 
-    let resolucao = VideoResolution { width: quality.width, height: quality.height };
-    // Por que a GPU nao assumiu, para a interface poder dizer. Um `eprintln!`
-    // nao chega a lugar nenhum num build de release, que nao tem console — e
-    // foi exatamente por isso que a primeira falha em maquina alheia chegou
-    // aqui sem nenhuma informacao junto.
-    let mut motivo = String::new();
-
-    // Primeiro a GPU. `new_encoded` cria uma fonte que so aceita unidades ja
-    // comprimidas, e o codificador escreve direto nela; se nao houver hardware
-    // para o trabalho, a fonte comum volta e o libwebrtc comprime como antes.
-    let (source, encoder) = {
-        let candidata = NativeVideoSource::new_encoded(resolucao.clone());
-        match encoder::iniciar(
-            candidata.clone(),
-            quality.width,
-            quality.height,
-            quality.fps,
-            quality.bitrate,
-            preferencia,
-        ) {
-            Ok(hw) => {
-                eprintln!("[tela] codificando em {} ({})", hw.nome(), hw.codec().nome_livekit());
-                (candidata, Some(Arc::new(hw)))
-            }
-            Err(erro) => {
-                eprintln!("[tela] sem codificador de hardware ({erro}); usando software");
-                motivo = erro;
-                (NativeVideoSource::new(resolucao.clone(), true), None)
-            }
-        }
-    };
-
-    let destino = match &encoder {
-        Some(hw) => Destino::Hardware(hw.clone()),
-        None => Destino::Software(source.clone()),
-    };
-    let compressao = match &encoder {
-        Some(hw) => format!("{} ({})", hw.nome(), hw.codec().nome_livekit()),
-        None => format!("software: {motivo}"),
-    };
-    let (capture, motor) =
-        super::capture::start(target, destino.clone(), quality.fps, forcar_duplicacao, sem_barra)?;
+    let Pipeline { source, encoder, destino, capture, descricao } =
+        montar(target, quality, preferencia, forcar_duplicacao, sem_barra)?;
 
     let track = LocalVideoTrack::create_video_track("tela", RtcVideoSource::Native(source.clone()));
     let track_guardada = track.clone();
@@ -228,7 +188,71 @@ pub async fn start(
         sem_barra,
         paused: false,
     });
-    Ok(format!("captura {motor} | compressão {compressao}"))
+    Ok(descricao)
+}
+
+/// Captura, codificador e fonte de video montados, prontos para ir para uma
+/// faixa. Separado de `start` porque a tela P2P (`p2p.rs`) usa exatamente o
+/// mesmo caminho — so muda para onde a faixa vai depois.
+pub(super) struct Pipeline {
+    pub source: NativeVideoSource,
+    pub encoder: Option<Arc<EncoderHandle>>,
+    pub destino: Destino,
+    pub capture: CaptureHandle,
+    /// "captura X | compressão Y", para a interface contar o que aconteceu.
+    pub descricao: String,
+}
+
+pub(super) fn montar(
+    target: Target,
+    quality: Quality,
+    preferencia: encoder::Preferencia,
+    forcar_duplicacao: bool,
+    sem_barra: bool,
+) -> Result<Pipeline, String> {
+    let resolucao = VideoResolution { width: quality.width, height: quality.height };
+    // Por que a GPU nao assumiu, para a interface poder dizer. Um `eprintln!`
+    // nao chega a lugar nenhum num build de release, que nao tem console — e
+    // foi exatamente por isso que a primeira falha em maquina alheia chegou
+    // aqui sem nenhuma informacao junto.
+    let mut motivo = String::new();
+
+    // Primeiro a GPU. `new_encoded` cria uma fonte que so aceita unidades ja
+    // comprimidas, e o codificador escreve direto nela; se nao houver hardware
+    // para o trabalho, a fonte comum volta e o libwebrtc comprime como antes.
+    let (source, encoder) = {
+        let candidata = NativeVideoSource::new_encoded(resolucao.clone());
+        match encoder::iniciar(
+            candidata.clone(),
+            quality.width,
+            quality.height,
+            quality.fps,
+            quality.bitrate,
+            preferencia,
+        ) {
+            Ok(hw) => {
+                eprintln!("[tela] codificando em {} ({})", hw.nome(), hw.codec().nome_livekit());
+                (candidata, Some(Arc::new(hw)))
+            }
+            Err(erro) => {
+                eprintln!("[tela] sem codificador de hardware ({erro}); usando software");
+                motivo = erro;
+                (NativeVideoSource::new(resolucao.clone(), true), None)
+            }
+        }
+    };
+
+    let destino = match &encoder {
+        Some(hw) => Destino::Hardware(hw.clone()),
+        None => Destino::Software(source.clone()),
+    };
+    let compressao = match &encoder {
+        Some(hw) => format!("{} ({})", hw.nome(), hw.codec().nome_livekit()),
+        None => format!("software: {motivo}"),
+    };
+    let (capture, motor) =
+        super::capture::start(target, destino.clone(), quality.fps, forcar_duplicacao, sem_barra)?;
+    Ok(Pipeline { source, encoder, destino, capture, descricao: format!("captura {motor} | compressão {compressao}") })
 }
 
 /// Pausa ou retoma sem despublicar.
@@ -442,7 +466,7 @@ async fn publish_audio(
 }
 
 /// De onde tirar o som, conforme o que esta sendo compartilhado.
-fn audio_scope(target: Target) -> Option<audio::Scope> {
+pub(super) fn audio_scope(target: Target) -> Option<audio::Scope> {
     let scope = match target {
         // Janela: so o que aquele programa toca.
         Target::Window(handle) => {

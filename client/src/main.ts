@@ -12,6 +12,7 @@ import * as servidor from "./servidor";
 import {
   abrirCofre, chaveDoCofre, checkPin, dropPin, fecharCofre, fingerprint, guardarIdentidadeLocal,
   identidadeLocal, loadIdentity, openMessage, savePin, sealMessage,
+  abrirNoGrupo, novaChaveDeGrupo, selarNoGrupo,
   type Embrulho, type Identity,
 } from "./private";
 import { checkForUpdate, procurarAtualizacao, instalarAtualizacao, canalAtual, definirCanal, notasSalvas, limparNotas } from "./updates";
@@ -29,6 +30,7 @@ import {
 } from "./notifications";
 import { atualizarSelo } from "./selo";
 import { grade } from "./gridlayout";
+import { chamadaDoPar, criarChamadaPrivada } from "./chamada";
 
 // Escolhido em tempo de execucao (veja `servidor.ts`), e nao mais fixado no
 // build. Lido uma vez: trocar de servidor recarrega a janela, porque sessao,
@@ -51,7 +53,7 @@ type Emote = { id: string; serverId: string; name: string; fileId: string; creat
 type Bootstrap = { servers: ServerInfo[]; rooms: RoomInfo[]; profiles: Profile[]; isOwner: boolean; isAdmin: boolean; roles: Record<string, ServerRole>; online: string[]; voice?: Record<string, string[]>; categorias?: Categoria[]; estados?: Record<string, string>; emotes?: Emote[]; gifs?: boolean; dj?: boolean };
 type LivekitAccess = { token: string; url: string; room: string };
 type Friendship = { requester: string; addressee: string; status: "pending" | "accepted" };
-type FriendsData = { friends: string[]; incoming: Friendship[]; outgoing: Friendship[] };
+type FriendsData = { friends: string[]; incoming: Friendship[]; outgoing: Friendship[]; atividade?: Record<string, string> };
 type IdentityKey = { username: string; publicKey: string };
 type Envelope = { id: string; from: string; to: string; ciphertext: string; nonce: string; createdAt: string; editedAt?: string | null; attachments?: StoredFile[]; replyTo?: string | null };
 type DirectMessage = { id: string; from: string; to: string; text: string; createdAt: string; editedAt?: string | null; attachments?: StoredFile[]; replyTo?: string | null };
@@ -321,15 +323,45 @@ const dmInput = byId<HTMLTextAreaElement>("dm-input"), friendListEl = byId<HTMLD
 const friendsDialog = byId<HTMLDialogElement>("friends-dialog"), identityDialog = byId<HTMLDialogElement>("identity-dialog");
 const keyChangeDialog = byId<HTMLDialogElement>("key-change-dialog");
 const key = (value: string) => value.toLowerCase();
+// Estado dos grupos privados aqui em cima, junto do da conversa privada: as
+// funcoes de navegacao leem isto desde o comeco. O resto mora em "grupos
+// privados", mais abaixo.
+let grupos: GrupoPrivado[] = [];
+let grupoAberto = "";
+/// grupo -> epoca -> chave aberta. So em memoria: sai da sessao, sai daqui.
+const chavesDeGrupo = new Map<string, Map<number, string>>();
+const naoLidosGrupo = new Set<string>();
+/// Quantas mensagens nao lidas em cada conversa privada e grupo. A ordem do
+/// mapa e a da ultima mensagem (quem escreve sai e volta no fim), e e ela que a
+/// barra da esquerda segue para pôr quem escreveu por ultimo em cima.
+const quantasDoAmigo = new Map<string, number>();
+const quantasDoGrupo = new Map<string, number>();
+function contarNaoLida(mapa: Map<string, number>, chave: string) {
+  const antes = mapa.get(chave) || 0;
+  mapa.delete(chave);
+  mapa.set(chave, antes + 1);
+}
+const conversaDoGrupo = (id: string) => "grupo:" + id;
+/// Numero deste socket no servidor, entregue no `welcome`. Enderecamento da
+/// sinalizacao da chamada privada.
+let minhaSessao = 0;
+let chamadaPrivada: ReturnType<typeof criarChamadaPrivada> | null = null;
+/// A chave do `directHistory` da conversa aberta, seja amigo ou grupo.
+const conversaAberta = () => grupoAberto ? conversaDoGrupo(grupoAberto) : key(currentFriend);
+const grupoAtual = () => grupos.find(item => item.id === grupoAberto);
 
 function draftConversation() {
+  if (mode === "dm" && grupoAberto) return "grupo:" + grupoAberto;
   if (mode === "dm" && currentFriend) return "dm:" + key(currentFriend);
   if (view === "server" && currentRoomId) return "room:" + currentRoomId;
   return "";
 }
 function persistNavigation() {
   if (!session) return;
-  saveNavigation(session.username, { view, serverId: currentServerId, roomId: currentRoomId, friend: mode === "dm" ? currentFriend : "" });
+  saveNavigation(session.username, {
+    view, serverId: currentServerId, roomId: currentRoomId,
+    friend: mode === "dm" ? currentFriend : "", grupo: mode === "dm" ? grupoAberto : "",
+  });
 }
 function restoreComposerDraft() {
   // A citacao pertence a conversa onde ela foi escolhida: trocar de canal ou de
@@ -665,18 +697,25 @@ async function enterApp() {
   paintMyAvatars(session.username);
   view = servers.length && currentServerId ? view : "home";
   const restoredFriend = restored?.friend || "";
-  mode = "room"; currentFriend = ""; setMode();
+  const restoredGrupo = restored?.grupo || "";
+  mode = "room"; currentFriend = ""; grupoAberto = ""; setMode();
   // Sem isso o rotulo fica em "conectando…" para sempre, porque desde que a
   // chamada deixou de ser automatica nada mais chamava setStatus na entrada.
   setStatus("fora da chamada", false);
   renderNavigation(); renderMessages(); connectChat(); await ensureIdentity(); await refreshFriends(); await refreshServerInvites(); await loadServerMembers();
+  await carregarGrupos();
+  void chamadaPrivada?.carregar();
   if (restoredFriend && friends.some(friend => key(friend) === key(restoredFriend))) await openDirect(restoredFriend);
+  else if (restoredGrupo && grupos.some(grupo => grupo.id === restoredGrupo)) await abrirGrupo(restoredGrupo);
   else { persistNavigation(); restoreComposerDraft(); }
 }
 function leaveApp() {
+  void chamadaPrivada?.sair();
   chat?.close(); chat = null; room?.disconnect(); room = null; restaurarControles(); stage.replaceChildren(); saveSession(null);
   friends = []; incoming = []; outgoing = []; friendKeys.clear(); directHistory.clear();
   blockedFriends.clear(); unreadFriends.clear(); identity = null; mode = "room"; currentFriend = "";
+  grupos = []; grupoAberto = ""; chavesDeGrupo.clear(); naoLidosGrupo.clear();
+  quantasDoAmigo.clear(); quantasDoGrupo.clear();
   // As chaves do cofre morrem com a sessao: sem isto a proxima pessoa a entrar
   // neste computador abriria o cofre da anterior.
   chaveDeSenha = null; chaveDeRecuperacao = null;
@@ -816,7 +855,12 @@ function renderNavigation() {
   alvoSemCategoria(byId("voice-list"), "voice");
   desenharCategorias(mine);
   const selected = rooms.find(item => item.id === currentRoomId);
-  if (mode === "dm") {
+  const grupoNaTela = mode === "dm" ? grupoAtual() : undefined;
+  if (grupoNaTela) {
+    byId("room-title").textContent = nomeDoGrupo(grupoNaTela);
+    byId("room-subtitle").textContent = "Grupo cifrado · " + grupoNaTela.membros.length + " membros";
+    dmInput.placeholder = "Mensagem para " + nomeDoGrupo(grupoNaTela);
+  } else if (mode === "dm") {
     byId("room-title").textContent = "@ " + currentFriend;
     byId("room-subtitle").textContent = "Conversa privada cifrada";
     dmInput.placeholder = "Mensagem privada para " + currentFriend;
@@ -851,7 +895,7 @@ async function selectServer(id: string) {
   const first = rooms.find(item => item.serverId === id && item.kind === "text");
   currentRoomId = first?.id || "";
   view = servers.length && currentServerId ? view : "home";
-  mode = "room"; currentFriend = ""; setMode(); renderFriends();
+  mode = "room"; currentFriend = ""; grupoAberto = ""; setMode(); renderFriends();
   persistNavigation(); restoreComposerDraft(); renderNavigation(); renderMessages();
   // Desenha ja com a lista vazia: mostrar por um instante a gente do servidor
   // anterior e pior do que mostrar o painel enchendo.
@@ -889,8 +933,8 @@ function goHome() {
   olhandoAChamada = false;
   view = "home";
   serverMembers = []; serverMemberProfiles.clear();
-  mode = currentFriend ? "dm" : "room";
-  if (!currentFriend) { currentRoomId = ""; }
+  mode = currentFriend || grupoAberto ? "dm" : "room";
+  if (!currentFriend && !grupoAberto) { currentRoomId = ""; }
   setMode(); renderFriends(); persistNavigation(); restoreComposerDraft(); renderNavigation(); void loadServerMembers();
   renderMessages();
 }
@@ -903,7 +947,7 @@ byId("add-server").addEventListener("click", () => void createServer());
 async function selectRoom(id: string) {
   olhandoAChamada = false;
   view = servers.length && currentServerId ? view : "home";
-  mode = "room"; currentFriend = ""; setMode(); renderFriends();
+  mode = "room"; currentFriend = ""; grupoAberto = ""; setMode(); renderFriends();
   currentRoomId = id; clearUnread(id); persistNavigation(); restoreComposerDraft();
   // Canal novo, janela nova: entrar num canal mostra o fim da conversa.
   janelaDeMensagens = BLOCO_DE_MENSAGENS;
@@ -1042,6 +1086,7 @@ function fecharPalco() {
 }
 
 async function toggleVoice(id: string) {
+  if (chamadaPrivada?.ativa) await chamadaPrivada.sair();
   const mesmoCanal = voiceRoomId === id && (room?.state === "connected" || room?.state === "connecting");
   await sairDaChamada();
   if (mesmoCanal) return;
@@ -1172,9 +1217,27 @@ async function refreshFriends() {
   try {
     const data = await api<FriendsData>("/api/friends");
     friends = data.friends; incoming = data.incoming; outgoing = data.outgoing;
+    atividadeDoAmigo.clear();
+    for (const [nome, hora] of Object.entries(data.atividade || {})) atividadeDoAmigo.set(nome, Date.parse(hora) || 0);
+    ordenarAmigos();
     renderFriends(); renderFriendDialog(); renderPeople();
     if (view === "home" && mode === "room") renderMessages();
   } catch { /* sessao caiu; o resto do app ja trata */ }
+}
+/// Hora da ultima mensagem com cada amigo (chave em minusculas), para a lista
+/// ficar na ordem de conversa, como no Discord.
+const atividadeDoAmigo = new Map<string, number>();
+function ordenarAmigos() {
+  friends.sort((a, b) =>
+    (atividadeDoAmigo.get(key(b)) || 0) - (atividadeDoAmigo.get(key(a)) || 0)
+    || a.toLowerCase().localeCompare(b.toLowerCase()));
+}
+/// Mensagem trocada agora com este amigo: sobe para o topo.
+function amigoConversou(nome: string, quando = Date.now()) {
+  if ((atividadeDoAmigo.get(key(nome)) || 0) >= quando) return;
+  atividadeDoAmigo.set(key(nome), quando);
+  ordenarAmigos();
+  renderFriends();
 }
 function renderFriends() {
   friendListEl.replaceChildren(...friends.map(name => {
@@ -1187,10 +1250,13 @@ function renderFriends() {
     foto.className = "avatar avatar-canal";
     paintAvatar(foto, name);
     button.append(foto, document.createTextNode(getDisplayName(name)));
+    const naChamada = session ? chamadaPrivada?.quantos(chamadaDoPar(session.username, name)) || 0 : 0;
+    if (naChamada) { const marca = document.createElement("span"); marca.className = "em-chamada-marca"; marca.textContent = "● " + naChamada; marca.title = "Chamada em andamento"; button.append(marca); }
     if (unreadFriends.has(key(name))) { const dot = document.createElement("span"); dot.className = "unread-dot"; button.append(dot); }
     button.onclick = () => openDirect(name);
     return button;
   }));
+  renderGrupos();
   const pending = incoming.length;
   byId("add-friend").textContent = pending ? String(pending) : "+";
   byId("add-friend").classList.toggle("has-pending", pending > 0);
@@ -1308,7 +1374,7 @@ function promptKeyChange(name: string, oldKey: string, newKey: string) {
 }
 async function openDirect(name: string) {
   if (!session) return;
-  view = "home"; mode = "dm"; currentFriend = name; unreadFriends.delete(key(name)); updateUnreadTitle();
+  view = "home"; mode = "dm"; currentFriend = name; grupoAberto = ""; unreadFriends.delete(key(name)); quantasDoAmigo.delete(key(name)); updateUnreadTitle();
   setMode(); persistNavigation(); restoreComposerDraft(); renderFriends(); renderNavigation();
   dmMessagesEl.replaceChildren(loadingLine("Abrindo…"));
   try {
@@ -1337,16 +1403,19 @@ async function decryptEnvelope(envelope: Envelope, publicKey: string) {
 }
 function loadingLine(text: string) { const p = document.createElement("p"); p.className = "muted dm-note"; p.textContent = text; return p; }
 function renderDirect() {
-  const list = directHistory.get(key(currentFriend)) || [];
+  const list = directHistory.get(conversaAberta()) || [];
   dmMessagesEl.replaceChildren(privacyNote());
   for (const item of list) appendDirect(item);
   dmMessagesEl.scrollTop = dmMessagesEl.scrollHeight;
 }
 function privacyNote() {
   const box = document.createElement("div"); box.className = "welcome";
-  const title = document.createElement("h2"); title.textContent = "@" + currentFriend;
+  const grupo = grupoAtual();
+  const title = document.createElement("h2"); title.textContent = grupo ? nomeDoGrupo(grupo) : "@" + currentFriend;
   const text = document.createElement("p");
-  text.textContent = "Conversa cifrada de ponta a ponta.";
+  text.textContent = grupo
+    ? "Grupo cifrado de ponta a ponta: " + grupo.membros.map(getDisplayName).join(", ") + "."
+    : "Conversa cifrada de ponta a ponta.";
   box.append(title, text); return box;
 }
 function appendDirect(message: DirectMessage) {
@@ -1386,8 +1455,12 @@ function openDirectEditor(message: DirectMessage) {
   window.setTimeout(() => byId<HTMLTextAreaElement>("message-edit-text").focus(), 0);
 }
 async function removeDirectMessage(message: DirectMessage) {
-  if (!await confirmAction("Apagar mensagem", "Apagar esta mensagem privada?", "Ela some para os dois e não pode ser recuperada.", "Apagar")) return;
-  try { await api<void>("/api/dm/" + encodeURIComponent(message.id), { method: "DELETE" }); }
+  const grupo = grupoAtual();
+  if (!await confirmAction("Apagar mensagem", grupo ? "Apagar esta mensagem do grupo?" : "Apagar esta mensagem privada?", grupo ? "Ela some para todo o grupo e não pode ser recuperada." : "Ela some para os dois e não pode ser recuperada.", "Apagar")) return;
+  const caminho = grupo
+    ? "/api/grupos/" + encodeURIComponent(grupo.id) + "/mensagens/" + encodeURIComponent(message.id)
+    : "/api/dm/" + encodeURIComponent(message.id);
+  try { await api<void>(caminho, { method: "DELETE" }); }
   catch (error) { showToast(error instanceof Error ? error.message : "Não foi possível apagar."); }
 }
 /// Aplica um envelope que voltou editado ou apagado na conversa aberta.
@@ -1397,7 +1470,7 @@ function forgetDirect(id: string) {
     if (index < 0) continue;
     list.splice(index, 1);
     directHistory.set(friend, list);
-    if (mode === "dm" && key(friend) === key(currentFriend)) renderDirect();
+    if (mode === "dm" && friend === conversaAberta()) renderDirect();
     return;
   }
 }
@@ -1417,7 +1490,15 @@ async function applyDirectUpdate(envelope: Envelope) {
 dmForm.addEventListener("submit", async event => {
   event.preventDefault();
   const text = dmInput.value.trim();
-  if ((!text && !pendingFiles.length) || !session || !identity || !currentFriend) return;
+  if ((!text && !pendingFiles.length) || !session || !identity) return;
+  if (grupoAberto) {
+    try {
+      await enviarNoGrupo(text);
+      dmInput.value = ""; persistComposerDraft("", true); pendingFiles = []; renderAttachPreview(); cancelarResposta(); resizeDmComposer();
+    } catch (error) { showToast(error instanceof Error ? error.message : "Não foi possível enviar."); }
+    return;
+  }
+  if (!currentFriend) return;
   const publicKey = friendKeys.get(key(currentFriend));
   if (!publicKey) { showToast("Confirme a identidade dele antes de conversar."); return; }
   try {
@@ -1437,13 +1518,16 @@ function recordDirect(friend: string, message: DirectMessage) {
   const list = directHistory.get(key(friend)) || [];
   if (list.some(item => item.id === message.id)) return;
   list.push(message); directHistory.set(key(friend), list);
+  amigoConversou(friend, Date.parse(message.createdAt) || Date.now());
   const fromMe = key(message.from) === key(session?.username || "");
   const openHere = mode === "dm" && key(friend) === key(currentFriend);
   const looking = openHere && document.hasFocus();
   if (openHere) { appendDirect(message); dmMessagesEl.scrollTop = dmMessagesEl.scrollHeight; }
   if (!fromMe && !looking) {
-    unreadFriends.add(key(friend)); renderFriends(); updateUnreadTitle(); playPing();
-    const mostrou = notifyMessage({ title: friend, body: message.text, privateBody: "Nova mensagem privada", inCall: inCall(), naoPerturbe: emNaoPerturbe() });
+    unreadFriends.add(key(friend));
+    contarNaoLida(quantasDoAmigo, key(friend));
+    renderFriends(); updateUnreadTitle(); playPing();
+    const mostrou = notifyMessage({ title: getDisplayName(friend), body: message.text, privateBody: "Nova mensagem privada", inCall: inCall(), naoPerturbe: emNaoPerturbe(), direta: true });
     void avisarOrigem(mostrou, "Mensagem privada de " + getDisplayName(friend), () => void openDirect(friend));
   }
 }
@@ -1456,6 +1540,500 @@ async function handleIncomingEnvelope(envelope: Envelope) {
   if (!publicKey) return;
   recordDirect(friend, await toDirect(envelope, publicKey));
 }
+// ------------------------------------------------------------ grupos privados
+//
+// Conversa de ate dez pessoas fora de servidor, cifrada como as privadas. A
+// tela e a mesma da conversa privada: `mode === "dm"` com `grupoAberto` no
+// lugar de `currentFriend`, e o historico no mesmo `directHistory`, sob a chave
+// `grupo:<id>`. Assim resposta, anexo, edicao e o resto valem para os dois.
+//
+// A chave do grupo nao sai de um par: alguem sorteia e embrulha para cada
+// membro (ver `private.ts` e `grupos.rs` no servidor).
+type ChaveEmbrulhada = { de: string; ciphertext: string; nonce: string };
+type GrupoPrivado = {
+  id: string; nome?: string | null; iconFile?: string | null; dono: string; membros: string[];
+  createdAt: string; epoca: number; rotacaoPendente: boolean; chaves: Record<string, ChaveEmbrulhada>;
+};
+type GrupoMensagem = {
+  id: string; grupoId: string; from: string; epoca: number; ciphertext: string; nonce: string;
+  createdAt: string; editedAt?: string | null; attachments?: StoredFile[]; replyTo?: string | null;
+};
+
+/// Sem nome, o grupo se chama pelos outros membros, como no Discord.
+function nomeDoGrupo(grupo: GrupoPrivado) {
+  if (grupo.nome) return grupo.nome;
+  const outros = grupo.membros.filter(membro => key(membro) !== key(session?.username || ""));
+  return outros.map(getDisplayName).join(", ") || "Grupo";
+}
+
+async function chavePublicaDe(nome: string): Promise<string | null> {
+  if (!session || !identity) return null;
+  if (key(nome) === key(session.username)) return identity.publicKey;
+  return resolveFriendKey(nome);
+}
+
+/// Abre os embrulhos que ainda nao foram abertos. Um que nao abre (chave de
+/// quem embrulhou recusada, por exemplo) fica de fora e as mensagens daquela
+/// epoca aparecem como indecifraveis, sem derrubar o resto.
+async function chavesDo(grupo: GrupoPrivado): Promise<Map<number, string>> {
+  const mapa = chavesDeGrupo.get(grupo.id) || new Map<number, string>();
+  if (!session || !identity) return mapa;
+  for (const [texto, embrulho] of Object.entries(grupo.chaves || {})) {
+    const epoca = Number(texto);
+    if (mapa.has(epoca)) continue;
+    const publica = await chavePublicaDe(embrulho.de).catch(() => null);
+    if (!publica) continue;
+    try { mapa.set(epoca, await openMessage(identity, publica, embrulho.de, session.username, embrulho.ciphertext, embrulho.nonce)); }
+    catch { /* embrulho que nao abre: epoca ilegivel */ }
+  }
+  chavesDeGrupo.set(grupo.id, mapa);
+  return mapa;
+}
+
+/// Embrulha uma chave para cada pessoa da lista. Falta de chave publica de
+/// alguem para tudo: grupo com um membro sem embrulho deixaria ele de fora.
+async function embrulharPara(pessoas: string[], chave: string): Promise<Record<string, ChaveEmbrulhada>> {
+  if (!session || !identity) throw new Error("Identidade local indisponível.");
+  const saida: Record<string, ChaveEmbrulhada> = {};
+  for (const pessoa of pessoas) {
+    const publica = await chavePublicaDe(pessoa);
+    if (!publica) throw new Error("Falta confirmar a identidade de " + getDisplayName(pessoa) + ".");
+    const selado = await sealMessage(identity, publica, session.username, pessoa, chave);
+    saida[pessoa] = { de: session.username, ...selado };
+  }
+  return saida;
+}
+
+function guardarGrupo(grupo: GrupoPrivado) {
+  const indice = grupos.findIndex(item => item.id === grupo.id);
+  if (indice >= 0) grupos[indice] = grupo; else grupos.push(grupo);
+  renderFriends();
+  if (grupoAberto === grupo.id) {
+    renderNavigation();
+    if (byId<HTMLDialogElement>("grupo-dialog").open) renderGrupoDialog();
+  }
+  void trocarChaveSeFaltar(grupo);
+}
+
+/// Alguem saiu: o primeiro membro que perceber sorteia a chave seguinte. Todos
+/// os que estao online tentam; o servidor aceita um so e os outros levam 409.
+/// A espera aleatoria so diminui o numero de tentativas perdidas.
+const trocandoChave = new Set<string>();
+async function trocarChaveSeFaltar(grupo: GrupoPrivado) {
+  if (!grupo.rotacaoPendente || trocandoChave.has(grupo.id)) return;
+  trocandoChave.add(grupo.id);
+  try {
+    await new Promise(resolve => window.setTimeout(resolve, Math.random() * 1200));
+    const atual = grupos.find(item => item.id === grupo.id);
+    if (!atual?.rotacaoPendente) return;
+    const chave = novaChaveDeGrupo();
+    const chaves = await embrulharPara(atual.membros, chave);
+    const novo = await api<GrupoPrivado>("/api/grupos/" + encodeURIComponent(atual.id) + "/chave", {
+      method: "POST", body: JSON.stringify({ epoca: atual.epoca + 1, chaves }),
+    });
+    const mapa = chavesDeGrupo.get(atual.id) || new Map<number, string>();
+    mapa.set(novo.epoca, chave);
+    chavesDeGrupo.set(atual.id, mapa);
+    const indice = grupos.findIndex(item => item.id === novo.id);
+    if (indice >= 0) grupos[indice] = novo;
+  } catch (erro) {
+    // 409 aqui e o normal: outro membro trocou primeiro.
+    console.info("[grupo] troca de chave", erro);
+  } finally {
+    trocandoChave.delete(grupo.id);
+  }
+}
+
+async function carregarGrupos() {
+  try {
+    grupos = await api<GrupoPrivado[]>("/api/grupos");
+    renderFriends();
+    for (const grupo of grupos) void trocarChaveSeFaltar(grupo);
+  } catch (erro) { console.warn("[grupos] carregar", erro); }
+}
+
+async function paraMensagemDoGrupo(mensagem: GrupoMensagem): Promise<DirectMessage> {
+  const grupo = grupos.find(item => item.id === mensagem.grupoId);
+  let chave = chavesDeGrupo.get(mensagem.grupoId)?.get(mensagem.epoca);
+  if (!chave && grupo) chave = (await chavesDo(grupo)).get(mensagem.epoca);
+  let text = "(não foi possível decifrar)";
+  if (chave) {
+    try { text = await abrirNoGrupo(chave, mensagem.grupoId, mensagem.from, mensagem.epoca, mensagem.ciphertext, mensagem.nonce); }
+    catch { /* fica o aviso */ }
+  }
+  return {
+    id: mensagem.id, from: mensagem.from, to: mensagem.grupoId, text, createdAt: mensagem.createdAt,
+    editedAt: mensagem.editedAt, attachments: mensagem.attachments || [], replyTo: mensagem.replyTo || null,
+  };
+}
+
+async function abrirGrupo(id: string) {
+  const grupo = grupos.find(item => item.id === id);
+  if (!session || !grupo) return;
+  view = "home"; mode = "dm"; currentFriend = ""; grupoAberto = id;
+  naoLidosGrupo.delete(id); quantasDoGrupo.delete(id); updateUnreadTitle();
+  setMode(); persistNavigation(); restoreComposerDraft(); renderFriends(); renderNavigation();
+  dmMessagesEl.replaceChildren(loadingLine("Abrindo…"));
+  try {
+    await chavesDo(grupo);
+    void trocarChaveSeFaltar(grupo);
+    const lista = await api<GrupoMensagem[]>("/api/grupos/" + encodeURIComponent(id) + "/mensagens");
+    const abertas: DirectMessage[] = [];
+    for (const mensagem of lista) abertas.push(await paraMensagemDoGrupo(mensagem));
+    if (grupoAberto !== id) return;
+    directHistory.set(conversaDoGrupo(id), abertas);
+    renderDirect();
+  } catch (erro) {
+    dmMessagesEl.replaceChildren(loadingLine(erro instanceof Error ? erro.message : "Não foi possível abrir o grupo."));
+  }
+}
+
+/// A chave da epoca atual, trocando antes se alguem saiu.
+async function chaveParaEscrever(grupo: GrupoPrivado): Promise<{ chave: string; epoca: number } | null> {
+  if (grupo.rotacaoPendente) {
+    await trocarChaveSeFaltar(grupo);
+    try { grupos = await api<GrupoPrivado[]>("/api/grupos"); } catch { /* segue com o que tem */ }
+  }
+  const atual = grupos.find(item => item.id === grupo.id);
+  if (!atual || atual.rotacaoPendente) return null;
+  const chave = (await chavesDo(atual)).get(atual.epoca);
+  return chave ? { chave, epoca: atual.epoca } : null;
+}
+
+async function enviarNoGrupo(text: string) {
+  const grupo = grupoAtual();
+  if (!grupo || !session) return;
+  for (let tentativa = 0; tentativa < 2; tentativa += 1) {
+    const atual = grupos.find(item => item.id === grupo.id) || grupo;
+    const escrita = await chaveParaEscrever(atual);
+    if (!escrita) throw new Error("A chave do grupo ainda não chegou. Tente de novo em instantes.");
+    const selado = await selarNoGrupo(escrita.chave, grupo.id, session.username, escrita.epoca, text);
+    try {
+      const guardada = await api<GrupoMensagem>("/api/grupos/" + encodeURIComponent(grupo.id) + "/mensagens", {
+        method: "POST",
+        body: JSON.stringify({ epoca: escrita.epoca, ...selado, attachments: pendingFiles.map(file => file.id), replyTo: respondendoA?.id || null }),
+      });
+      registrarNoGrupo(guardada.grupoId, {
+        id: guardada.id, from: guardada.from, to: guardada.grupoId, text, createdAt: guardada.createdAt,
+        attachments: guardada.attachments || [], replyTo: guardada.replyTo || null,
+      });
+      return;
+    } catch (erro) {
+      // 409: a chave trocou no meio do caminho. Recarrega e cifra de novo.
+      if (tentativa === 0 && erro instanceof Error && /chave/i.test(erro.message)) {
+        grupos = await api<GrupoPrivado[]>("/api/grupos");
+        continue;
+      }
+      throw erro;
+    }
+  }
+}
+
+/// Guarda a mensagem uma vez so: ela chega pelo POST e de novo pelo WebSocket.
+function registrarNoGrupo(grupoId: string, message: DirectMessage) {
+  const lista = directHistory.get(conversaDoGrupo(grupoId));
+  // Grupo nunca aberto nesta sessao: o historico vem inteiro quando abrir.
+  if (lista) {
+    if (lista.some(item => item.id === message.id)) return;
+    lista.push(message);
+  }
+  const deMim = key(message.from) === key(session?.username || "");
+  const aberto = mode === "dm" && grupoAberto === grupoId;
+  const olhando = aberto && document.hasFocus();
+  if (aberto && lista) { appendDirect(message); dmMessagesEl.scrollTop = dmMessagesEl.scrollHeight; }
+  if (!deMim && !olhando) {
+    naoLidosGrupo.add(grupoId);
+    contarNaoLida(quantasDoGrupo, grupoId);
+    renderFriends(); updateUnreadTitle(); playPing();
+    const grupo = grupos.find(item => item.id === grupoId);
+    const titulo = grupo ? nomeDoGrupo(grupo) : "Grupo";
+    const mostrou = notifyMessage({ title: titulo, body: getDisplayName(message.from) + ": " + message.text, privateBody: "Nova mensagem de " + getDisplayName(message.from), inCall: inCall(), naoPerturbe: emNaoPerturbe(), direta: true });
+    void avisarOrigem(mostrou, "Mensagem em " + titulo, () => void abrirGrupo(grupoId));
+  }
+}
+
+async function receberDoGrupo(mensagem: GrupoMensagem) {
+  if (!grupos.some(item => item.id === mensagem.grupoId)) return;
+  registrarNoGrupo(mensagem.grupoId, await paraMensagemDoGrupo(mensagem));
+}
+
+async function editadaNoGrupo(mensagem: GrupoMensagem) {
+  const lista = directHistory.get(conversaDoGrupo(mensagem.grupoId));
+  if (!lista) return;
+  const indice = lista.findIndex(item => item.id === mensagem.id);
+  if (indice < 0) return;
+  lista[indice] = await paraMensagemDoGrupo(mensagem);
+  if (mode === "dm" && grupoAberto === mensagem.grupoId) renderDirect();
+}
+
+function saiDoGrupo(grupoId: string) {
+  const grupo = grupos.find(item => item.id === grupoId);
+  grupos = grupos.filter(item => item.id !== grupoId);
+  chavesDeGrupo.delete(grupoId);
+  directHistory.delete(conversaDoGrupo(grupoId));
+  naoLidosGrupo.delete(grupoId); quantasDoGrupo.delete(grupoId); updateUnreadTitle();
+  if (grupoAberto === grupoId) {
+    grupoAberto = ""; mode = "room";
+    byId<HTMLDialogElement>("grupo-dialog").close();
+    setMode(); persistNavigation(); renderNavigation(); renderMessages();
+    if (grupo) showToast("Você não está mais em " + nomeDoGrupo(grupo) + ".");
+  }
+  renderFriends();
+}
+
+async function editarNoGrupo(alvo: DirectMessage, text: string) {
+  const grupo = grupoAtual();
+  if (!grupo || !session) return;
+  const escrita = await chaveParaEscrever(grupo);
+  if (!escrita) throw new Error("A chave do grupo ainda não chegou. Tente de novo em instantes.");
+  const selado = await selarNoGrupo(escrita.chave, grupo.id, session.username, escrita.epoca, text);
+  await api<GrupoMensagem>("/api/grupos/" + encodeURIComponent(grupo.id) + "/mensagens/" + encodeURIComponent(alvo.id), {
+    method: "PUT", body: JSON.stringify({ epoca: escrita.epoca, ...selado }),
+  });
+}
+
+function renderGrupos() {
+  const lista = byId("grupo-list");
+  lista.replaceChildren(...grupos.map(grupo => {
+    const botao = document.createElement("button");
+    botao.className = "channel" + (mode === "dm" && grupoAberto === grupo.id ? " active" : "");
+    const icone = document.createElement("div");
+    icone.className = "avatar avatar-canal grupo-icone";
+    icone.textContent = nomeDoGrupo(grupo).slice(0, 1).toUpperCase();
+    if (grupo.iconFile) {
+      void fileUrl(grupo.iconFile).then(url => { icone.textContent = ""; icone.style.backgroundImage = 'url("' + url + '")'; }).catch(() => {});
+    }
+    const textos = document.createElement("span");
+    textos.className = "grupo-textos";
+    const nome = document.createElement("span");
+    nome.className = "grupo-nome";
+    nome.textContent = nomeDoGrupo(grupo);
+    const quantos = document.createElement("small");
+    quantos.textContent = grupo.membros.length + " membros";
+    textos.append(nome, quantos);
+    botao.append(icone, textos);
+    const emChamada = chamadaPrivada?.quantos(conversaDoGrupo(grupo.id)) || 0;
+    if (emChamada) { const marca = document.createElement("span"); marca.className = "em-chamada-marca"; marca.textContent = "● " + emChamada; marca.title = emChamada + " na chamada"; botao.append(marca); }
+    if (naoLidosGrupo.has(grupo.id)) { const ponto = document.createElement("span"); ponto.className = "unread-dot"; botao.append(ponto); }
+    botao.onclick = () => void abrirGrupo(grupo.id);
+    return botao;
+  }));
+}
+
+// ---- criar grupo
+function renderCriarGrupo() {
+  const caixa = byId("grupo-criar-amigos");
+  byId("grupo-criar-erro").textContent = "";
+  byId<HTMLInputElement>("grupo-criar-nome").value = "";
+  if (!friends.length) { caixa.replaceChildren(emptyLine("Adicione amigos primeiro: grupo é só entre amigos.")); return; }
+  caixa.replaceChildren(...friends.map(nome => {
+    const linha = document.createElement("label");
+    linha.className = "grupo-escolha";
+    const marca = document.createElement("input");
+    marca.type = "checkbox";
+    marca.value = nome;
+    const foto = document.createElement("div");
+    foto.className = "avatar";
+    paintAvatar(foto, nome);
+    const rotulo = document.createElement("span");
+    rotulo.textContent = getDisplayName(nome);
+    linha.append(marca, foto, rotulo);
+    return linha;
+  }));
+}
+async function criarGrupo() {
+  const erro = byId("grupo-criar-erro");
+  const botao = byId<HTMLButtonElement>("grupo-criar-ok");
+  const escolhidos = [...document.querySelectorAll<HTMLInputElement>("#grupo-criar-amigos input:checked")].map(item => item.value);
+  if (!escolhidos.length) { erro.textContent = "Escolha pelo menos um amigo."; return; }
+  if (escolhidos.length > 9) { erro.textContent = "O grupo aceita até 10 pessoas, contando você."; return; }
+  if (!session) return;
+  botao.disabled = true;
+  erro.textContent = "";
+  try {
+    const chave = novaChaveDeGrupo();
+    const chaves = await embrulharPara([session.username, ...escolhidos], chave);
+    const nome = byId<HTMLInputElement>("grupo-criar-nome").value.trim();
+    const grupo = await api<GrupoPrivado>("/api/grupos", {
+      method: "POST", body: JSON.stringify({ nome: nome || null, membros: escolhidos, chaves }),
+    });
+    chavesDeGrupo.set(grupo.id, new Map([[grupo.epoca, chave]]));
+    if (!grupos.some(item => item.id === grupo.id)) grupos.push(grupo);
+    byId<HTMLDialogElement>("grupo-criar-dialog").close();
+    await abrirGrupo(grupo.id);
+  } catch (falha) {
+    erro.textContent = falha instanceof Error ? falha.message : "Não foi possível criar o grupo.";
+  } finally {
+    botao.disabled = false;
+  }
+}
+byId("add-grupo").addEventListener("click", () => { renderCriarGrupo(); byId<HTMLDialogElement>("grupo-criar-dialog").showModal(); });
+byId("grupo-criar-cancelar").addEventListener("click", () => byId<HTMLDialogElement>("grupo-criar-dialog").close());
+byId("grupo-criar-ok").addEventListener("click", () => void criarGrupo());
+
+// ---- membros, nome, sair
+function renderGrupoDialog() {
+  const grupo = grupoAtual();
+  if (!grupo || !session) return;
+  const eu = session.username;
+  const souDono = key(grupo.dono) === key(eu);
+  byId("grupo-dialog-titulo").textContent = nomeDoGrupo(grupo);
+  const campo = byId<HTMLInputElement>("grupo-nome");
+  if (document.activeElement !== campo) campo.value = grupo.nome || "";
+  byId("grupo-erro").textContent = "";
+  byId("grupo-membros").replaceChildren(...grupo.membros.map(membro => {
+    const acoes: { label: string; primary?: boolean; run: () => void }[] = [];
+    if (souDono && key(membro) !== key(eu)) acoes.push({ label: "Tirar", run: () => void tirarDoGrupo(membro) });
+    const linha = friendRow(membro, acoes);
+    if (key(membro) === key(grupo.dono)) {
+      const marca = document.createElement("span");
+      marca.className = "role-tag role-owner";
+      marca.textContent = "dono";
+      linha.insertBefore(marca, linha.children[2] || null);
+    }
+    return linha;
+  }));
+  const cheio = grupo.membros.length >= 10;
+  const fora = friends.filter(amigo => !grupo.membros.some(membro => key(membro) === key(amigo)));
+  byId("grupo-candidatos").replaceChildren(...(cheio
+    ? [emptyLine("O grupo está cheio (10 pessoas).")]
+    : fora.length
+      ? fora.map(nome => friendRow(nome, [{ label: "Adicionar", primary: true, run: () => void chamarParaOGrupo(nome) }]))
+      : [emptyLine("Todos os seus amigos já estão aqui.")]));
+}
+async function chamarParaOGrupo(nome: string) {
+  const grupo = grupoAtual();
+  if (!grupo || !session || !identity) return;
+  try {
+    // Todas as epocas: e o que deixa quem chega ler a conversa desde o comeco.
+    const mapa = await chavesDo(grupo);
+    const publica = await chavePublicaDe(nome);
+    if (!publica) throw new Error("Falta confirmar a identidade de " + getDisplayName(nome) + ".");
+    const chaves: Record<string, ChaveEmbrulhada> = {};
+    for (const epoca of Object.keys(grupo.chaves)) {
+      const chave = mapa.get(Number(epoca));
+      if (!chave) throw new Error("Uma das chaves antigas do grupo não abriu neste aparelho.");
+      chaves[epoca] = { de: session.username, ...await sealMessage(identity, publica, session.username, nome, chave) };
+    }
+    guardarGrupo(await api<GrupoPrivado>("/api/grupos/" + encodeURIComponent(grupo.id) + "/membros", {
+      method: "POST", body: JSON.stringify({ username: nome, chaves }),
+    }));
+  } catch (erro) { byId("grupo-erro").textContent = erro instanceof Error ? erro.message : "Não foi possível adicionar."; }
+}
+async function tirarDoGrupo(nome: string) {
+  const grupo = grupoAtual();
+  if (!grupo) return;
+  if (!await confirmAction("Tirar do grupo", "Tirar " + getDisplayName(nome) + " do grupo?", "A chave do grupo é trocada, e essa pessoa não lê mais o que vier depois.", "Tirar")) return;
+  try { await api<void>("/api/grupos/" + encodeURIComponent(grupo.id) + "/membros/" + encodeURIComponent(nome), { method: "DELETE" }); }
+  catch (erro) { byId("grupo-erro").textContent = erro instanceof Error ? erro.message : "Não foi possível tirar."; }
+}
+async function sairDoGrupo() {
+  const grupo = grupoAtual();
+  if (!grupo || !session) return;
+  if (!await confirmAction("Sair do grupo", "Sair de " + nomeDoGrupo(grupo) + "?", "Você só volta se alguém do grupo te chamar de novo.", "Sair")) return;
+  try {
+    await api<void>("/api/grupos/" + encodeURIComponent(grupo.id) + "/membros/" + encodeURIComponent(session.username), { method: "DELETE" });
+    saiDoGrupo(grupo.id);
+  } catch (erro) { byId("grupo-erro").textContent = erro instanceof Error ? erro.message : "Não foi possível sair."; }
+}
+async function renomearGrupo() {
+  const grupo = grupoAtual();
+  if (!grupo) return;
+  const nome = byId<HTMLInputElement>("grupo-nome").value.trim();
+  try {
+    guardarGrupo(await api<GrupoPrivado>("/api/grupos/" + encodeURIComponent(grupo.id), {
+      method: "PUT", body: JSON.stringify({ nome: nome || null }),
+    }));
+    showToast("Nome do grupo salvo.");
+  } catch (erro) { byId("grupo-erro").textContent = erro instanceof Error ? erro.message : "Não foi possível renomear."; }
+}
+byId("grupo-config").addEventListener("click", () => { renderGrupoDialog(); byId<HTMLDialogElement>("grupo-dialog").showModal(); });
+byId("grupo-fechar").addEventListener("click", () => byId<HTMLDialogElement>("grupo-dialog").close());
+byId("grupo-sair").addEventListener("click", () => void sairDoGrupo());
+byId("grupo-nome-salvar").addEventListener("click", () => void renomearGrupo());
+
+// ------------------------------------------------------------ chamada privada
+/// A chamada da conversa aberta: `grupo:<id>` ou `dm:<a>|<b>`.
+function chamadaDaConversa(): string | null {
+  if (mode !== "dm" || !session) return null;
+  if (grupoAberto) return conversaDoGrupo(grupoAberto);
+  if (currentFriend) return chamadaDoPar(session.username, currentFriend);
+  return null;
+}
+function outroDoPar(chamada: string) {
+  const [a, b] = chamada.slice(3).split("|");
+  return key(a) === key(session?.username || "") ? b : a;
+}
+function tituloDaChamada(chamada: string) {
+  if (chamada.startsWith("grupo:")) {
+    const grupo = grupos.find(item => item.id === chamada.slice(6));
+    return grupo ? nomeDoGrupo(grupo) : "Grupo";
+  }
+  return getDisplayName(friends.find(amigo => key(amigo) === key(outroDoPar(chamada))) || outroDoPar(chamada));
+}
+function abrirConversaDaChamada(chamada: string) {
+  if (chamada.startsWith("grupo:")) { void abrirGrupo(chamada.slice(6)); return; }
+  const amigo = friends.find(item => key(item) === key(outroDoPar(chamada)));
+  if (amigo) void openDirect(amigo);
+}
+function atualizarBotaoDeLigar() {
+  const aqui = chamadaDaConversa();
+  const botao = byId("chamada-ligar");
+  botao.classList.toggle("hidden", !aqui || chamadaPrivada?.ativa === aqui || Boolean(aqui && chamadaPrivada?.quantos(aqui)));
+}
+chamadaPrivada = criarChamadaPrivada({
+  api,
+  enviarWs: mensagem => {
+    if (!chat || chat.readyState !== WebSocket.OPEN) return false;
+    chat.send(JSON.stringify(mensagem));
+    return true;
+  },
+  eu: () => session?.username || "",
+  sessao: () => minhaSessao,
+  nome: getDisplayName,
+  foto: paintAvatar,
+  aviso: showToast,
+  titulo: tituloDaChamada,
+  chamadaDaTela: chamadaDaConversa,
+  abrirConversa: abrirConversaDaChamada,
+  sairDaOutra: async () => { if (room || voiceRoomId) await sairDaChamada(); },
+  volume: nome => { const par = volumeOf(nome); return par.mudoVoz ? 0 : par.mic; },
+  dispositivos: readDevices,
+  som: tipo => {
+    if (tipo === "entrar") playJoin();
+    else if (tipo === "sair") playLeave();
+    else playChime([[659.25, 0], [783.99, 0.18], [659.25, 0.36]], 0.12);
+  },
+  notificar: (titulo, corpo, aoClicar) => {
+    const mostrou = notifyMessage({ title: titulo, body: corpo, privateBody: "Chamada recebida", inCall: inCall(), naoPerturbe: emNaoPerturbe(), direta: true });
+    void avisarOrigem(mostrou, corpo, aoClicar);
+  },
+  telaNativa: ehTauri() ? {
+    iniciar: async () => {
+      const escolha = await pickSource(QUALITIES, readQuality(), byId);
+      if (!escolha) return null;
+      saveQuality(escolha.quality.id);
+      const { TransmissorNativo } = await import("./telaNativa");
+      const { transmissor, descricao } = await TransmissorNativo.iniciar(escolha, codecPreferido(), forcarDuplicacao());
+      console.info("[tela p2p]", descricao);
+      return transmissor;
+    },
+    escolherFonte: async () => (await pickSource(QUALITIES, readQuality(), byId))?.sourceId ?? null,
+  } : undefined,
+  mudou: () => {
+    atualizarBotaoDeLigar(); renderFriends();
+    // O selo de status e da chamada de servidor; sem ela, ele conta a privada.
+    if (!room && !voiceRoomId) {
+      if (chamadaPrivada?.ativa) setStatus("em chamada privada", true);
+      else if (estadoAtual === "em chamada privada") setStatus("fora da chamada", false);
+    }
+  },
+});
+byId("chamada-ligar").addEventListener("click", () => {
+  const aqui = chamadaDaConversa();
+  if (aqui) void chamadaPrivada?.entrar(aqui);
+});
+
 function setMode() {
   const isDm = mode === "dm";
   // Central de amigos nao tem campo de mensagem: nao ha canal para escrever.
@@ -1464,7 +2042,8 @@ function setMode() {
   dmMessagesEl.classList.toggle("hidden", !isDm);
   messageForm.classList.toggle("hidden", isDm || semComposer);
   dmForm.classList.toggle("hidden", !isDm);
-  byId("fingerprint-button").classList.toggle("hidden", !isDm);
+  byId("fingerprint-button").classList.toggle("hidden", !isDm || Boolean(grupoAberto));
+  byId("grupo-config").classList.toggle("hidden", !isDm || !grupoAberto);
   // Quem decide a visibilidade do palco e `syncStagePlacement`, num lugar so:
   // a regra passou a ser "o canal de voz esta selecionado", e nao "ha tiles
   // dentro", e duas regras diferentes para o mesmo elemento se contradiziam.
@@ -1473,6 +2052,7 @@ function setMode() {
   // servidor, e ela repetia a lista da esquerda; sem ela a conversa ganha a
   // largura de volta. Dentro de um servidor continua onde estava.
   byId("app-view").classList.toggle("sem-pessoas", view === "home");
+  chamadaPrivada?.desenhar();
 }
 byId("fingerprint-button").addEventListener("click", async () => {
   if (!identity || !currentFriend) return;
@@ -1487,7 +2067,7 @@ byId("close-identity").addEventListener("click", () => identityDialog.close());
 function forgetFriend(name: string) {
   if (session) { dropPin(session.username, name); saveDraft(session.username, "dm:" + key(name), ""); }
   friendKeys.delete(key(name)); directHistory.delete(key(name));
-  blockedFriends.delete(key(name)); unreadFriends.delete(key(name)); updateUnreadTitle();
+  blockedFriends.delete(key(name)); unreadFriends.delete(key(name)); quantasDoAmigo.delete(key(name)); updateUnreadTitle();
   if (mode === "dm" && key(name) === key(currentFriend)) { mode = "room"; currentFriend = ""; persistNavigation(); setMode(); renderNavigation(); renderMessages(); }
 }
 
@@ -1566,8 +2146,17 @@ function connectChat() {
       /// O estado de presença de quem o evento fala. Nome diferente de `estado`
       /// de propósito: aquele é a fila do DJ.
       presenca?: string;
+      grupo?: GrupoPrivado; grupoId?: string; mensagem?: GrupoMensagem; mensagemId?: string;
+      sessao?: number;
     };
-    if (payload.type === "welcome") { history = payload.messages || []; renderMessages(); }
+    if (payload.type === "welcome") {
+      history = payload.messages || []; renderMessages();
+      const anterior = minhaSessao;
+      minhaSessao = payload.sessao || 0;
+      // Socket novo e numero novo: a chamada privada presa ao velho acabou.
+      if (anterior && anterior !== minhaSessao) chamadaPrivada?.socketReaberto();
+    }
+    if (chamadaPrivada?.tratarEvento(payload as Parameters<NonNullable<typeof chamadaPrivada>["tratarEvento"]>[0])) return;
     if (payload.type === "message" && payload.message) {
       history.push(payload.message);
       const minha = key(payload.message.username) === key(session?.username || "");
@@ -1688,6 +2277,14 @@ function connectChat() {
       renderNavigation();
       if (payload.serverId === currentServerId) void loadServerMembers();
     }
+    if (payload.type === "grupoAtualizado" && payload.grupo) guardarGrupo(payload.grupo);
+    if (payload.type === "grupoRemovido" && payload.grupoId) saiDoGrupo(payload.grupoId);
+    if (payload.type === "grupoMensagem" && payload.mensagem) void receberDoGrupo(payload.mensagem);
+    if (payload.type === "grupoMensagemEditada" && payload.mensagem) void editadaNoGrupo(payload.mensagem);
+    if (payload.type === "grupoMensagemApagada" && payload.mensagemId) {
+      if (editingMessageId === payload.mensagemId) closeMessageEditor();
+      forgetDirect(payload.mensagemId);
+    }
     if (payload.type === "directMessage" && payload.envelope) { void handleIncomingEnvelope(payload.envelope); }
     if (payload.type === "directMessageUpdated" && payload.envelope) { void applyDirectUpdate(payload.envelope); }
     if (payload.type === "directMessageDeleted" && payload.messageId) {
@@ -1726,9 +2323,11 @@ messageInput.addEventListener("keydown", event => {
   // A lista aberta rouba as setas, o Tab e o Enter: sem isso o Enter enviaria a
   // mensagem no meio do nome que a pessoa estava escolhendo.
   if (sugestoes.length) {
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    // Emotes vem lado a lado: as setas do lado andam tambem.
+    const lado = sugestoes[0]?.tipo === "emote" && (event.key === "ArrowRight" || event.key === "ArrowLeft");
+    if (event.key === "ArrowDown" || event.key === "ArrowUp" || lado) {
       event.preventDefault();
-      const passo = event.key === "ArrowDown" ? 1 : -1;
+      const passo = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1;
       sugestaoAtiva = (sugestaoAtiva + passo + sugestoes.length) % sugestoes.length;
       renderSugestoes();
       return;
@@ -1877,6 +2476,7 @@ function renderSugestoes() {
   sugestoesNaTela = sugestoes.length;
   const caixa = byId("mention-box");
   caixa.classList.toggle("hidden", sugestoes.length === 0);
+  caixa.classList.toggle("emotes-lado", sugestoes[0]?.tipo === "emote");
   caixa.replaceChildren(...sugestoes.map((sugestao, indice) => {
     const linha = document.createElement("button");
     linha.type = "button";
@@ -2087,7 +2687,7 @@ function resumo(message: { text?: string; attachments?: StoredFile[] }): string 
 /// Em PV o servidor nao consegue ajudar: o texto so existe decifrado aqui.
 function acharCitada(id: string): { autor: string; texto: string } | null {
   if (mode === "dm") {
-    const achado = (directHistory.get(key(currentFriend)) || []).find(item => item.id === id);
+    const achado = (directHistory.get(conversaAberta()) || []).find(item => item.id === id);
     return achado ? { autor: achado.from, texto: resumo(achado) } : null;
   }
   const achado = history.find(item => item.id === id);
@@ -2245,6 +2845,15 @@ byId<HTMLFormElement>("message-edit-form").addEventListener("submit", async even
   } catch (error) { byId("message-edit-error").textContent = error instanceof Error ? error.message : "Não foi possível editar."; }
 });
 async function submitDirectEdit() {
+  if (grupoAberto) {
+    const alvoDoGrupo = (directHistory.get(conversaAberta()) || []).find(item => item.id === editingMessageId);
+    if (!alvoDoGrupo) { closeMessageEditor(); return; }
+    const texto = byId<HTMLTextAreaElement>("message-edit-text").value.trim();
+    if (!texto && !(alvoDoGrupo.attachments?.length)) { byId("message-edit-error").textContent = "A mensagem não pode ficar vazia."; return; }
+    try { await editarNoGrupo(alvoDoGrupo, texto); closeMessageEditor(); }
+    catch (error) { byId("message-edit-error").textContent = error instanceof Error ? error.message : "Não foi possível editar."; }
+    return;
+  }
   const lista = directHistory.get(key(currentFriend)) || [];
   const alvo = lista.find(item => item.id === editingMessageId);
   const publicKey = friendKeys.get(key(currentFriend));
@@ -2862,7 +3471,7 @@ function rondaDeAudio() {
   window.setInterval(() => {
     if (!inCall()) return;
     // O portao geral do LiveKit tambem pode ter fechado no meio do caminho.
-    if (room && !room.canPlaybackAudio) void room.startAudio().catch(() => { /* proxima volta */ });
+    if (room && !room.canPlaybackAudio) void room.startAudio().catch(() => { /* proxima volta */ }).finally(refreshAudioMuting);
     for (const el of document.querySelectorAll<HTMLAudioElement>("audio[data-naoconcordo-audio]")) {
       // Pausado de proposito nao existe aqui: silenciar e `muted`, nao `pause`.
       if (!el.paused || el.ended) continue;
@@ -3085,10 +3694,12 @@ vigiaDeBanda();
 /// clique do usuario, que conta como interacao.
 async function unlockAudio(target: Room) {
   try { await target.startAudio(); } catch { /* tratado abaixo */ }
+  refreshAudioMuting();
   if (target.canPlaybackAudio) return;
   showToast("Clique em qualquer lugar para liberar o áudio.");
   const retry = async () => {
     try { await target.startAudio(); } catch { /* segue tentando no proximo clique */ }
+    refreshAudioMuting();
     if (target.canPlaybackAudio) document.removeEventListener("click", retry);
   };
   document.addEventListener("click", retry);
@@ -3345,6 +3956,7 @@ function attachTrack(track: RemoteTrack, participant: RemoteParticipant) {
     audio.dataset.who = who;
     audio.dataset.fonte = track.source === Track.Source.ScreenShareAudio ? "tela" : "voz";
     audio.autoplay = true;
+    protegerMudo(audio);
     document.body.append(audio);
     // Antes de tocar: o elemento nasce em volume 1 e quem ja estava silenciado
     // seria ouvido pelo tempo entre anexar e reaplicar.
@@ -5960,6 +6572,11 @@ async function montarCartao(url: string, into: HTMLElement) {
     } catch { dados = null; }
     cartoesVistos.set(url, dados);
   }
+  const doYoutube = idDoYoutube(url);
+  // Sem previa do servidor, o video do YouTube ainda merece o player.
+  if (!dados && doYoutube) {
+    dados = { fonte: "youtube", titulo: "Vídeo do YouTube", autor: "", texto: "", imagem: "", video: "", site: "youtube.com", link: url };
+  }
   if (!dados) return;
   // A mensagem pode ter sido redesenhada enquanto a resposta vinha; sem isto o
   // cartao entraria num pedaco de tela que ja saiu.
@@ -5988,10 +6605,16 @@ async function montarCartao(url: string, into: HTMLElement) {
     void previaDeGif(dados.imagem).then(endereco => { img.src = endereco; }).catch(() => img.remove());
     // Com video, a capa e o cartaz do play e nao leva para fora: quem clicou na
     // imagem de um video quer ver o video, nao trocar de aplicativo.
-    const capa = dados.video ? document.createElement("div") : paraFora("cartao-capa");
+    const capa = dados.video || doYoutube ? document.createElement("div") : paraFora("cartao-capa");
     capa.classList.add("cartao-capa");
     capa.append(img);
     if (dados.video) capa.append(botaoDePlay(dados.video, capa));
+    else if (doYoutube) capa.append(botaoDoYoutube(doYoutube, capa));
+    cartao.append(capa);
+  } else if (doYoutube) {
+    const capa = document.createElement("div");
+    capa.className = "cartao-capa cartao-capa-vazia";
+    capa.append(botaoDoYoutube(doYoutube, capa));
     cartao.append(capa);
   } else if (dados.video) {
     // Video sem capa: o proprio player entra ja visivel, que e o unico jeito de
@@ -6025,6 +6648,59 @@ async function montarCartao(url: string, into: HTMLElement) {
   }
   cartao.append(texto);
   into.append(cartao);
+}
+
+/// Id e inicio de um link do YouTube (watch, youtu.be, shorts, live, embed).
+function idDoYoutube(url: string): { id: string; inicio: number } | null {
+  let u: URL;
+  try { u = new URL(url); } catch { return null; }
+  const host = u.hostname.replace(/^(www|m|music)\./, "");
+  let id = "";
+  if (host === "youtu.be") id = u.pathname.slice(1).split("/")[0];
+  else if (host === "youtube.com" || host === "youtube-nocookie.com") {
+    if (u.pathname === "/watch") id = u.searchParams.get("v") || "";
+    else {
+      const [tipo, valor] = u.pathname.split("/").filter(Boolean);
+      if (["shorts", "live", "embed"].includes(tipo || "")) id = valor || "";
+    }
+  }
+  if (!/^[\w-]{11}$/.test(id)) return null;
+  // `t=90`, `t=1m30s` ou `start=90`.
+  const t = u.searchParams.get("t") || u.searchParams.get("start") || "";
+  const partes = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/.exec(t);
+  const inicio = partes ? (Number(partes[1] || 0) * 3600 + Number(partes[2] || 0) * 60 + Number(partes[3] || 0)) : 0;
+  return { id, inicio };
+}
+
+/// Troca a capa pelo player do YouTube, so no clique.
+///
+/// O player nao vem direto do YouTube: passa pela `yt.html`, servida pelo
+/// dominio do servidor. Dentro do aplicativo a janela se chama
+/// `tauri.localhost`, e o YouTube recusa tocar para ela ("Erro 153"); a ponte
+/// faz ele ver um site de verdade como quem embute. E so no clique pelo mesmo
+/// motivo de sempre: carregar o player avisa o YouTube de quem esta lendo.
+function botaoDoYoutube(video: { id: string; inicio: number }, capa: HTMLElement) {
+  const play = document.createElement("button");
+  play.type = "button";
+  play.className = "cartao-play";
+  play.setAttribute("aria-label", "Assistir aqui");
+  play.onclick = evento => {
+    evento.preventDefault();
+    evento.stopPropagation();
+    const ponte = ehTauri()
+      ? new URL("/app/yt.html", servidor.endereco())
+      : new URL("yt.html", location.href);
+    ponte.searchParams.set("v", video.id);
+    if (video.inicio) ponte.searchParams.set("t", String(video.inicio));
+    const quadro = document.createElement("iframe");
+    quadro.className = "cartao-player";
+    quadro.src = ponte.toString();
+    quadro.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+    quadro.allowFullscreen = true;
+    capa.classList.add("tocando");
+    capa.replaceChildren(quadro);
+  };
+  return play;
 }
 
 /// Botao que troca a capa pelo video, baixando-o na hora do clique.
@@ -7341,12 +8017,58 @@ function clearUnread(roomId: string) {
   if (unreadRooms.delete(roomId)) renderNavigation();
   else updateUnreadTitle();
 }
+/// Conversas com mensagem por ler, na barra da esquerda, logo abaixo do icone
+/// do naoconcordo — como no Discord. A foto de quem escreveu, com o numero de
+/// mensagens; um clique abre a conversa. Some quando a conversa e lida.
+function renderRailPrivadas() {
+  const caixa = byId("rail-privadas");
+  const itens: HTMLElement[] = [];
+  const amigos = [...quantasDoAmigo.entries()].reverse();
+  const deGrupo = [...quantasDoGrupo.entries()].reverse();
+  for (const [chave, quantas] of amigos) {
+    const nome = friends.find(amigo => key(amigo) === chave) || chave;
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.className = "rail-button rail-pessoa";
+    botao.title = getDisplayName(nome) + " · " + (quantas === 1 ? "1 mensagem" : quantas + " mensagens");
+    const foto = document.createElement("div");
+    foto.className = "avatar";
+    paintAvatar(foto, nome);
+    botao.append(foto, seloDaBarra(quantas));
+    botao.onclick = () => void openDirect(nome);
+    itens.push(botao);
+  }
+  for (const [id, quantas] of deGrupo) {
+    const grupo = grupos.find(item => item.id === id);
+    if (!grupo) continue;
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.className = "rail-button rail-pessoa";
+    botao.title = nomeDoGrupo(grupo) + " · " + (quantas === 1 ? "1 mensagem" : quantas + " mensagens");
+    const icone = document.createElement("div");
+    icone.className = "avatar grupo-icone";
+    icone.textContent = nomeDoGrupo(grupo).slice(0, 1).toUpperCase();
+    if (grupo.iconFile) void fileUrl(grupo.iconFile).then(url => { icone.textContent = ""; icone.style.backgroundImage = 'url("' + url + '")'; }).catch(() => {});
+    botao.append(icone, seloDaBarra(quantas));
+    botao.onclick = () => void abrirGrupo(id);
+    itens.push(botao);
+  }
+  caixa.replaceChildren(...itens);
+}
+function seloDaBarra(quantas: number) {
+  const selo = document.createElement("span");
+  selo.className = "rail-badge";
+  selo.textContent = quantas > 99 ? "99+" : String(quantas);
+  return selo;
+}
 function updateUnreadTitle() {
-  const total = unreadFriends.size + [...unreadRooms.values()].reduce((sum, count) => sum + count, 0);
+  const privadas = [...quantasDoAmigo.values(), ...quantasDoGrupo.values()].reduce((soma, n) => soma + n, 0);
+  const total = privadas + [...unreadRooms.values()].reduce((sum, count) => sum + count, 0);
   document.title = total ? "(" + (total > 99 ? "99+" : total) + ") naoconcordo" : "naoconcordo";
   // Mesma contagem nos icones do sistema. Aqui e o unico ponto por onde ela
   // passa, entao e aqui que o selo acompanha sem precisar de chamada em cada
   // lugar que mexe nas nao lidas.
+  renderRailPrivadas();
   void atualizarSelo(total);
 }
 
@@ -7539,6 +8261,7 @@ function saveVolume(name: string, pair: VolumePair) {
   const all = readVolumes();
   all[key(name)] = pair;
   localStorage.setItem(VOLUME_KEY, JSON.stringify(all));
+  chamadaPrivada?.aplicarVolumes();
 }
 /// Decide o `muted` de cada elemento de audio num lugar so. O surdo geral e o
 /// silenciar por pessoa se sobrepoem, e quem escrevia direto no elemento
@@ -7553,13 +8276,30 @@ function saveVolume(name: string, pair: VolumePair) {
 /// ouvida.
 function refreshAudioMuting() {
   for (const el of document.querySelectorAll<HTMLAudioElement>("audio[data-naoconcordo-audio]")) {
-    // Elemento desviado para o WebAudio fica mudo por definicao: o som dele sai
-    // pelo contexto. Escrever `muted = false` aqui traria a voz dobrada.
-    if (el.dataset.reforcado) { el.muted = true; continue; }
-    const pair = volumeOf(el.dataset.who || "");
-    const silenciado = el.dataset.fonte === "tela" ? pair.mudoTela : pair.mudoVoz;
-    el.muted = !audioEnabled || Boolean(silenciado);
+    el.muted = deveFicarMudo(el);
   }
+}
+/// Este elemento de audio tem de estar mudo agora?
+function deveFicarMudo(el: HTMLAudioElement): boolean {
+  // Elemento desviado para o WebAudio fica mudo por definicao: o som dele sai
+  // pelo contexto. Deixar o elemento tocar junto traria a voz dobrada.
+  if (el.dataset.reforcado) return true;
+  const pair = volumeOf(el.dataset.who || "");
+  const silenciado = el.dataset.fonte === "tela" ? pair.mudoTela : pair.mudoVoz;
+  return !audioEnabled || Boolean(silenciado);
+}
+/// O elemento se defende sozinho do `livekit-client`.
+///
+/// O `startAudio()` dele faz `muted = false` em **todo** audio anexado, e o
+/// `attach()` tambem, sempre que a faixa e religada — alguem voltando para a
+/// chamada, mutando e desmutando. Reaplicar depois de cada chamada nossa nao
+/// basta, porque parte disso acontece dentro da biblioteca, sem aviso. Era
+/// assim que o "audio desligado" deixava de valer e a pessoa voltava a ser
+/// ouvida.
+function protegerMudo(el: HTMLAudioElement) {
+  el.addEventListener("volumechange", () => {
+    if (!el.muted && deveFicarMudo(el)) el.muted = true;
+  });
 }
 /// Aplica no LiveKit. A fonte separa a voz do audio da tela da mesma pessoa.
 function applyVolume(name: string, pair: VolumePair) {
