@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod capture;
+pub mod clipe;
 pub mod dxgi;
 pub mod encoder;
 pub mod p2p;
@@ -29,6 +30,38 @@ pub fn screen_border_diag() -> serde_json::Value {
         // processo, e o audio do monitor volta como eco.
         "audioSemEco": capture::exclusao_de_audio_confiavel(),
     })
+}
+
+/// Salva em Downloads os ultimos 30 s da tela que esta sendo compartilhada.
+/// Devolve o caminho do arquivo. Ver `clipe.rs`.
+#[tauri::command]
+pub async fn salvar_clipe() -> Result<String, String> {
+    // Montar copia dezenas de megabytes: fora da thread da interface.
+    tauri::async_runtime::spawn_blocking(|| {
+        let bytes = clipe::montar()?;
+        let destino = crate::salvar::caminho_livre(&crate::salvar::pasta_de_downloads(), &nome_do_clipe());
+        std::fs::write(&destino, bytes).map_err(|erro| format!("nao foi possivel salvar: {erro}"))?;
+        Ok(destino.display().to_string())
+    })
+    .await
+    .map_err(|erro| erro.to_string())?
+}
+
+/// `clipe 2026-09-26 21-30-05.mkv`, na hora local, como o Windows nomeia
+/// captura de tela.
+fn nome_do_clipe() -> String {
+    #[cfg(windows)]
+    {
+        let agora = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+        format!(
+            "clipe {:04}-{:02}-{:02} {:02}-{:02}-{:02}.mkv",
+            agora.wYear, agora.wMonth, agora.wDay, agora.wHour, agora.wMinute, agora.wSecond
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        "clipe.mkv".to_string()
+    }
 }
 
 /// Gera miniatura JPEG base64 de uma janela ou monitor para o seletor.

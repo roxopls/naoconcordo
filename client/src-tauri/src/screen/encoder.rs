@@ -1445,6 +1445,7 @@ fn comeca_com(todo: &[u8], prefixo: &[u8]) -> bool {
                 } else {
                     bruto
                 };
+                super::clipe::guardar_video(self.codec, self.largura, self.altura, chave, payload);
                 source.capture_encoded_frame(&EncodedVideoFrame {
                     codec: self.codec.para_livekit(),
                     payload,

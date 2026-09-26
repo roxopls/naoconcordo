@@ -1,3 +1,4 @@
+mod jogo;
 mod salvar;
 mod screen;
 mod selo;
@@ -58,6 +59,7 @@ pub fn run() {
         .manage(screen::p2p::TelaP2pState::default())
         .invoke_handler(tauri::generate_handler![
             uso::uso_de_recursos,
+            jogo::jogo_aberto,
             salvar::salvar_em_downloads,
             selo::selo_de_nao_lidas,
             screen::sources::screen_sources,
@@ -69,6 +71,7 @@ pub fn run() {
             screen::screen_target_alive,
             screen::screen_share_stats,
             screen::screen_share_stop,
+            screen::salvar_clipe,
             screen::p2p::tela_p2p_iniciar,
             screen::p2p::tela_p2p_ofertar,
             screen::p2p::tela_p2p_resposta,

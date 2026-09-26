@@ -18,13 +18,17 @@ use axum::extract::DefaultBodyLimit;
 use tower_http::{cors::{Any, CorsLayer}, limit::RequestBodyLimitLayer, services::ServeDir, trace::TraceLayer};
 use uuid::Uuid;
 
+mod dados;
 mod dj;
+mod enquete;
 mod gifs;
 mod grupos;
 mod chamadas;
 mod miniatura;
 mod previa;
+mod lembretes;
 mod registro;
+mod sala;
 
 type HmacSha256 = Hmac<Sha256>;
 const DEFAULT_ROOM: &str = "geral";
@@ -84,6 +88,15 @@ struct AppState {
     /// escolha na propria maquina e reanuncia ao reconectar — o mesmo acordo do
     /// canal de voz.
     estados: Arc<RwLock<HashMap<String, String>>>,
+    /// O jogo aberto de cada pessoa, como o cliente dela detectou. So em
+    /// memoria, pelo mesmo motivo de `estados`, e some junto com a ultima
+    /// conexao.
+    jogos: Arc<RwLock<HashMap<String, String>>>,
+    /// Canal de voz -> video assistido junto. Ver `sala.rs`.
+    assistindo: Arc<RwLock<HashMap<String, sala::Assistindo>>>,
+    /// Canal de voz -> quem tem prioridade de fala.
+    mestres: Arc<RwLock<HashMap<String, String>>>,
+    lembretes: Arc<RwLock<Vec<lembretes::Pendente>>>,
     // Quem esta em cada canal de voz, para a lista aparecer antes de entrar na
     // chamada. So existe em memoria: chamada nao sobrevive a um restart, e
     // gravar isso deixaria gente presa numa sala que nao existe mais.
@@ -102,6 +115,7 @@ struct AppState {
     preferencias: Arc<RwLock<HashMap<String, BTreeMap<String, String>>>>,
     categorias: Arc<RwLock<Vec<Categoria>>>,
     emotes: Arc<RwLock<Vec<Emote>>>,
+    sons: Arc<RwLock<Vec<Som>>>,
     friendships: Arc<RwLock<Vec<Friendship>>>,
     envelopes: Arc<RwLock<Vec<Envelope>>>,
     /// Grupos privados e as mensagens cifradas deles (ver `grupos.rs`).
@@ -138,6 +152,12 @@ struct ChatMessage {
     // fixar serve para combinar horario e guardar o endereco do servidor de
     // jogo, que nao sao assunto particular de quem fixou.
     #[serde(default)] pinned: bool,
+    /// Resultado de `/r`, sorteado aqui. Ver `dados.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")] rolagem: Option<dados::Rolagem>,
+    /// Enquete de `/enquete`, com os votos. Ver `enquete.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")] enquete: Option<enquete::Enquete>,
+    /// Lembrete de `/lembrar`: o pedido e, depois, o disparo. Ver `lembretes.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")] lembrete: Option<lembretes::Lembrete>,
 }
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -166,6 +186,12 @@ struct RoomInfo {
     /// trocar so o fundo e continuar com a cor de destaque da casa. Ver
     /// `Skin` e, no cliente, como as duas se juntam.
     #[serde(default, flatten)] skin: Skin,
+    /// Sala de voz que qualquer membro abre e que some sozinha quando esvazia.
+    /// Ver `sala.rs`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] temporaria: bool,
+    /// Quem pode ligar a prioridade de fala nesta sala. Sem ele vale o da
+    /// categoria. Ver `sala::mestre_designado`.
+    #[serde(default, skip_serializing_if = "Option::is_none")] mestre: Option<String>,
 }
 
 /// Um grupo de canais dentro de um servidor.
@@ -183,6 +209,8 @@ struct Categoria {
     server_id: String,
     name: String,
     posicao: i32,
+    /// Mestre das salas de voz desta categoria que nao tem um proprio.
+    #[serde(default, skip_serializing_if = "Option::is_none")] mestre: Option<String>,
 }
 /// Um emote do servidor: um apelido curto que vira imagem na conversa.
 ///
@@ -209,6 +237,34 @@ const MAX_EMOTES: usize = 100;
 /// Teto de cada emote. GIF e WebP vao inteiros para a tela, sem miniatura.
 const MAX_EMOTE_BYTES: u64 = 2 * 1024 * 1024;
 
+/// Um som do soundboard do servidor. Mesmo desenho do `Emote`: um arquivo que
+/// ja passou pelo anexo, mais o nome que aparece no botao.
+///
+/// O som nao passa pelo LiveKit. Quem clica avisa o servidor, o servidor avisa
+/// quem esta naquele canal de voz, e cada um toca o arquivo na propria maquina —
+/// o que deixa cada pessoa com o volume e o "nao quero ouvir" dela, e nao pesa
+/// no microfone de quem clicou.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Som {
+    id: String,
+    server_id: String,
+    /// Texto livre curto: aparece no botao, nao no meio de frase como o emote.
+    name: String,
+    file_id: String,
+    created_by: String,
+    created_at: DateTime<Utc>,
+}
+/// Viaja no `bootstrap`, como os emotes.
+const MAX_SONS: usize = 50;
+/// Cada clique faz todo mundo da chamada baixar o arquivo, entao ele e curto.
+const MAX_SOM_BYTES: u64 = 1024 * 1024;
+/// Intervalo minimo entre dois sons da mesma conexao. Sem ele, segurar o
+/// clique vira uma sirene na chamada inteira.
+const INTERVALO_DE_SOM: std::time::Duration = std::time::Duration::from_millis(1500);
+/// Teto do nome do jogo anunciado na presenca.
+const MAX_JOGO: usize = 64;
+
 /// O apelido de um emote, normalizado, ou `None` se nao serve.
 ///
 /// Minuscula, numero e `_`, de 2 a 24 caracteres. A regra e apertada de
@@ -232,6 +288,9 @@ struct ServerInfo {
     /// A roupa do servidor. Ver `Skin`: aqui ela vale para todos os canais que
     /// nao tiverem uma propria.
     #[serde(default, flatten)] skin: Skin,
+    /// Botao "Mestre" nas chamadas deste servidor. Desligado por padrao: so faz
+    /// sentido em servidor de mesa de RPG, e nos outros seria um botao a mais.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] modo_mestre: bool,
 }
 
 /// Cor e fundo de um servidor ou de um canal.
@@ -462,6 +521,18 @@ enum ServerEvent {
     /// `CanaisOrganizados`: o cliente rebusca o `bootstrap`, que ja traz a
     /// lista inteira, e ninguem precisa aplicar eventos na ordem certa.
     EmotesMudaram { server_id: String },
+    /// Idem para o soundboard.
+    SonsMudaram { server_id: String },
+    /// Alguem do canal de voz tocou um som. Vai so para quem esta nele.
+    SomTocado { room_id: String, som_id: String, username: String },
+    /// O video do canal de voz mudou; `estado` vazio = parou.
+    AssistirEstado { room_id: String, estado: Option<sala::AssistindoVisao>, por: String },
+    /// Quem tem prioridade de fala no canal; `null` = ninguem.
+    MestreMudou { room_id: String, username: Option<String> },
+    /// Recado do servidor para uma pessoa so, que o cliente mostra como aviso:
+    /// "nao entendi essa rolagem". Nao vira mensagem para nao sujar a conversa
+    /// dos outros com o erro de digitacao de alguem.
+    Aviso { texto: String },
     RoleChanged { server_id: String, role: ServerRole },
     /// `online` continua sendo o que sempre foi: "tem socket aberto e nao esta
     /// invisivel". **Nao mexer nele.** Os clientes 0.7.40 estao no ar contra
@@ -470,7 +541,9 @@ enum ServerEvent {
     /// `presenca` e nao `estado`: o evento do DJ ja usa `estado` para a fila, e
     /// dois campos de mesmo nome com significados diferentes no mesmo fluxo de
     /// eventos e pedir para alguem ler o errado.
-    PresenceChanged { username: String, online: bool, presenca: String },
+    PresenceChanged { username: String, online: bool, presenca: String,
+        /// O jogo aberto, ou `null`. Campo novo: cliente antigo ignora.
+        jogo: Option<String> },
     VoiceChanged { room_id: String, users: Vec<String> },
     // Efemero: nao e guardado nem reenviado. Quem entrar depois nao ve.
     Typing { username: String, room_id: String },
@@ -525,7 +598,13 @@ struct RecoverInput { username: String, nonce: String, recovery_proof: String, v
     // opaco e o estado de midia de quem manda.
     #[serde(default)] chamada: Option<String>, #[serde(default)] para: Option<u64>,
     #[serde(default)] dados: Option<serde_json::Value>,
-    #[serde(default)] mudo: Option<bool>, #[serde(default)] camera: Option<bool>, #[serde(default)] tela: Option<bool> }
+    #[serde(default)] mudo: Option<bool>, #[serde(default)] camera: Option<bool>, #[serde(default)] tela: Option<bool>,
+    // "votar": qual opcao da enquete. "som": qual som do soundboard.
+    #[serde(default)] opcao: Option<usize>, #[serde(default)] som: Option<String>,
+    // "assistir" e "mestre" (ver `sala.rs`): o que fazer e, no video, onde.
+    #[serde(default)] acao: Option<String>, #[serde(default)] posicao: Option<f64>,
+    // `/lembrar`: o instante ja convertido pelo cliente.
+    #[serde(default)] lembrete: Option<lembretes::PedidoDeLembrete> }
 
 /// Uma pessoa num canal de voz, e **por qual socket** ela se anunciou.
 ///
@@ -568,6 +647,9 @@ async fn set_voice(state: &AppState, username: &str, socket: u64, anterior: &mut
     {
         let mut voice = state.voice.write().await;
         if let Some(antiga) = anterior.take() {
+            // Sala vazia, mestre que saiu, sala temporaria: tudo isso e
+            // arrumado com atraso, para um soluco da rede nao desfazer nada.
+            sala::agendar_arrumacao(state.clone(), antiga.clone(), sala::ESPERA_DE_ARRUMACAO);
             if let Some(gente) = voice.get_mut(&antiga) {
                 // Por socket: este socket so desfaz o que este socket declarou.
                 gente.retain(|presenca| presenca.socket != socket);
@@ -598,6 +680,8 @@ struct CreateRoomInput {
     /// Ja nascer dentro de um grupo: criar o canal e depois arrasta-lo para a
     /// categoria certa e um passo a mais toda vez.
     #[serde(default)] category_id: Option<String>,
+    /// Sala de voz temporaria. Qualquer membro cria. Ver `sala.rs`.
+    #[serde(default)] temporaria: bool,
 }
 #[derive(Deserialize)] struct CreateServerInput { name: String }
 #[derive(Deserialize)] struct OwnerInput { code: String }
@@ -633,6 +717,7 @@ struct CustomizeServerInput {
     #[serde(default, deserialize_with = "double_option")] description: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")] icon_file: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")] banner_file: Option<Option<String>>,
+    #[serde(default)] modo_mestre: Option<bool>,
 }
 
 /// A parte de skin de um pedido de personalizacao, de servidor ou de canal.
@@ -744,6 +829,13 @@ struct ChallengeOutput {
     /// porque a conversa precisa deles para desenhar `:nome:` na primeira
     /// mensagem que aparecer, sem uma ida extra ao servidor por canal aberto.
     emotes: Vec<Emote>,
+    /// O soundboard dos servidores que esta pessoa enxerga.
+    sons: Vec<Som>,
+    /// O jogo aberto de quem aparece em `online`.
+    jogos: HashMap<String, String>,
+    /// Canal de voz -> video assistido junto, e canal -> mestre.
+    assistindo: HashMap<String, sala::AssistindoVisao>,
+    mestres: HashMap<String, String>,
     /// Se este servidor tem busca de GIF. Sem isso o cliente mostraria um botao
     /// que so sabe dar erro.
     gifs: bool,
@@ -811,6 +903,10 @@ async fn main() {
         server_invites: Arc::new(RwLock::new(load_json(&config.data_dir, "server-invites.json").await)),
         online: Default::default(),
         estados: Default::default(),
+        jogos: Default::default(),
+        assistindo: Default::default(),
+        mestres: Default::default(),
+        lembretes: Arc::new(RwLock::new(load_json(&config.data_dir, "lembretes.json").await)),
         voice: Default::default(),
         files: Arc::new(RwLock::new(load_json(&config.data_dir, "files.json").await)),
         keys: Arc::new(RwLock::new(load_json(&config.data_dir, "keys.json").await)),
@@ -818,6 +914,7 @@ async fn main() {
         preferencias: Arc::new(RwLock::new(load_json(&config.data_dir, "preferencias.json").await)),
         categorias: Arc::new(RwLock::new(load_json(&config.data_dir, "categorias.json").await)),
         emotes: Arc::new(RwLock::new(load_json(&config.data_dir, "emotes.json").await)),
+        sons: Arc::new(RwLock::new(load_json(&config.data_dir, "sons.json").await)),
         friendships: Arc::new(RwLock::new(load_json(&config.data_dir, "friends.json").await)),
         envelopes: Arc::new(RwLock::new(load_envelopes(&config.data_dir).await)),
         grupos: Arc::new(RwLock::new(grupos_carregados)),
@@ -837,6 +934,7 @@ async fn main() {
     if let Err(erro) = tokio::fs::create_dir_all(&updates_dir).await {
         eprintln!("nao foi possivel criar {}: {erro}", updates_dir.display());
     }
+    lembretes::vigiar(state.clone());
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/auth/challenge", post(auth_challenge))
@@ -854,11 +952,15 @@ async fn main() {
         .route("/api/rooms", post(create_room))
         .route("/api/rooms/{id}", put(renomear_canal).delete(apagar_canal))
         .route("/api/rooms/{id}/categoria", put(mover_canal))
+        .route("/api/rooms/{id}/mestre", put(mestre_do_canal))
+        .route("/api/categorias/{id}/mestre", put(mestre_da_categoria))
         .route("/api/categorias", post(criar_categoria))
         .route("/api/categorias/{id}", put(renomear_categoria).delete(apagar_categoria))
         .route("/api/categorias/{id}/mover", post(mover_categoria))
         .route("/api/emotes", post(criar_emote))
         .route("/api/emotes/{id}", axum::routing::delete(apagar_emote))
+        .route("/api/sons", post(criar_som))
+        .route("/api/sons/{id}", axum::routing::delete(apagar_som))
         .route("/api/servers/{id}/skin", put(skin_do_servidor))
         .route("/api/rooms/{id}/skin", put(skin_do_canal))
         .route("/api/servers/{id}/organizacao", put(reorganizar))
@@ -1119,6 +1221,9 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Respons
     let mut emotes: Vec<Emote> = state.emotes.read().await.iter()
         .filter(|emote| visible.contains(&emote.server_id)).cloned().collect();
     emotes.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut sons: Vec<Som> = state.sons.read().await.iter()
+        .filter(|som| visible.contains(&som.server_id)).cloned().collect();
+    sons.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     let roles: HashMap<String, ServerRole> = servers.iter()
         .filter_map(|server| role_of(&memberships, &server.id, &session.username).map(|role| (server.id.clone(), role)))
         .collect();
@@ -1138,11 +1243,22 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Respons
     let estados: HashMap<String, String> = online.iter()
         .map(|name| (name.clone(), estados_todos.get(name).cloned().unwrap_or_else(|| "online".to_string())))
         .collect();
+    // Mesmo filtro: o jogo de quem esta invisivel entregaria que ele esta ali.
+    let jogos: HashMap<String, String> = {
+        let todos = state.jogos.read().await;
+        online.iter().filter_map(|name| todos.get(name).map(|jogo| (name.clone(), jogo.clone()))).collect()
+    };
     // So os canais de voz que a pessoa enxerga; o resto nao e da conta dela.
     let visiveis: Vec<String> = rooms.iter().map(|room| room.id.clone()).collect();
     let voice: HashMap<String, Vec<String>> = state.voice.read().await.iter()
         .filter(|(room_id, gente)| visiveis.contains(room_id) && !gente.is_empty())
         .map(|(room_id, gente)| (room_id.clone(), nomes_na_voz(gente))).collect();
+    let assistindo: HashMap<String, sala::AssistindoVisao> = state.assistindo.read().await.iter()
+        .filter(|(room_id, _)| visiveis.contains(room_id))
+        .map(|(room_id, video)| (room_id.clone(), video.visao())).collect();
+    let mestres: HashMap<String, String> = state.mestres.read().await.iter()
+        .filter(|(room_id, _)| visiveis.contains(room_id))
+        .map(|(room_id, nome)| (room_id.clone(), nome.clone())).collect();
     Json(BootstrapOutput {
         servers, rooms,
         profiles: state.profiles.read().await.values().cloned().collect(),
@@ -1150,6 +1266,10 @@ async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Respons
         categorias,
         estados,
         emotes,
+        sons,
+        jogos,
+        assistindo,
+        mestres,
         gifs: state.config.gif_key.is_some(),
         dj: state.config.dj.is_some(),
     }).into_response()
@@ -1217,7 +1337,7 @@ async fn create_server(State(state): State<AppState>, headers: HeaderMap, Json(b
     if name.chars().count() < 2 || base.len() < 2 { return error(StatusCode::BAD_REQUEST, "O nome precisa ter pelo menos 2 caracteres."); }
     let mut servers = state.servers.write().await; let mut id = base.clone(); let mut suffix = 2;
     while servers.iter().any(|server| server.id == id) { id = format!("{base}-{suffix}"); suffix += 1; }
-    let server = ServerInfo { id: id.clone(), name, created_at: Utc::now(), icon_file: None, banner_file: None, description: None, skin: Skin::default() };
+    let server = ServerInfo { id: id.clone(), name, created_at: Utc::now(), icon_file: None, banner_file: None, description: None, skin: Skin::default(), modo_mestre: false };
     servers.push(server.clone()); persist_json(&state.config.data_dir, "servers.json", &*servers).await;
     // Quem cria e o primeiro membro; ninguem mais enxerga ate ser convidado.
     let mut memberships = state.memberships.write().await;
@@ -1226,8 +1346,8 @@ async fn create_server(State(state): State<AppState>, headers: HeaderMap, Json(b
     drop(memberships);
     // Servidor novo nasce com um canal de texto e um de voz, como no Discord.
     let mut rooms = state.rooms.write().await;
-    rooms.push(RoomInfo { id: format!("{id}-geral"), name: "geral".into(), created_at: Utc::now(), server_id: id.clone(), kind: RoomKind::Text, category_id: None, posicao: 0, skin: Skin::default() });
-    rooms.push(RoomInfo { id: format!("{id}-voz-geral"), name: "Geral".into(), created_at: Utc::now(), server_id: id, kind: RoomKind::Voice, category_id: None, posicao: 0, skin: Skin::default() });
+    rooms.push(RoomInfo { id: format!("{id}-geral"), name: "geral".into(), created_at: Utc::now(), server_id: id.clone(), kind: RoomKind::Text, category_id: None, posicao: 0, skin: Skin::default(), temporaria: false, mestre: None });
+    rooms.push(RoomInfo { id: format!("{id}-voz-geral"), name: "Geral".into(), created_at: Utc::now(), server_id: id, kind: RoomKind::Voice, category_id: None, posicao: 0, skin: Skin::default(), temporaria: false, mestre: None });
     persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
     Json(server).into_response()
 }
@@ -1238,9 +1358,18 @@ async fn create_room(State(state): State<AppState>, headers: HeaderMap, Json(bod
     if !state.servers.read().await.iter().any(|server| server.id == body.server_id) { return error(StatusCode::NOT_FOUND, "Servidor nao encontrado."); }
     {
         let memberships = state.memberships.read().await;
-        if !manages(&memberships, &body.server_id, &session.username) {
+        // Sala temporaria e de qualquer membro: e o "vamos para outra sala" de
+        // quem nao organiza nada, e ela se desfaz sozinha.
+        let pode = if body.temporaria { is_member(&memberships, &body.server_id, &session.username) }
+            else { manages(&memberships, &body.server_id, &session.username) };
+        if !pode {
             return error(StatusCode::FORBIDDEN, "Somente dono ou moderador cria canal.");
         }
+    }
+    if body.temporaria {
+        if body.kind != RoomKind::Voice { return error(StatusCode::BAD_REQUEST, "So sala de voz pode ser temporaria."); }
+        let abertas = state.rooms.read().await.iter().filter(|r| r.server_id == body.server_id && r.temporaria).count();
+        if abertas >= sala::MAX_TEMPORARIAS { return error(StatusCode::BAD_REQUEST, "Este servidor ja tem salas temporarias demais abertas."); }
     }
     let name = normalize_name(&body.name);
     // Canal de voz e de texto vivem em espacos de id separados, entao dois canais
@@ -1262,7 +1391,10 @@ async fn create_room(State(state): State<AppState>, headers: HeaderMap, Json(bod
         category_id: body.category_id.filter(|valor| !valor.is_empty()),
         posicao,
         skin: Skin::default(),
+        temporaria: body.temporaria,
+        mestre: None,
     };
+    if room.temporaria { sala::agendar_arrumacao(state.clone(), room.id.clone(), sala::ESPERA_SALA_NOVA); }
     rooms.push(room.clone()); persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
     let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &room.server_id) };
     let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::RoomCreated { room: room.clone() }));
@@ -1874,13 +2006,17 @@ async fn customize_server(State(state): State<AppState>, headers: HeaderMap, axu
         if let Some(desc) = body.description { server.description = desc; }
         if let Some(icon) = body.icon_file { server.icon_file = icon; }
         if let Some(banner) = body.banner_file { server.banner_file = banner; }
+        if let Some(ligado) = body.modo_mestre { server.modo_mestre = ligado; }
         let updated = server.clone();
         persist_json(&state.config.data_dir, "servers.json", &*servers).await;
         updated
     };
     
     let audience = members_of(&memberships, &id);
+    drop(memberships);
     let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::ServerUpdated { server: updated.clone() }));
+    // Desligado com alguem de mestre numa chamada: a prioridade sai na hora.
+    sala::conferir_mestres_do_servidor(&state, &id).await;
     Json(updated).into_response()
 }
 
@@ -2257,6 +2393,55 @@ async fn apagar_emote(State(state): State<AppState>, Caminho(id): Caminho<String
     StatusCode::NO_CONTENT.into_response()
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CriarSom { server_id: String, name: String, file_id: String }
+
+/// Cria um som do soundboard. Mesma regra do emote: dono e moderador.
+async fn criar_som(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<CriarSom>) -> Response {
+    if let Err(resposta) = pode_organizar(&state, &headers, &body.server_id).await { return resposta; }
+    let name: String = body.name.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(24).collect();
+    if name.is_empty() { return error(StatusCode::BAD_REQUEST, "Dê um nome ao som."); }
+    let arquivo = state.files.read().await.get(&body.file_id).cloned();
+    let Some(arquivo) = arquivo.filter(|file| tipo_para_mostrar(&file.mime).is_some_and(|t| t.starts_with("audio/"))) else {
+        return error(StatusCode::BAD_REQUEST, "O som precisa ser MP3, OGG ou WAV.");
+    };
+    if arquivo.size > MAX_SOM_BYTES { return error(StatusCode::BAD_REQUEST, "O som pode ter no máximo 1 MB."); }
+    let Some((_, session)) = authenticated(&state, &headers).await else {
+        return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.");
+    };
+    let mut sons = state.sons.write().await;
+    if sons.iter().filter(|som| som.server_id == body.server_id).count() >= MAX_SONS {
+        return error(StatusCode::BAD_REQUEST, "Este servidor chegou ao limite de sons.");
+    }
+    let server_id = body.server_id.clone();
+    let som = Som {
+        id: Uuid::new_v4().to_string(), server_id: server_id.clone(), name,
+        file_id: body.file_id, created_by: session.username.clone(), created_at: Utc::now(),
+    };
+    sons.push(som.clone());
+    persist_json(&state.config.data_dir, "sons.json", &*sons).await;
+    drop(sons);
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::SonsMudaram { server_id }));
+    (StatusCode::CREATED, Json(som)).into_response()
+}
+
+async fn apagar_som(State(state): State<AppState>, Caminho(id): Caminho<String>, headers: HeaderMap) -> Response {
+    if let Err(resposta) = tem_sessao(&state, &headers).await { return resposta; }
+    let Some(server_id) = state.sons.read().await.iter().find(|som| som.id == id).map(|som| som.server_id.clone()) else {
+        return error(StatusCode::NOT_FOUND, "Som nao encontrado.");
+    };
+    if let Err(resposta) = pode_organizar(&state, &headers, &server_id).await { return resposta; }
+    let mut sons = state.sons.write().await;
+    sons.retain(|som| som.id != id);
+    persist_json(&state.config.data_dir, "sons.json", &*sons).await;
+    drop(sons);
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::SonsMudaram { server_id }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
 async fn criar_categoria(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<CriarCategoria>) -> Response {
     if let Err(resposta) = pode_organizar(&state, &headers, &body.server_id).await { return resposta; }
     let name = normalize_name(&body.name);
@@ -2272,7 +2457,7 @@ async fn criar_categoria(State(state): State<AppState>, headers: HeaderMap, Json
         .map(|c| c.posicao).max().unwrap_or(-1) + 1;
     let server_id = body.server_id;
     let categoria = Categoria {
-        id: Uuid::new_v4().to_string(), server_id: server_id.clone(), name, posicao,
+        id: Uuid::new_v4().to_string(), server_id: server_id.clone(), name, posicao, mestre: None,
     };
     categorias.push(categoria.clone());
     persist_json(&state.config.data_dir, "categorias.json", &*categorias).await;
@@ -2470,6 +2655,58 @@ async fn mover_canal(State(state): State<AppState>, Caminho(id): Caminho<String>
     };
     room.category_id = destino;
     persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
+    drop(rooms);
+    // Trocar de categoria pode trocar o mestre herdado.
+    sala::conferir_mestres_do_servidor(&state, &server_id).await;
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct EscolherMestre { #[serde(default)] username: Option<String> }
+
+/// Confere quem pode escolher e quem foi escolhido. Devolve o nome como a
+/// pessoa o cadastrou, ou `None` para tirar o mestre.
+async fn mestre_valido(state: &AppState, headers: &HeaderMap, server_id: &str, pedido: Option<String>) -> Result<Option<String>, Response> {
+    pode_organizar(state, headers, server_id).await?;
+    let Some(nome) = pedido.filter(|nome| !nome.trim().is_empty()) else { return Ok(None) };
+    let memberships = state.memberships.read().await;
+    if !is_member(&memberships, server_id, &nome) {
+        return Err(error(StatusCode::BAD_REQUEST, "O mestre precisa ser membro do servidor."));
+    }
+    Ok(Some(nome))
+}
+
+async fn mestre_do_canal(State(state): State<AppState>, Caminho(id): Caminho<String>, headers: HeaderMap, Json(body): Json<EscolherMestre>) -> Response {
+    if let Err(resposta) = tem_sessao(&state, &headers).await { return resposta; }
+    let Some(server_id) = state.rooms.read().await.iter().find(|r| r.id == id && r.kind == RoomKind::Voice).map(|r| r.server_id.clone()) else {
+        return error(StatusCode::NOT_FOUND, "Canal de voz nao encontrado.");
+    };
+    let mestre = match mestre_valido(&state, &headers, &server_id, body.username).await { Ok(m) => m, Err(r) => return r };
+    {
+        let mut rooms = state.rooms.write().await;
+        if let Some(room) = rooms.iter_mut().find(|r| r.id == id) { room.mestre = mestre; }
+        persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
+    }
+    sala::conferir_mestres_do_servidor(&state, &server_id).await;
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn mestre_da_categoria(State(state): State<AppState>, Caminho(id): Caminho<String>, headers: HeaderMap, Json(body): Json<EscolherMestre>) -> Response {
+    if let Err(resposta) = tem_sessao(&state, &headers).await { return resposta; }
+    let Some(server_id) = state.categorias.read().await.iter().find(|c| c.id == id).map(|c| c.server_id.clone()) else {
+        return error(StatusCode::NOT_FOUND, "Categoria nao encontrada.");
+    };
+    let mestre = match mestre_valido(&state, &headers, &server_id, body.username).await { Ok(m) => m, Err(r) => return r };
+    {
+        let mut categorias = state.categorias.write().await;
+        if let Some(categoria) = categorias.iter_mut().find(|c| c.id == id) { categoria.mestre = mestre; }
+        persist_json(&state.config.data_dir, "categorias.json", &*categorias).await;
+    }
+    sala::conferir_mestres_do_servidor(&state, &server_id).await;
     let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
     let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
     StatusCode::NO_CONTENT.into_response()
@@ -2813,6 +3050,7 @@ fn tipo_para_mostrar(mime: &str) -> Option<&'static str> {
         "video/webm" => Some("video/webm"),
         "audio/mpeg" => Some("audio/mpeg"),
         "audio/ogg" => Some("audio/ogg"),
+        "audio/wav" | "audio/x-wav" | "audio/wave" => Some("audio/wav"),
         // O leitor de PDF do navegador roda na caixa de areia dele, e nao na
         // nossa origem: script dentro do PDF nao alcanca a sessao.
         "application/pdf" => Some("application/pdf"),
@@ -3166,6 +3404,12 @@ async fn edit_message(State(state): State<AppState>, headers: HeaderMap, axum::e
     if profile_key(&existing.username) != profile_key(&session.username) {
         return error(StatusCode::FORBIDDEN, "Voce so pode editar suas mensagens.");
     }
+    // O cartao da rolagem e da enquete sai do resultado guardado, e nao do
+    // texto: editar trocaria so o comando escrito e deixaria o resultado velho
+    // embaixo dele, parecendo que `/r d100` deu o numero de um `/r d20`.
+    if existing.rolagem.is_some() || existing.enquete.is_some() || existing.lembrete.is_some() {
+        return error(StatusCode::CONFLICT, "Rolagem, enquete e lembrete nao podem ser editados.");
+    }
     let Ok(audience) = message_audience(&state, &existing, &session.username).await else {
         return error(StatusCode::FORBIDDEN, "Voce nao participa deste servidor.");
     };
@@ -3203,6 +3447,8 @@ async fn delete_message(State(state): State<AppState>, headers: HeaderMap, axum:
         messages.retain(|message| message.id != id);
         persist_json(&state.config.data_dir, "messages.json", &*messages).await;
     }
+    // Apagar o pedido de lembrete e o jeito de cancelar.
+    lembretes::cancelar(&state, id).await;
     let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::MessageDeleted { message_id: id, room_id: existing.room_id }));
     StatusCode::NO_CONTENT.into_response()
 }
@@ -3248,9 +3494,10 @@ async fn anunciar_presenca(state: &AppState, username: &str) {
     let conectado = state.online.read().await.get(&profile_key(username)).is_some_and(|n| *n > 0);
     let estado = state.estados.read().await.get(&profile_key(username)).cloned();
     let (online, presenca) = presenca_visivel(conectado, estado.as_ref());
+    let jogo = if online { state.jogos.read().await.get(&profile_key(username)).cloned() } else { None };
     let audience = presence_audience(state, username).await;
     let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::PresenceChanged {
-        username: username.to_string(), online, presenca,
+        username: username.to_string(), online, presenca, jogo,
     }));
 }
 
@@ -3320,11 +3567,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session,
     // guardar por socket — so a variavel local nao bastava, porque quem apagava
     // era a lista, e la a chave era o nome.
     let mut sala_de_voz: Option<String> = None;
+    // Quando este socket tocou o ultimo som. Ver `INTERVALO_DE_SOM`.
+    let mut ultimo_som: Option<std::time::Instant> = None;
     loop { tokio::select! {
         incoming = socket.recv() => match incoming {
             Some(Ok(WsMessage::Text(text))) => {
                 let Ok(input) = serde_json::from_str::<ClientMessage>(&text) else { continue; };
                 if chamadas::tratar(&state, &session.username, socket_id, &input).await { continue; }
+                if sala::tratar(&state, &session.username, sala_de_voz.as_ref(), &input).await { continue; }
                 if input.kind == "voice" {
                     let pedida = input.room_id.unwrap_or_default();
                     // Sala vazia = saiu. Sala cheia so vale se for de voz e a
@@ -3416,6 +3666,69 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session,
                     ));
                     continue;
                 }
+                // O jogo que o cliente detectou aberto. Texto vazio = fechou.
+                if input.kind == "jogo" {
+                    let jogo: String = input.text.unwrap_or_default().chars()
+                        .filter(|c| !c.is_control()).collect::<String>()
+                        .trim().chars().take(MAX_JOGO).collect();
+                    let mudou = {
+                        let mut jogos = state.jogos.write().await;
+                        let chave = profile_key(&session.username);
+                        if jogo.is_empty() { jogos.remove(&chave).is_some() }
+                        else { jogos.insert(chave, jogo.clone()).as_ref() != Some(&jogo) }
+                    };
+                    if mudou { anunciar_presenca(&state, &session.username).await; }
+                    continue;
+                }
+                if input.kind == "som" {
+                    let Some(som_id) = input.som else { continue; };
+                    // Tocar exige estar na chamada: a sala foi conferida quando
+                    // a pessoa se anunciou nela.
+                    let Some(sala) = sala_de_voz.clone() else { continue; };
+                    if ultimo_som.is_some_and(|quando| quando.elapsed() < INTERVALO_DE_SOM) { continue; }
+                    let servidor_da_sala = state.rooms.read().await.iter()
+                        .find(|r| r.id == sala).map(|r| r.server_id.clone());
+                    let e_daqui = state.sons.read().await.iter()
+                        .any(|som| som.id == som_id && Some(&som.server_id) == servidor_da_sala.as_ref());
+                    if !e_daqui { continue; }
+                    ultimo_som = Some(std::time::Instant::now());
+                    let ouvintes = state.voice.read().await.get(&sala).map(|gente| nomes_na_voz(gente)).unwrap_or_default();
+                    let _ = state.events.send(Broadcast::to_many(ouvintes, ServerEvent::SomTocado {
+                        room_id: sala, som_id, username: session.username.clone(),
+                    }));
+                    continue;
+                }
+                if input.kind == "votar" {
+                    let (Some(alvo), Some(opcao)) = (input.message_id, input.opcao) else { continue; };
+                    // Mesma ordem do "pin": a audiencia e conferida antes de mexer.
+                    let sala_da_mensagem = {
+                        let historico = state.messages.read().await;
+                        let Some(message) = historico.iter().find(|item| item.id == alvo) else { continue; };
+                        message.room_id.clone()
+                    };
+                    let audience = {
+                        let rooms = state.rooms.read().await;
+                        let Some(sala) = rooms.iter().find(|r| r.id == sala_da_mensagem).cloned() else { continue; };
+                        drop(rooms);
+                        let memberships = state.memberships.read().await;
+                        if !is_member(&memberships, &sala.server_id, &session.username) { continue; }
+                        members_of(&memberships, &sala.server_id)
+                    };
+                    let atualizada = {
+                        let mut historico = state.messages.write().await;
+                        let Some(message) = historico.iter_mut().find(|item| item.id == alvo) else { continue; };
+                        let Some(enquete) = message.enquete.as_mut() else { continue; };
+                        if !enquete.votar(&session.username, opcao) { continue; }
+                        let atualizada = message.clone();
+                        persist_json(&state.config.data_dir, "messages.json", &*historico).await;
+                        atualizada
+                    };
+                    let _ = state.events.send(Broadcast::to_many(
+                        audience,
+                        ServerEvent::MessageUpdated { message: atualizada },
+                    ));
+                    continue;
+                }
                 if input.kind == "pin" {
                     let Some(alvo) = input.message_id else { continue; };
                     // A audiencia e conferida antes de mexer: quem nao participa
@@ -3476,9 +3789,28 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session,
                 // Comando do DJ: a mensagem continua aparecendo na conversa, como
                 // qualquer outra, e a acao acontece depois dela. Os outros veem
                 // quem pediu o que, que e metade da graca de ter um DJ na sala.
+                // `/r` e `/enquete`: a mensagem sai com o resultado dentro. Mal
+                // escrita, nao sai, e so quem escreveu fica sabendo por que.
+                let rolagem = match dados::ler(&text) {
+                    Some(Ok(rolagem)) => Some(rolagem),
+                    Some(Err(motivo)) => { let _ = state.events.send(Broadcast::to_one(&session.username, ServerEvent::Aviso { texto: motivo })); continue; }
+                    None => None,
+                };
+                let enquete = match enquete::ler(&text) {
+                    Some(Ok(enquete)) => Some(enquete),
+                    Some(Err(motivo)) => { let _ = state.events.send(Broadcast::to_one(&session.username, ServerEvent::Aviso { texto: motivo })); continue; }
+                    None => None,
+                };
+                let lembrete = if lembretes::e_pedido(&text) {
+                    match lembretes::validar(&state, &session.username, input.lembrete).await {
+                        Ok(lembrete) => Some(lembrete),
+                        Err(motivo) => { let _ = state.events.send(Broadcast::to_one(&session.username, ServerEvent::Aviso { texto: motivo })); continue; }
+                    }
+                } else { None };
                 let comando = state.config.dj.as_ref().and_then(|_| dj::ler_comando(&text));
                 let anexo_do_dj = anexos.first().cloned();
-                let message = ChatMessage { id: Uuid::new_v4(), username: session.username.clone(), text, created_at: Utc::now(), edited_at: None, room_id, attachments: anexos, reply_to: citada, reactions: BTreeMap::new(), pinned: false };
+                let message = ChatMessage { id: Uuid::new_v4(), username: session.username.clone(), text, created_at: Utc::now(), edited_at: None, room_id, attachments: anexos, reply_to: citada, reactions: BTreeMap::new(), pinned: false, rolagem, enquete, lembrete };
+                if let Some(lembrete) = &message.lembrete { lembretes::guardar(&state, &message, lembrete).await; }
                 { let mut h = state.messages.write().await; h.push(message.clone()); let excess = h.len().saturating_sub(MAX_MESSAGES); if excess > 0 { h.drain(..excess); } persist_json(&state.config.data_dir, "messages.json", &*h).await; }
                 let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::Message { message }));
                 if let Some(comando) = comando {
@@ -3526,6 +3858,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session,
         // O estado sai junto com a ultima conexao: ele descreve quem esta aqui,
         // e quem fechou o aplicativo nao esta "ocupado", esta fora.
         state.estados.write().await.remove(&profile_key(&session.username));
+        state.jogos.write().await.remove(&profile_key(&session.username));
         anunciar_presenca(&state, &session.username).await;
     }
 }

@@ -9,7 +9,7 @@ use base64::Engine;
 use std::path::PathBuf;
 
 /// A pasta de Downloads do usuario. Sem ela, o perfil serve de reserva.
-fn pasta_de_downloads() -> PathBuf {
+pub(crate) fn pasta_de_downloads() -> PathBuf {
     if let Ok(perfil) = std::env::var("USERPROFILE") {
         let downloads = PathBuf::from(&perfil).join("Downloads");
         if downloads.is_dir() { return downloads; }
@@ -36,7 +36,7 @@ fn nome_seguro(bruto: &str) -> String {
 /// Um caminho que ainda nao existe, numerando como o Windows faz.
 ///
 /// Sem isto, salvar duas vezes a mesma foto apagaria a primeira sem avisar.
-fn caminho_livre(pasta: &std::path::Path, nome: &str) -> PathBuf {
+pub(crate) fn caminho_livre(pasta: &std::path::Path, nome: &str) -> PathBuf {
     let candidato = pasta.join(nome);
     if !candidato.exists() { return candidato; }
 

@@ -129,6 +129,7 @@ fn pump(
                     (cru as f32 * ganho).clamp(i16::MIN as f32, i16::MAX as f32) as i16
                 };
             }
+            super::clipe::guardar_audio(&block);
             let frame = AudioFrame {
                 data: std::borrow::Cow::Borrowed(&block),
                 sample_rate: SAMPLE_RATE,

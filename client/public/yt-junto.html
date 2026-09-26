@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Player do "assistir junto". Mesma ponte do yt.html (o YouTube recusa
+         tocar para `tauri.localhost`), mas com a API do player: o aplicativo
+         precisa mandar tocar, pausar e pular, e saber quando a pessoa fez isso
+         na mao.
+
+         Conversa com a janela de cima por postMessage:
+           de cima: {tipo: "estado", posicao, tocando}
+           daqui:   {tipo: "pronto"}, {tipo: "tocar"|"pausar", posicao} -->
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <title>Assistir junto</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+      #p, iframe { border: 0; width: 100%; height: 100%; display: block; }
+      p { color: #bbb; font: 13px system-ui, sans-serif; text-align: center; margin-top: 40vh; }
+    </style>
+  </head>
+  <body>
+    <div id="p"></div>
+    <script>
+      const q = new URLSearchParams(location.search);
+      const id = q.get("v") || "";
+      const inicio = Math.max(0, parseInt(q.get("t") || "0", 10) || 0);
+      let player = null, pronto = false, pendente = null;
+      // Mudanca feita por ordem de cima tambem dispara o evento do player.
+      // Sem esta janela, cada "pausar" recebido voltaria como "pausar" enviado,
+      // e duas maquinas ficariam pingando uma na outra.
+      let obedecendoAte = 0;
+
+      const avisar = mensagem => window.parent.postMessage(mensagem, "*");
+
+      function obedecer(ordem) {
+        if (!ordem || ordem.tipo !== "estado") return;
+        obedecendoAte = Date.now() + 1500;
+        const alvo = Number(ordem.posicao) || 0;
+        // Dois segundos de folga: pular a cada diferenca pequena de rede faria
+        // o video engasgar para todo mundo.
+        if (Math.abs(player.getCurrentTime() - alvo) > 2) player.seekTo(alvo, true);
+        const tocando = player.getPlayerState() === YT.PlayerState.PLAYING;
+        if (ordem.tocando && !tocando) player.playVideo();
+        if (!ordem.tocando && tocando) player.pauseVideo();
+      }
+
+      window.addEventListener("message", evento => {
+        if (evento.source !== window.parent) return;
+        if (!pronto) { pendente = evento.data; return; }
+        obedecer(evento.data);
+      });
+
+      if (/^[\w-]{11}$/.test(id)) {
+        window.onYouTubeIframeAPIReady = () => {
+          player = new YT.Player("p", {
+            host: "https://www.youtube-nocookie.com",
+            videoId: id,
+            playerVars: { autoplay: 1, rel: 0, playsinline: 1, start: inicio },
+            events: {
+              onReady: () => {
+                pronto = true;
+                avisar({ tipo: "pronto" });
+                if (pendente) obedecer(pendente);
+              },
+              onStateChange: evento => {
+                if (Date.now() < obedecendoAte) return;
+                if (evento.data === YT.PlayerState.PLAYING) avisar({ tipo: "tocar", posicao: player.getCurrentTime() });
+                if (evento.data === YT.PlayerState.PAUSED) avisar({ tipo: "pausar", posicao: player.getCurrentTime() });
+              },
+            },
+          });
+        };
+        const api = document.createElement("script");
+        api.src = "https://www.youtube.com/iframe_api";
+        document.head.append(api);
+      } else {
+        const p = document.createElement("p");
+        p.textContent = "Link de vídeo inválido.";
+        document.body.replaceChildren(p);
+      }
+    </script>
+  </body>
+</html>

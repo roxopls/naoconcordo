@@ -1,6 +1,6 @@
 [package]
 name = "naoconcordo-app"
-version = "0.7.44"
+version = "0.7.45"
 description = "naoconcordo - sala privada de voz e tela"
 authors = ["naoconcordo"]
 edition = "2024"
@@ -61,6 +61,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+    # Hora local no nome do clipe.
+    "Win32_System_SystemInformation",
     # Codificacao por hardware: MFTEnumEx acha o NVENC/AMF/QuickSync desta
     # maquina, e ICodecAPI fala em VARIANT, que mora no COM/OLE.
     "Win32_Media_MediaFoundation",

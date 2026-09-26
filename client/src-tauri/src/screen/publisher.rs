@@ -413,6 +413,7 @@ pub async fn target_alive(state: &ShareState) -> bool {
 
 pub async fn stop(state: &ShareState) {
     let Some(mut share) = state.0.lock().await.take() else { return };
+    super::clipe::limpar();
     share.capture.stop();
     if let Some(audio) = share.audio.take() {
         audio.stop();

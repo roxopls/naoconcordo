@@ -36,6 +36,10 @@ const CHAVES = [
   // Fechar a categoria da campanha que nao e sua e arrumacao pessoal:
   // refazer isso em cada computador seria o mesmo incomodo dos volumes.
   "naoconcordo.categorias-fechadas",
+  // Mostrar o jogo aberto e escolha sobre a propria privacidade: vale em
+  // qualquer maquina em que a pessoa entrar.
+  "naoconcordo.mostrar-jogo",
+  "naoconcordo.sons.volume",
 ] as const;
 
 // Ficam de fora, e o motivo de cada um:

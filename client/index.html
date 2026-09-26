@@ -174,6 +174,14 @@
         </header>
         <section id="stage" class="stage hidden"></section>
         <section id="dj-panel" class="dj-panel hidden" aria-label="Fila do DJ"></section>
+        <section id="assistir-panel" class="assistir-panel hidden" aria-label="Assistindo junto">
+          <div class="assistir-topo">
+            <span id="assistir-titulo" class="muted small"></span>
+            <button id="assistir-esconder" type="button" class="ghost-button">Esconder</button>
+            <button id="assistir-parar" type="button" class="ghost-button">Parar para todos</button>
+          </div>
+          <div id="assistir-quadro" class="assistir-quadro"></div>
+        </section>
         <div id="camera-mini" class="camera-mini hidden"></div>
         <section id="messages" class="messages" aria-live="polite"></section>
         <section id="chamada-privada" class="chamada-privada hidden" aria-label="Chamada privada">
@@ -224,6 +232,9 @@
         <button id="cam-button" class="control" title="Ligar câmera"><svg class="ic"><use href="#i-cam"/></svg><small>Câmera</small></button>
         <button id="screen-button" class="control" title="Compartilhar tela"><svg class="ic"><use href="#i-screen"/></svg><small>Compartilhar</small></button>
         <button id="audio-button" class="control" title="Silenciar áudio"><svg class="ic"><use href="#i-audio"/></svg><small>Áudio</small></button>
+        <button id="assistir-button" class="control hidden" title="Assistir um vídeo do YouTube junto"><svg class="ic"><use href="#i-theater"/></svg><small>Assistir</small></button>
+        <button id="mestre-button" class="control hidden" title="Assumir a prioridade de fala"><svg class="ic"><use href="#i-mic"/></svg><small>Mestre</small></button>
+        <button id="sons-button" class="control hidden" title="Tocar um som para a chamada"><svg class="ic"><use href="#i-speaker"/></svg><small>Sons</small></button>
         <button id="devices-button" class="control" title="Escolher microfone, câmera e saída de áudio"><svg class="ic"><use href="#i-gear"/></svg><small>Dispositivos</small></button>
         <button id="leave-button" class="control danger" title="Sair da chamada"><svg class="ic"><use href="#i-hangup"/></svg><small>Desconectar</small></button>
       </div>
@@ -316,6 +327,7 @@
           <button id="customize-server-btn" type="button" class="servidor-aba hidden" data-aba="geral">Geral</button>
           <button id="membros-aba" type="button" class="servidor-aba" data-aba="membros">Membros</button>
           <button id="emotes-btn" type="button" class="servidor-aba" data-aba="emotes">Emotes</button>
+          <button id="sons-btn" type="button" class="servidor-aba" data-aba="sons">Sons</button>
           <button id="skin-btn" type="button" class="servidor-aba hidden" data-aba="aparencia">Aparência</button>
           <span class="servidor-nav-risco"></span>
           <button id="leave-server" type="button" class="servidor-aba perigo">Sair do servidor</button>
@@ -339,6 +351,8 @@
             <label>Nome do servidor<input id="server-settings-name" type="text" maxlength="50" /></label>
             <label>Descrição<textarea id="server-settings-description" maxlength="300" rows="3" placeholder="Do que se trata este servidor…"></textarea></label>
             <small id="server-settings-desc-count" class="muted">0 / 300</small>
+            <label class="switch-row"><input id="server-settings-mestre" type="checkbox" /> Modo mestre nas chamadas</label>
+            <p class="muted small">Com o botão direito num canal de voz ou numa categoria, dono e moderador escolhem o mestre daquela mesa. Só ele vê o botão Mestre na chamada: ligado, a voz dos outros abaixa enquanto ele fala.</p>
             <div class="dialog-actions">
               <button id="server-settings-save" class="primary" type="button">Salvar</button>
             </div>
@@ -368,6 +382,21 @@
             </div>
             <div id="emotes-lista" class="emotes-lista"></div>
             <p id="emotes-error" class="error"></p>
+          </section>
+
+          <section class="servidor-painel" data-aba="sons">
+            <p class="muted">Na chamada, o botão Sons toca para todo mundo que está no canal. Dono e moderador podem adicionar.</p>
+            <div id="sons-admin" class="hidden">
+              <div class="dialog-row emote-novo">
+                <button id="som-escolher" type="button" class="ghost-button">Escolher áudio</button>
+                <span id="som-arquivo" class="muted small"></span>
+                <input id="som-nome" type="text" maxlength="24" placeholder="nome" />
+                <button id="som-salvar" class="primary" type="button">Adicionar</button>
+              </div>
+              <input id="som-input" class="hidden" type="file" accept="audio/mpeg,audio/ogg,audio/wav,.mp3,.ogg,.wav" />
+            </div>
+            <div id="sons-lista" class="sons-lista"></div>
+            <p id="sons-error" class="error"></p>
           </section>
 
           <section class="servidor-painel" data-aba="aparencia">
@@ -576,6 +605,7 @@
             <div class="atalho-linha"><span>Apertar para falar</span><button id="atalho-ptt" type="button" class="ghost-button" data-atalho="ptt">—</button></div>
             <div class="atalho-linha"><span>Mudo</span><button id="atalho-mudo" type="button" class="ghost-button" data-atalho="mudo">—</button></div>
             <div class="atalho-linha"><span>Ensurdecer</span><button id="atalho-surdo" type="button" class="ghost-button" data-atalho="surdo">—</button></div>
+            <div class="atalho-linha"><span>Salvar clipe (últimos 30 s da sua tela)</span><button id="atalho-clipe" type="button" class="ghost-button" data-atalho="clipe">—</button></div>
             <p id="atalhos-nota" class="muted small">Clique num atalho e aperte a combinação desejada. Esc cancela, Delete limpa.</p>
           </section>
 
@@ -607,6 +637,8 @@
 
           <section class="config-pane" data-pane="aplicativo">
             <label class="switch-row"><input id="abrir-com-windows" type="checkbox" /> Abrir junto com o Windows</label>
+            <label class="switch-row"><input id="mostrar-jogo" type="checkbox" checked /> Mostrar na lista o jogo que estou jogando</label>
+            <p class="muted small">Jogos da Steam aparecem pelo nome; os outros, pelo título da janela em tela cheia. Só quem está nos seus servidores e amigos vê.</p>
             <p id="abrir-com-windows-nota" class="muted small">O naoconcordo sobe assim que você entra no computador. Fechar a janela continua mandando ele para a bandeja.</p>
           </section>
 

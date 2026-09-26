@@ -38,19 +38,31 @@ import { chamadaDoPar, criarChamadaPrivada } from "./chamada";
 const API = servidor.endereco();
 const WS = servidor.paraWs(API);
 type StoredFile = { id: string; name: string; mime: string; size: number; owner: string };
-type ChatMessage = { id: string; username: string; text: string; createdAt: string; editedAt?: string | null; roomId: string; attachments?: StoredFile[]; replyTo?: string | null; reactions?: Record<string, string[]>; pinned?: boolean };
+type ChatMessage = { id: string; username: string; text: string; createdAt: string; editedAt?: string | null; roomId: string; attachments?: StoredFile[]; replyTo?: string | null; reactions?: Record<string, string[]>; pinned?: boolean; rolagem?: Rolagem; enquete?: Enquete; lembrete?: Lembrete };
+/// `/lembrar`: o pedido (`disparado` falso) e a mensagem da hora marcada.
+type Lembrete = { quando: string; texto: string; disparado?: boolean };
+/// O video que um canal de voz assiste junto. `posicao` vale no instante em que
+/// chegou, anotado em `recebido` (relogio desta maquina).
+type Assistindo = { video: string; posicao: number; tocando: boolean; quem: string; recebido?: number };
+/// Resultado de `/r`, sorteado no servidor. Ver `server/src/dados.rs`.
+type TermoDeRolagem =
+  | { tipo: "dados"; sinal: number; quantidade: number; lados: number; faces: number[]; descartados: number[] }
+  | { tipo: "numero"; sinal: number; valor: number };
+type Rolagem = { expressao: string; motivo?: string; termos: TermoDeRolagem[]; total: number };
+type Enquete = { pergunta: string; opcoes: { texto: string; votos: string[] }[] };
+type Som = { id: string; serverId: string; name: string; fileId: string; createdBy: string; createdAt: string };
 type AuthSession = { token: string; username: string; expiresAt: number };
-type ServerInfo = { id: string; name: string; iconFile?: string | null; bannerFile?: string | null; description?: string | null } & Skin;
+type ServerInfo = { id: string; name: string; iconFile?: string | null; bannerFile?: string | null; description?: string | null; modoMestre?: boolean } & Skin;
 type RoomKind = "text" | "voice";
-type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind; categoryId?: string | null; posicao?: number } & Skin;
+type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind; categoryId?: string | null; posicao?: number; temporaria?: boolean; mestre?: string | null } & Skin;
 /// Cor e fundo de um servidor ou canal. Campos independentes: da para trocar so
 /// a cor de destaque, so o fundo, ou os dois.
 type Skin = { accent?: string | null; bgColor?: string | null; bgFile?: string | null; bgOpacity?: number | null };
 type Profile = { username: string; avatar: string | null; avatarFile?: string | null; bio?: string | null; bannerFile?: string | null; color?: string | null; recado?: string | null };
 type ServerRole = "owner" | "mod" | "member";
-type Categoria = { id: string; serverId: string; name: string; posicao: number };
+type Categoria = { id: string; serverId: string; name: string; posicao: number; mestre?: string | null };
 type Emote = { id: string; serverId: string; name: string; fileId: string; createdBy: string; createdAt: string };
-type Bootstrap = { servers: ServerInfo[]; rooms: RoomInfo[]; profiles: Profile[]; isOwner: boolean; isAdmin: boolean; roles: Record<string, ServerRole>; online: string[]; voice?: Record<string, string[]>; categorias?: Categoria[]; estados?: Record<string, string>; emotes?: Emote[]; gifs?: boolean; dj?: boolean };
+type Bootstrap = { servers: ServerInfo[]; rooms: RoomInfo[]; profiles: Profile[]; isOwner: boolean; isAdmin: boolean; roles: Record<string, ServerRole>; online: string[]; voice?: Record<string, string[]>; categorias?: Categoria[]; estados?: Record<string, string>; emotes?: Emote[]; sons?: Som[]; jogos?: Record<string, string>; assistindo?: Record<string, Assistindo>; mestres?: Record<string, string>; gifs?: boolean; dj?: boolean };
 type LivekitAccess = { token: string; url: string; room: string };
 type Friendship = { requester: string; addressee: string; status: "pending" | "accepted" };
 type FriendsData = { friends: string[]; incoming: Friendship[]; outgoing: Friendship[]; atividade?: Record<string, string> };
@@ -119,6 +131,8 @@ const ESTADOS: { id: EstadoPresenca; rotulo: string; dica: string }[] = [
 ];
 /// O estado de cada pessoa conectada. Quem nao esta aqui esta offline.
 const estadosDeGente = new Map<string, string>();
+/// O jogo aberto de cada pessoa online, como o servidor anunciou.
+const jogosDeGente = new Map<string, string>();
 const ESTADO_KEY = "naoconcordo.estado";
 
 /// O estado que **esta pessoa** escolheu, guardado na propria maquina.
@@ -671,12 +685,19 @@ async function enterApp() {
   temCategorias = data.categorias !== undefined;
   categorias = data.categorias || [];
   emotes = data.emotes || [];
+  sons = data.sons || [];
+  assistindoPorSala.clear();
+  for (const [sala, estado] of Object.entries(data.assistindo || {})) assistindoPorSala.set(sala, { ...estado, recebido: performance.now() });
+  mestres.clear();
+  for (const [sala, nome] of Object.entries(data.mestres || {})) mestres.set(sala, nome);
   setVoicePresence(data.voice);
   byId("admin-button").classList.toggle("hidden", !isAdmin);
   onlineUsers.clear();
   for (const name of data.online || []) onlineUsers.add(key(name));
   estadosDeGente.clear();
   for (const [name, estado] of Object.entries(data.estados || {})) estadosDeGente.set(key(name), estado);
+  jogosDeGente.clear();
+  for (const [name, jogo] of Object.entries(data.jogos || {})) jogosDeGente.set(key(name), jogo);
   // Mesmo motivo do `presenceChanged`: invisivel, a pessoa nao vem na lista
   // do servidor, mas para ela mesma continua conectada.
   if (chat?.readyState === WebSocket.OPEN) {
@@ -845,11 +866,13 @@ function renderNavigation() {
   const textRooms = soltos.filter(item => item.kind === "text");
   const voiceRooms = soltos.filter(item => item.kind === "voice");
   byId("room-list").replaceChildren(...textRooms.map(botaoDeTexto));
-  byId("voice-list").replaceChildren(...voiceRooms.flatMap(linhasDeVoz));
+  byId("voice-list").replaceChildren(...voiceRooms.flatMap(linhasDeVoz), botaoDeSalaTemporaria());
   // Secao sem nada dentro nao aparece. O "+" dela ia junto, e criar o primeiro
   // canal passou a ser pelo botao direito no vazio da barra.
   esconderSecaoVazia("room-list", textRooms.length > 0);
-  esconderSecaoVazia("voice-list", voiceRooms.length > 0);
+  // A secao de voz fica sempre: e onde mora o "+ Sala temporaria", que
+  // qualquer membro usa.
+  esconderSecaoVazia("voice-list", true);
   // Soltar aqui e tirar o canal de qualquer categoria.
   alvoSemCategoria(byId("room-list"), "text");
   alvoSemCategoria(byId("voice-list"), "voice");
@@ -2133,6 +2156,9 @@ function connectChat() {
     // A ausência automática não é reanunciada de propósito — quem reconectou
     // acabou de dar sinal de vida.
     anunciarEstado(estadoEscolhido());
+    // O servidor esquece o jogo junto com o socket: o proximo vigia reanuncia.
+    jogoAnunciado = "";
+    void vigiarJogo();
     renderPeople();
     if (view === "home" && mode === "room") renderMessages();
   };
@@ -2148,6 +2174,7 @@ function connectChat() {
       presenca?: string;
       grupo?: GrupoPrivado; grupoId?: string; mensagem?: GrupoMensagem; mensagemId?: string;
       sessao?: number;
+      jogo?: string | null; somId?: string; por?: string;
     };
     if (payload.type === "welcome") {
       history = payload.messages || []; renderMessages();
@@ -2190,6 +2217,8 @@ function connectChat() {
       // o app faria a bolinha continuar vermelha na lista de offline.
       if (payload.online) estadosDeGente.set(key(payload.username), payload.presenca || "online");
       else estadosDeGente.delete(key(payload.username));
+      if (payload.online && payload.jogo) jogosDeGente.set(key(payload.username), payload.jogo);
+      else jogosDeGente.delete(key(payload.username));
       renderPeople();
       if (view === "home" && mode === "room") renderMessages();
     }
@@ -2203,6 +2232,24 @@ function connectChat() {
     // Mesmo acordo das categorias: reler a lista inteira e mais barato do que
     // aplicar criacao e remocao na ordem certa, e nao tem como sair errado.
     if (payload.type === "emotesMudaram") void recarregarEmotes();
+    if (payload.type === "sonsMudaram") void recarregarSons();
+    // `estado` aqui e o video, e nao a fila do DJ: mesmo nome, outro evento.
+    if (payload.type === "assistirEstado" && payload.roomId) {
+      const estado = (payload as unknown as { estado: Assistindo | null }).estado;
+      receberAssistindo(payload.roomId, estado, payload.por || "");
+    }
+    if (payload.type === "mestreMudou" && payload.roomId) {
+      const antes = mestres.get(payload.roomId);
+      if (payload.username) mestres.set(payload.roomId, payload.username); else mestres.delete(payload.roomId);
+      if (payload.roomId === voiceRoomId && antes !== payload.username) {
+        showToast(payload.username ? getDisplayName(payload.username) + " tem a prioridade de fala." : "Ninguém mais tem prioridade de fala.");
+      }
+      pintarMestre();
+      applyAllVolumes();
+    }
+    if (payload.type === "somTocado" && payload.somId && payload.username) void tocarSom(payload.somId, payload.username);
+    // Recado do servidor so para esta pessoa, como "nao entendi essa rolagem".
+    if (payload.type === "aviso" && payload.texto) showToast(payload.texto);
     if (payload.type === "profileUpdated" && payload.profile) { profiles.set(payload.profile.username.toLowerCase(), payload.profile); renderMessages(); renderPeople(); if (payload.profile.username === session?.username) paintMyAvatars(payload.profile.username); }
     if (payload.type === "friendRequested" && payload.friendship) {
       if (key(payload.friendship.addressee) === key(session?.username || "")) showToast(payload.friendship.requester + " quer ser seu amigo.");
@@ -2244,6 +2291,7 @@ function connectChat() {
       if (idx >= 0) servers[idx] = serv;
       else servers.push(serv);
       renderNavigation();
+      updateCallControls();
     }
     if (payload.type === "serverLeft" && payload.serverId) {
       const saiu = payload.serverId;
@@ -2313,7 +2361,15 @@ messageForm.addEventListener("submit", event => {
   event.preventDefault();
   const text = messageInput.value.trim();
   if ((!text && !pendingFiles.length) || chat?.readyState !== WebSocket.OPEN) return;
-  chat.send(JSON.stringify({ type: "message", text, roomId: currentRoomId, attachments: pendingFiles.map(file => file.id), replyTo: respondendoA?.id || null }));
+  // O horario do lembrete e lido aqui, no fuso de quem escreveu (ver
+  // `server/src/lembretes.rs`). Sem horario entendido, nada sai.
+  let lembrete: { quando: string; texto: string } | null = null;
+  if (/^\/lembr(ar|ete)(\s|$)/i.test(text)) {
+    const lido = lerQuando(text.replace(/^\/\S+\s*/, ""));
+    if (!lido) { showToast("Não entendi quando. Exemplos: /lembrar 20h Sessão, /lembrar sáb 19:30 RPG, /lembrar em 30min pizza."); return; }
+    lembrete = { quando: lido.quando.toISOString(), texto: lido.texto };
+  }
+  chat.send(JSON.stringify({ type: "message", text, roomId: currentRoomId, attachments: pendingFiles.map(file => file.id), replyTo: respondendoA?.id || null, lembrete }));
   messageInput.value = ""; persistComposerDraft("", true); pendingFiles = []; renderAttachPreview(); cancelarResposta(); resizeComposer();
 });
 messageInput.addEventListener("input", () => {
@@ -2449,14 +2505,35 @@ function renderFriendsHome() {
 // mas ninguem acerta: nome com acento, maiuscula ou apelido nao sai de cabeca.
 // Escrever ":" e duas letras abre a lista dos emotes do servidor, pelo mesmo
 // motivo: ninguem decora o apelido de cada um.
-type Sugestao = { tipo: "pessoa"; nome: string } | { tipo: "emote"; emote: Emote };
+type Sugestao = { tipo: "pessoa"; nome: string } | { tipo: "emote"; emote: Emote } | { tipo: "comando"; comando: string; dica: string };
+
+/// Os comandos de barra que o servidor entende. Os do DJ so entram quando o
+/// servidor tem o bot, senao a lista ofereceria o que so vira mensagem comum.
+function comandosDisponiveis(): { comando: string; dica: string }[] {
+  const lista = [
+    { comando: "r", dica: "rola dados: d20, 2d6+3, 2d20kh1" },
+    { comando: "enquete", dica: "Pergunta? | opção 1 | opção 2" },
+    { comando: "lembrar", dica: "20h, sáb 19:30, amanhã 21h, em 30min + o texto" },
+  ];
+  if (temDj) lista.push(
+    { comando: "tocar", dica: "música ou link na fila do DJ" },
+    { comando: "pular", dica: "próxima música" },
+    { comando: "pausar", dica: "pausa ou continua o DJ" },
+    { comando: "parar", dica: "para o DJ" },
+    { comando: "fila", dica: "mostra a fila do DJ" },
+  );
+  return lista;
+}
 let sugestoes: Sugestao[] = [];
 let sugestaoAtiva = 0;
 
 /// Pedaco de "@nome" ou ":emote" que esta sendo escrito na posicao do cursor.
-function mencaoEmCurso(): { termo: string; inicio: number; sinal: "@" | ":" } | null {
+function mencaoEmCurso(): { termo: string; inicio: number; sinal: "@" | ":" | "/" } | null {
   const cursor = messageInput.selectionStart ?? 0;
   const antes = messageInput.value.slice(0, cursor);
+  // Comando so no comeco da mensagem, e so ate o primeiro espaco.
+  const comando = /^\/(\w*)$/.exec(antes);
+  if (comando) return { termo: comando[1], inicio: 0, sinal: "/" };
   // O "@" tem de comecar palavra: um e-mail no meio da frase nao abre a lista.
   const achado = /(^|\s)@([\w.-]*)$/.exec(antes);
   if (achado) return { termo: achado[2], inicio: cursor - achado[2].length - 1, sinal: "@" };
@@ -2488,6 +2565,12 @@ function renderSugestoes() {
       paintAvatar(avatar, sugestao.nome);
       rotulo.textContent = getDisplayName(sugestao.nome);
       linha.append(avatar, rotulo);
+    } else if (sugestao.tipo === "comando") {
+      rotulo.textContent = "/" + sugestao.comando;
+      const dica = document.createElement("small");
+      dica.className = "muted";
+      dica.textContent = sugestao.dica;
+      linha.append(rotulo, dica);
     } else {
       rotulo.textContent = ":" + sugestao.emote.name + ":";
       linha.append(imagemDeEmote(sugestao.emote, "emote emote-sugestao"), rotulo);
@@ -2503,7 +2586,11 @@ function atualizarSugestoes() {
   const emCurso = mencaoEmCurso();
   if (!emCurso || view !== "server") { sugestoes = []; renderSugestoes(); return; }
   const termo = emCurso.termo.toLowerCase();
-  if (emCurso.sinal === ":") {
+  if (emCurso.sinal === "/") {
+    sugestoes = comandosDisponiveis()
+      .filter(item => item.comando.startsWith(termo))
+      .map(item => ({ tipo: "comando", ...item }));
+  } else if (emCurso.sinal === ":") {
     // Quem comeca com o termo vem antes de quem so contem ele.
     const casam = emotesDoServidor().filter(emote => emote.name.toLowerCase().includes(termo));
     sugestoes = [
@@ -2528,7 +2615,9 @@ function aplicarSugestao(indice: number) {
   const cursor = messageInput.selectionStart ?? 0;
   const antes = messageInput.value.slice(0, emCurso.inicio);
   const depois = messageInput.value.slice(cursor);
-  const texto = sugestao.tipo === "pessoa" ? "@" + sugestao.nome + " " : ":" + sugestao.emote.name + ": ";
+  const texto = sugestao.tipo === "pessoa" ? "@" + sugestao.nome + " "
+    : sugestao.tipo === "comando" ? "/" + sugestao.comando + " "
+    : ":" + sugestao.emote.name + ": ";
   messageInput.value = antes + texto + depois;
   const novaPosicao = (antes + texto).length;
   messageInput.setSelectionRange(novaPosicao, novaPosicao);
@@ -2665,6 +2754,94 @@ function abrirSeletorDeEmoji(id: string, ancora: HTMLElement) {
   montarMenu(caixa, ancora);
 }
 
+// ------------------------------------------------------ rolagem e enquete
+/// O cartao de `/r`. Cada face aparece, e nao so o total: ver o 1 no meio de
+/// quatro dados e metade da graca, e os descartados por `kh`/`kl` ficam
+/// riscados em vez de sumir, para ninguem desconfiar da vantagem.
+function cartaoDeRolagem(rolagem: Rolagem): HTMLElement {
+  const cartao = document.createElement("div");
+  cartao.className = "rolagem";
+  const topo = document.createElement("div");
+  topo.className = "rolagem-topo";
+  topo.textContent = "🎲 " + rolagem.expressao + (rolagem.motivo ? " · " + rolagem.motivo : "");
+  const faces = document.createElement("div");
+  faces.className = "rolagem-faces";
+  rolagem.termos.forEach((termo, indice) => {
+    if (indice > 0 || termo.sinal < 0) {
+      const sinal = document.createElement("span");
+      sinal.className = "rolagem-sinal";
+      sinal.textContent = termo.sinal < 0 ? "−" : "+";
+      faces.append(sinal);
+    }
+    if (termo.tipo === "numero") {
+      const numero = document.createElement("span");
+      numero.className = "rolagem-numero";
+      numero.textContent = String(termo.valor);
+      faces.append(numero);
+      return;
+    }
+    termo.faces.forEach((face, i) => {
+      const dado = document.createElement("span");
+      dado.className = "rolagem-face"
+        + (termo.descartados.includes(i) ? " descartada" : "")
+        // Maximo e minimo so chamam atencao em dado de verdade: num d2 todo
+        // resultado seria "critico".
+        + (termo.lados >= 4 && face === termo.lados ? " maximo" : "")
+        + (termo.lados >= 4 && face === 1 ? " minimo" : "");
+      dado.textContent = String(face);
+      dado.title = "d" + termo.lados;
+      faces.append(dado);
+    });
+  });
+  const total = document.createElement("div");
+  total.className = "rolagem-total";
+  total.textContent = String(rolagem.total);
+  cartao.append(topo, faces, total);
+  return cartao;
+}
+
+function votarNaEnquete(id: string, opcao: number) {
+  if (chat?.readyState !== WebSocket.OPEN) { showToast("Sem conexão."); return; }
+  chat.send(JSON.stringify({ type: "votar", messageId: id, opcao }));
+}
+
+/// O cartao de `/enquete`. Quem votou em que vai na dica de cada opcao, como
+/// nas reacoes: num grupo pequeno saber quem falta votar e o que importa.
+function cartaoDeEnquete(id: string, enquete: Enquete): HTMLElement {
+  const eu = key(session?.username || "");
+  const total = enquete.opcoes.reduce((soma, opcao) => soma + opcao.votos.length, 0);
+  const cartao = document.createElement("div");
+  cartao.className = "enquete";
+  const pergunta = document.createElement("strong");
+  pergunta.className = "enquete-pergunta";
+  pergunta.textContent = enquete.pergunta;
+  cartao.append(pergunta);
+  enquete.opcoes.forEach((opcao, indice) => {
+    const parte = total ? Math.round(opcao.votos.length * 100 / total) : 0;
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.className = "enquete-opcao" + (opcao.votos.some(nome => key(nome) === eu) ? " minha" : "");
+    botao.title = opcao.votos.length ? opcao.votos.map(getDisplayName).join(", ") : "Ninguém ainda";
+    const barra = document.createElement("span");
+    barra.className = "enquete-barra";
+    barra.style.width = parte + "%";
+    const texto = document.createElement("span");
+    texto.className = "enquete-texto";
+    texto.textContent = opcao.texto;
+    const conta = document.createElement("span");
+    conta.className = "enquete-conta";
+    conta.textContent = opcao.votos.length + " · " + parte + "%";
+    botao.append(barra, texto, conta);
+    botao.onclick = () => votarNaEnquete(id, indice);
+    cartao.append(botao);
+  });
+  const rodape = document.createElement("small");
+  rodape.className = "muted";
+  rodape.textContent = (total === 1 ? "1 voto" : total + " votos") + " · clique de novo para desfazer";
+  cartao.append(rodape);
+  return cartao;
+}
+
 /// Os emotes do servidor aberto, em ordem de apelido.
 const emotesDoServidor = (serverId = currentServerId) =>
   emotes.filter(emote => emote.serverId === serverId).sort((a, b) => a.name.localeCompare(b.name));
@@ -2791,7 +2968,12 @@ function appendMessage(message: ChatMessage) {
   if (message.editedAt) { const edited = document.createElement("span"); edited.className = "edited-label"; edited.textContent = "editada"; head.append(edited); }
   body.append(head);
   if (message.replyTo) body.append(citacao(message.replyTo, messagesEl));
-  if (message.text) { body.append(renderText(message.text)); renderLinkEmbeds(message.text, body); }
+  // Rolagem e enquete trocam o comando escrito pelo cartao: `/r 2d6` cru em
+  // cima do resultado seria ruido.
+  if (message.rolagem) body.append(cartaoDeRolagem(message.rolagem));
+  else if (message.enquete) body.append(cartaoDeEnquete(message.id, message.enquete));
+  else if (message.lembrete) body.append(cartaoDeLembrete(message.lembrete));
+  else if (message.text) { body.append(renderText(message.text)); renderLinkEmbeds(message.text, body); }
   renderAttachments(message, body);
   body.append(faixaDeReacoes(message));
   {
@@ -2808,7 +2990,9 @@ function appendMessage(message: ChatMessage) {
     if (key(message.username) === key(session?.username || "")) {
     const editButton = document.createElement("button"); editButton.type = "button"; editButton.title = "Editar mensagem"; editButton.append(icon("pencil", "ic-sm")); editButton.onclick = () => openMessageEditor(message);
     const deleteButton = document.createElement("button"); deleteButton.type = "button"; deleteButton.title = "Apagar mensagem"; deleteButton.append(icon("trash", "ic-sm")); deleteButton.onclick = () => void removeChannelMessage(message);
-    actions.append(editButton, deleteButton);
+    // O servidor recusa editar rolagem e enquete: o resultado nao acompanharia.
+    if (!message.rolagem && !message.enquete && !message.lembrete) actions.append(editButton);
+    actions.append(deleteButton);
     }
     article.append(actions);
   }
@@ -3062,6 +3246,9 @@ async function connectVoice() {
         speaking.clear();
         for (const speaker of speakers) speaking.add(key(speaker.name || speaker.identity));
         updateSpeakingStyles();
+        // O mestre comecou ou parou de falar: os volumes mudam juntos.
+        const falando = mestreFalando();
+        if (falando !== mestreFalavaAntes) { mestreFalavaAntes = falando; applyAllVolumes(); }
         renderCameraMini();
       })
       .on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
@@ -3747,8 +3934,27 @@ function menuDaTransmissao(ponto: { x: number; y: number }) {
     acoes.push(menuAcao(sharePausado ? "Retomar transmissão" : "Pausar transmissão", sharePausado ? "plus" : "minus",
       () => void alternarPausaDaTela()));
   }
+  if (ehTauri()) acoes.push(menuAcao("Salvar os últimos 30 s", "download", () => void salvarClipe()));
   acoes.push(menuAcao("Parar de compartilhar", "hangup", () => void pararDeCompartilhar()));
   abrirMenuSimples(screenButton, ponto, acoes);
+}
+
+/// Salva em Downloads os ultimos 30 s da propria transmissao (ver
+/// `src-tauri/src/screen/clipe.rs`). O aviso diz o nome do arquivo, e o som
+/// confirma para quem apertou o atalho com o jogo na frente e nao ve a tela.
+let salvandoClipe = false;
+async function salvarClipe() {
+  if (!ehTauri() || salvandoClipe) return;
+  salvandoClipe = true;
+  try {
+    const caminho = await invoke<string>("salvar_clipe");
+    playShareOn();
+    showToast("Clipe salvo em Downloads: " + caminho.split(/[\\/]/).pop());
+  } catch (erro) {
+    showToast(String(erro));
+  } finally {
+    salvandoClipe = false;
+  }
 }
 /// Troca o que esta sendo transmitido sem derrubar a transmissao: o Rust muda o
 /// alvo da captura e a faixa publicada continua a mesma, entao quem assiste
@@ -4879,6 +5085,7 @@ function abrirAbaDoServidor(aba: string) {
   }
   if (aba === "geral") preencherConfigDoServidor();
   if (aba === "emotes") abrirAbaDeEmotes();
+  if (aba === "sons") abrirAbaDeSons();
   if (aba === "aparencia") renderSkinDialog();
 }
 for (const aba of document.querySelectorAll<HTMLButtonElement>(".servidor-aba[data-aba]")) {
@@ -5021,6 +5228,7 @@ function preencherConfigDoServidor() {
   const s = servers.find(item => item.id === currentServerId);
   if (!s) return;
   byId<HTMLInputElement>("server-settings-name").value = s.name;
+  byId<HTMLInputElement>("server-settings-mestre").checked = Boolean(s.modoMestre);
   const descInput = byId<HTMLTextAreaElement>("server-settings-description");
   descInput.value = s.description || "";
   byId("server-settings-desc-count").textContent = `${descInput.value.length} / 300`;
@@ -5127,9 +5335,10 @@ byId("server-settings-save")?.addEventListener("click", async () => {
   if (name.length < 2) { showToast("O nome do servidor precisa ter pelo menos 2 letras."); return; }
   const description = byId<HTMLTextAreaElement>("server-settings-description").value.trim();
   try {
-    const body: { name?: string; description?: string | null; iconFile?: string | null; bannerFile?: string | null } = {
+    const body: { name?: string; description?: string | null; iconFile?: string | null; bannerFile?: string | null; modoMestre?: boolean } = {
       name,
       description: description || null,
+      modoMestre: byId<HTMLInputElement>("server-settings-mestre").checked,
     };
     if (serverSettingsIconChanged) body.iconFile = serverSettingsIconFileId;
     if (serverSettingsBannerChanged) body.bannerFile = serverSettingsBannerFileId;
@@ -5141,6 +5350,7 @@ byId("server-settings-save")?.addEventListener("click", async () => {
     const idx = servers.findIndex(s => s.id === updated.id);
     if (idx >= 0) servers[idx] = updated;
     renderNavigation();
+    updateCallControls();
     byId("members-title").textContent = "Configurações de " + updated.name;
     showToast("Servidor atualizado.");
   } catch (err) {
@@ -5475,6 +5685,7 @@ async function mostrarDiagnosticoDaBorda() {
 }
 async function openDevicesDialog() {
   byId<HTMLInputElement>("notify-sound").checked = soundOn();
+  byId<HTMLInputElement>("mostrar-jogo").checked = mostrarJogo();
   byId<HTMLInputElement>("notify-desktop").checked = desktopNotificationsOn();
   byId<HTMLInputElement>("notify-preview").checked = notificationPreviewOn();
   byId<HTMLInputElement>("notify-in-call").checked = notificationsInCallOn();
@@ -6191,15 +6402,15 @@ function pintarMotorDeRuido() {
 // com o jogo em primeiro plano. E o unico jeito de push-to-talk servir para
 // alguma coisa — atalho de pagina exigiria a janela em foco, que e justamente
 // onde a pessoa nao esta.
-type Acao = "ptt" | "mudo" | "surdo";
+type Acao = "ptt" | "mudo" | "surdo" | "clipe";
 const ATALHO_KEY = "naoconcordo.atalhos";
 
 function lerAtalhos(): Record<Acao, string> {
   try {
     const bruto = JSON.parse(localStorage.getItem(ATALHO_KEY) || "null") as Partial<Record<Acao, string>> | null;
-    return { ptt: bruto?.ptt || "", mudo: bruto?.mudo || "", surdo: bruto?.surdo || "" };
+    return { ptt: bruto?.ptt || "", mudo: bruto?.mudo || "", surdo: bruto?.surdo || "", clipe: bruto?.clipe || "" };
   } catch {
-    return { ptt: "", mudo: "", surdo: "" };
+    return { ptt: "", mudo: "", surdo: "", clipe: "" };
   }
 }
 function guardarAtalhos(atalhos: Record<Acao, string>) {
@@ -6296,6 +6507,12 @@ async function registrarAtalhos() {
       await plugin.register(atalhos.surdo, evento => {
         if (evento.state !== "Pressed") return;
         audioButton.click();
+      });
+    }
+    if (atalhos.clipe) {
+      await plugin.register(atalhos.clipe, evento => {
+        if (evento.state !== "Pressed") return;
+        void salvarClipe();
       });
     }
   } catch (erro) {
@@ -7984,10 +8201,13 @@ function noteUnread(message: ChatMessage, fromMe: boolean) {
   // mensagem, que nao voltava a aparecer ao fechar o palco.
   const olhando = view === "server" && mode === "room" && !olhandoAChamada
     && message.roomId === currentRoomId && document.hasFocus();
-  if (fromMe) return;
+  // O lembrete na hora marcada avisa todo mundo, inclusive quem marcou: foi
+  // para isso que ele marcou.
+  const lembrete = Boolean(message.lembrete?.disparado);
+  if (fromMe && !lembrete) return;
   // Ser citado avisa mesmo com o canal aberto na frente: e o ponto da mencao —
   // alguem quer sua atencao agora, nao quando voce rolar a conversa.
-  const citado = mencionaVoce(message.text || "");
+  const citado = mencionaVoce(message.text || "") || lembrete;
   if (olhando && !citado) return;
   if (citado) mencoesPorSala.set(message.roomId, (mencoesPorSala.get(message.roomId) || 0) + 1);
   if (!olhando) unreadRooms.set(message.roomId, (unreadRooms.get(message.roomId) || 0) + 1);
@@ -8310,7 +8530,7 @@ function applyVolume(name: string, pair: VolumePair) {
     // Protegido: um volume invalido nao pode derrubar a entrada na chamada,
     // que e por onde essa chamada passa.
     try {
-      aplicarFonte(participant, Track.Source.Microphone, limiteVolume(pair.mic), Boolean(pair.mudoVoz));
+      aplicarFonte(participant, Track.Source.Microphone, limiteVolume(pair.mic) * fatorDoMestre(name), Boolean(pair.mudoVoz));
       aplicarFonte(participant, Track.Source.ScreenShareAudio, limiteVolume(pair.screen), Boolean(pair.mudoTela));
     } catch (erro) { console.warn("[volume]", erro); }
   }
@@ -9014,6 +9234,8 @@ async function recarregarOrganizacao() {
       currentRoomId = "";
     }
     renderNavigation();
+    // O mestre escolhido mora no canal e na categoria: o botao depende disso.
+    updateCallControls();
   } catch (erro) {
     console.warn("[categorias] nao deu para reler", erro);
   }
@@ -9108,6 +9330,8 @@ function menuDaCategoria(categoria: Categoria, ancora: HTMLElement, ponto?: { x:
   // O texto diz o que acontece com os canais: sem isso ninguem clica, com medo
   // de perder a conversa de meses de campanha.
   opcao("Apagar (os canais ficam)", () => void apagarCategoria(categoria), true);
+  opcoesDeMestre(menu, categoria.mestre, null,
+    nome => void escolherMestre("/api/categorias/" + encodeURIComponent(categoria.id) + "/mestre", nome));
 
   acoesDeCriar(menu);
   montarMenu(menu, ancora, ponto);
@@ -9195,6 +9419,11 @@ function menuDoCanal(item: RoomInfo, ancora: HTMLElement, evento: MouseEvent) {
   };
   acao("Renomear canal", () => void renomearCanal(item));
   acao("Apagar canal", () => void apagarCanal(item), true);
+  if (item.kind === "voice") {
+    const daCategoria = categorias.find(c => c.id === item.categoryId);
+    opcoesDeMestre(menu, item.mestre, daCategoria ? (daCategoria.mestre || "") : null,
+      nome => void escolherMestre("/api/rooms/" + encodeURIComponent(item.id) + "/mestre", nome));
+  }
 
   // A secao de mover so faz sentido onde ha grupos para onde mover.
   if (temCategorias) {
@@ -9424,6 +9653,518 @@ byId("emote-salvar")?.addEventListener("click", () => void criarEmote());
 function aplicarBotaoDeEmote() {
   byId("emote-button").classList.toggle("hidden", !emotesDoServidor().length);
 }
+
+// ------------------------------------------------------------- soundboard
+let sons: Som[] = [];
+/// O arquivo escolhido para virar som, ainda nao enviado.
+let somEscolhido: File | null = null;
+const SONS_VOLUME_KEY = "naoconcordo.sons.volume";
+/// Teto de quanto um som toca. O arquivo ja e limitado a 1 MB, mas 1 MB de
+/// audio comprimido passa de um minuto, e soundboard e para efeito curto.
+const SOM_MAX_MS = 10_000;
+
+const sonsDoServidor = (serverId: string) =>
+  sons.filter(som => som.serverId === serverId).sort((a, b) => a.name.localeCompare(b.name));
+
+function volumeDosSons(): number {
+  const valor = Number(localStorage.getItem(SONS_VOLUME_KEY) ?? "0.5");
+  return Number.isFinite(valor) ? Math.min(1, Math.max(0, valor)) : 0.5;
+}
+
+/// Toca na maquina de quem recebeu o aviso. Quem ensurdeceu, ou silenciou
+/// quem clicou, nao ouve — o mesmo acordo da voz.
+async function tocarSom(somId: string, quem: string) {
+  if (!audioEnabled || silencedByMe(quem)) return;
+  const som = sons.find(item => item.id === somId);
+  const volume = volumeDosSons();
+  if (!som || volume <= 0) return;
+  try {
+    const audio = new Audio(await fileUrl(som.fileId)) as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
+    audio.volume = volume;
+    // Sai pelo mesmo fone da chamada, e nao pela saida padrao do Windows.
+    const saida = readDevices().out;
+    if (saida && audio.setSinkId) await audio.setSinkId(saida).catch(() => {});
+    const corte = window.setTimeout(() => audio.pause(), SOM_MAX_MS);
+    audio.onended = () => window.clearTimeout(corte);
+    await audio.play();
+  } catch (erro) { console.warn("[sons] tocar", erro); }
+}
+
+function abrirSoundboard(ancora: HTMLElement) {
+  closeUserMenu();
+  const caixa = document.createElement("div");
+  caixa.className = "user-menu sons-pop";
+  const lista = sonsDoServidor(serverDaChamada());
+  const grade = document.createElement("div");
+  grade.className = "sons-grade";
+  if (!lista.length) grade.append(emptyLine("Este servidor ainda não tem sons. Dono e moderador adicionam nas configurações do servidor, na aba Sons."));
+  for (const som of lista) {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.className = "som-botao";
+    botao.textContent = som.name;
+    // A caixa fica aberta: soundboard e de clicar varias vezes seguidas.
+    botao.onclick = evento => {
+      evento.stopPropagation();
+      if (chat?.readyState !== WebSocket.OPEN) { showToast("Sem conexão."); return; }
+      chat.send(JSON.stringify({ type: "som", som: som.id }));
+    };
+    grade.append(botao);
+  }
+  const volume = document.createElement("label");
+  volume.className = "sons-volume";
+  volume.textContent = "Volume dos sons";
+  const faixa = document.createElement("input");
+  faixa.type = "range"; faixa.min = "0"; faixa.max = "100";
+  faixa.value = String(Math.round(volumeDosSons() * 100));
+  faixa.oninput = () => localStorage.setItem(SONS_VOLUME_KEY, String(Number(faixa.value) / 100));
+  volume.append(faixa);
+  caixa.append(grade, volume);
+  montarMenu(caixa, ancora);
+  // A barra da chamada fica no pe da tela: abrir para baixo cobriria o botao.
+  caixa.style.top = Math.max(8, ancora.getBoundingClientRect().top - caixa.offsetHeight - 6) + "px";
+}
+byId("sons-button").addEventListener("click", evento => {
+  evento.stopPropagation();
+  abrirSoundboard(evento.currentTarget as HTMLElement);
+});
+
+async function recarregarSons() {
+  try {
+    const dados = await api<Bootstrap>("/api/bootstrap");
+    sons = dados.sons || [];
+    if (byId<HTMLDialogElement>("members-dialog").open && abaDoServidor === "sons") renderSonsDialog();
+  } catch (erro) { console.warn("[sons] recarregar", erro); }
+}
+
+/// Mesmo desenho da aba de emotes: todo mundo ve e ouve a previa, dono e
+/// moderador adicionam e apagam.
+function renderSonsDialog() {
+  const lista = byId("sons-lista");
+  const manda = podeCriarCanal();
+  byId("sons-admin").classList.toggle("hidden", !manda);
+  lista.replaceChildren();
+  const daCasa = sonsDoServidor(currentServerId);
+  if (!daCasa.length) {
+    lista.append(emptyLine(manda
+      ? "Nenhum som ainda. Escolha um MP3, OGG ou WAV de até 1 MB abaixo."
+      : "Este servidor ainda não tem sons."));
+    return;
+  }
+  for (const som of daCasa) {
+    const item = document.createElement("div");
+    item.className = "som-item";
+    const ouvir = document.createElement("button");
+    ouvir.type = "button";
+    ouvir.className = "ghost-button";
+    ouvir.textContent = "▶ " + som.name;
+    ouvir.title = "Ouvir só aqui";
+    ouvir.onclick = async () => {
+      const audio = new Audio(await fileUrl(som.fileId));
+      audio.volume = volumeDosSons() || 0.5;
+      void audio.play().catch(() => {});
+    };
+    item.append(ouvir);
+    if (manda) {
+      const apagar = document.createElement("button");
+      apagar.type = "button";
+      apagar.className = "emote-apagar";
+      apagar.title = "Apagar";
+      apagar.setAttribute("aria-label", "Apagar " + som.name);
+      apagar.textContent = "✕";
+      apagar.onclick = () => void apagarSom(som);
+      item.append(apagar);
+    }
+    lista.append(item);
+  }
+}
+
+async function apagarSom(som: Som) {
+  const certeza = await confirmAction("Apagar " + som.name + "?", "O som sai do soundboard deste servidor.", "", "Apagar");
+  if (!certeza) return;
+  try {
+    await api<void>("/api/sons/" + encodeURIComponent(som.id), { method: "DELETE" });
+    sons = sons.filter(item => item.id !== som.id);
+    renderSonsDialog();
+  } catch (erro) {
+    byId("sons-error").textContent = erro instanceof Error ? erro.message : "Não foi possível apagar.";
+  }
+}
+
+async function criarSom() {
+  const erroEl = byId("sons-error");
+  const campo = byId<HTMLInputElement>("som-nome");
+  const nome = campo.value.trim();
+  erroEl.textContent = "";
+  if (!somEscolhido) { erroEl.textContent = "Escolha um arquivo de áudio primeiro."; return; }
+  if (!nome) { erroEl.textContent = "Dê um nome ao som."; return; }
+  const salvar = byId<HTMLButtonElement>("som-salvar");
+  salvar.disabled = true;
+  try {
+    const arquivo = await uploadFile(somEscolhido);
+    const criado = await api<Som>("/api/sons", {
+      method: "POST",
+      body: JSON.stringify({ serverId: currentServerId, name: nome, fileId: arquivo.id }),
+    });
+    sons.push(criado);
+    somEscolhido = null;
+    campo.value = "";
+    byId("som-arquivo").textContent = "";
+    renderSonsDialog();
+  } catch (erro) {
+    erroEl.textContent = erro instanceof Error ? erro.message : "Não foi possível criar o som.";
+  } finally {
+    salvar.disabled = false;
+  }
+}
+
+function abrirAbaDeSons() {
+  somEscolhido = null;
+  byId<HTMLInputElement>("som-nome").value = "";
+  byId("som-arquivo").textContent = "";
+  byId("sons-error").textContent = "";
+  renderSonsDialog();
+}
+byId("som-escolher").addEventListener("click", () => byId<HTMLInputElement>("som-input").click());
+byId("som-input").addEventListener("change", evento => {
+  const entrada = evento.target as HTMLInputElement;
+  const arquivo = entrada.files?.[0];
+  entrada.value = "";
+  if (!arquivo) return;
+  if (arquivo.size > 1024 * 1024) { byId("sons-error").textContent = "O som pode ter no máximo 1 MB."; return; }
+  byId("sons-error").textContent = "";
+  somEscolhido = arquivo;
+  byId("som-arquivo").textContent = arquivo.name;
+  const campo = byId<HTMLInputElement>("som-nome");
+  if (!campo.value) campo.value = arquivo.name.replace(/\.[^.]+$/, "").slice(0, 24);
+  campo.focus();
+});
+byId("som-salvar").addEventListener("click", () => void criarSom());
+
+// ---------------------------------------------------------------- lembrete
+const DIAS_DA_SEMANA = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"];
+
+/// Le "20h", "sáb 19:30", "amanhã 21h", "25/12 10h", "em 30min" do comeco do
+/// texto. Devolve o instante e o resto, que e o texto do lembrete.
+function lerQuando(bruto: string): { quando: Date; texto: string } | null {
+  const palavras = bruto.trim().split(/\s+/).filter(Boolean);
+  const sem = (palavra: string) => palavra.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  let i = 0;
+  const agora = new Date();
+
+  // "em 30min", "em 2 horas", "daqui 10 minutos"
+  if (["em", "daqui"].includes(sem(palavras[0] || ""))) {
+    const junto = (palavras[1] || "") + (/^\d+$/.test(palavras[1] || "") ? (palavras[2] || "") : "");
+    const achado = /^(\d+)(m|min|mins|minuto|minutos|h|hr|hora|horas)$/.exec(sem(junto));
+    if (!achado) return null;
+    const n = Number(achado[1]);
+    const ms = achado[2].startsWith("h") ? n * 3600_000 : n * 60_000;
+    i = /^\d+$/.test(palavras[1] || "") ? 3 : 2;
+    return { quando: new Date(agora.getTime() + ms), texto: palavras.slice(i).join(" ") };
+  }
+
+  // Dia (opcional): hoje, amanha, dia da semana, dd/mm[/aaaa].
+  let dia: Date | null = null;
+  const primeira = sem(palavras[0] || "");
+  const nomeDoDia = /^(dom|domingo|seg|segunda|ter|terca|qua|quarta|qui|quinta|sex|sexta|sab|sabado)(-feira)?$/.exec(primeira);
+  const semana = nomeDoDia ? DIAS_DA_SEMANA.findIndex(prefixo => nomeDoDia[1].startsWith(prefixo)) : -1;
+  const data = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/.exec(primeira);
+  if (primeira === "hoje") { dia = new Date(agora); i = 1; }
+  else if (primeira === "amanha") { dia = new Date(agora); dia.setDate(dia.getDate() + 1); i = 1; }
+  else if (semana >= 0) {
+    dia = new Date(agora);
+    dia.setDate(dia.getDate() + ((semana - agora.getDay() + 7) % 7));
+    i = 1;
+  } else if (data) {
+    const ano = data[3] ? Number(data[3].length === 2 ? "20" + data[3] : data[3]) : agora.getFullYear();
+    dia = new Date(ano, Number(data[2]) - 1, Number(data[1]));
+    i = 1;
+  }
+  // "as" entre o dia e a hora e opcional: "sáb às 20h".
+  if (["as", "a"].includes(sem(palavras[i] || ""))) i += 1;
+
+  const hora = /^(\d{1,2})(?:h(\d{2})?|:(\d{2}))$/.exec(sem(palavras[i] || ""));
+  if (!hora) return null;
+  const h = Number(hora[1]), m = Number(hora[2] || hora[3] || 0);
+  if (h > 23 || m > 59) return null;
+  i += 1;
+  const quando = new Date(dia || agora);
+  quando.setHours(h, m, 0, 0);
+  // Sem dia dito e com a hora ja passada, e amanha. Dia da semana de hoje com
+  // a hora passada e a semana que vem.
+  if (quando.getTime() <= agora.getTime()) {
+    if (!dia) quando.setDate(quando.getDate() + 1);
+    else if (semana >= 0) quando.setDate(quando.getDate() + 7);
+  }
+  return { quando, texto: palavras.slice(i).join(" ") };
+}
+
+function cartaoDeLembrete(lembrete: Lembrete): HTMLElement {
+  const cartao = document.createElement("div");
+  cartao.className = "lembrete" + (lembrete.disparado ? " disparado" : "");
+  const quando = new Intl.DateTimeFormat("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+    .format(new Date(lembrete.quando));
+  const topo = document.createElement("div");
+  topo.className = "lembrete-topo";
+  topo.textContent = lembrete.disparado ? "⏰ Lembrete" : "⏰ Lembrete marcado para " + quando;
+  const texto = document.createElement("div");
+  texto.className = "lembrete-texto";
+  texto.append(renderText(lembrete.texto));
+  cartao.append(topo, texto);
+  if (!lembrete.disparado) {
+    const nota = document.createElement("small");
+    nota.className = "muted";
+    nota.textContent = "Todos do canal serão avisados. Apagar esta mensagem cancela.";
+    cartao.append(nota);
+  }
+  return cartao;
+}
+
+// ------------------------------------------------------- salas temporarias
+function botaoDeSalaTemporaria(): HTMLElement {
+  const botao = document.createElement("button");
+  botao.type = "button";
+  botao.className = "channel voice sala-temporaria-nova";
+  botao.append(icon("plus", "room-dot"), document.createTextNode("Sala temporária"));
+  botao.title = "Abre uma sala de voz que some quando todo mundo sai";
+  botao.onclick = () => void criarSalaTemporaria();
+  return botao;
+}
+
+async function criarSalaTemporaria() {
+  if (!currentServerId || !session) return;
+  try {
+    const criada = await api<RoomInfo>("/api/rooms", {
+      method: "POST",
+      body: JSON.stringify({ name: "Sala de " + getDisplayName(session.username), serverId: currentServerId, kind: "voice", temporaria: true }),
+    });
+    if (!rooms.some(item => item.id === criada.id)) rooms.push(criada);
+    renderNavigation();
+    // Quem abre a sala quer estar nela: entrar e o clique seguinte de todo mundo.
+    await toggleVoice(criada.id);
+  } catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível abrir a sala."); }
+}
+
+// --------------------------------------------------- sozinho na chamada
+/// Quem fica sozinho na chamada por muito tempo e desconectado. O caso comum e
+/// o de quem esqueceu o app aberto na sala e foi dormir: o microfone continua
+/// aberto para quem entrar de manha.
+const SOZINHO_MAX_MS = 15 * 60_000;
+let sozinhoDesde = 0;
+let avisouSolidao = false;
+function vigiarSolidao() {
+  const sozinho = inCall() && Boolean(voiceRoomId) && callParticipants().length <= 1;
+  if (!sozinho) { sozinhoDesde = 0; avisouSolidao = false; return; }
+  if (!sozinhoDesde) sozinhoDesde = Date.now();
+  const passou = Date.now() - sozinhoDesde;
+  if (!avisouSolidao && passou >= SOZINHO_MAX_MS - 60_000) {
+    avisouSolidao = true;
+    playPing();
+    showToast("Você está sozinho na chamada. Em 1 minuto ela será encerrada.");
+  }
+  if (passou >= SOZINHO_MAX_MS) {
+    sozinhoDesde = 0; avisouSolidao = false;
+    void sairDaChamada().then(() => showToast("Você saiu da chamada por ficar 15 minutos sozinho."));
+  }
+}
+window.setInterval(vigiarSolidao, 30_000);
+
+// ---------------------------------------------------------------- mestre
+/// Canal de voz -> quem tem prioridade de fala.
+const mestres = new Map<string, string>();
+/// Quanto a voz dos outros cai enquanto o mestre fala.
+const FATOR_MESTRE = 0.35;
+let mestreFalavaAntes = false;
+
+function mestreFalando(): boolean {
+  const mestre = mestres.get(voiceRoomId);
+  // Quem e o mestre nao abaixa ninguem na propria maquina: precisa ouvir a
+  // mesa para responder.
+  if (!mestre || key(mestre) === key(session?.username || "")) return false;
+  return speaking.has(key(mestre));
+}
+
+function fatorDoMestre(nome: string): number {
+  const mestre = mestres.get(voiceRoomId);
+  if (!mestre || key(nome) === key(mestre)) return 1;
+  return mestreFalando() ? FATOR_MESTRE : 1;
+}
+
+/// O mestre escolhido para a sala: o do canal ou, sem um, o da categoria.
+function mestreDesignado(roomId: string): string | null {
+  const sala = rooms.find(item => item.id === roomId);
+  if (!sala) return null;
+  if (sala.mestre) return sala.mestre;
+  return categorias.find(c => c.id === sala.categoryId)?.mestre || null;
+}
+
+/// Escolher o mestre: dono e moderador, pelo botao direito no canal de voz ou
+/// na categoria. So aparece com o modo mestre ligado no servidor.
+function opcoesDeMestre(menu: HTMLElement, atual: string | null | undefined, heranca: string | null, aplicar: (nome: string | null) => void) {
+  if (!servers.find(s => s.id === currentServerId)?.modoMestre) return;
+  const titulo = document.createElement("p");
+  titulo.className = "menu-title";
+  titulo.textContent = "Mestre";
+  menu.append(titulo);
+  const opcao = (rotulo: string, nome: string | null, marcado: boolean) => {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.textContent = (marcado ? "• " : "") + rotulo;
+    botao.disabled = marcado;
+    botao.onclick = () => { closeUserMenu(); aplicar(nome); };
+    menu.append(botao);
+  };
+  opcao(heranca === null ? "Ninguém" : "Ninguém (usa o da categoria: " + (heranca ? getDisplayName(heranca) : "nenhum") + ")", null, !atual);
+  for (const nome of serverMembers) opcao(getDisplayName(nome), nome, Boolean(atual && key(atual) === key(nome)));
+}
+
+async function escolherMestre(caminho: string, nome: string | null) {
+  try {
+    await api<void>(caminho, { method: "PUT", body: JSON.stringify({ username: nome }) });
+    showToast(nome ? getDisplayName(nome) + " agora é o mestre." : "Mestre removido.");
+  } catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível escolher o mestre."); }
+}
+
+function pintarMestre() {
+  const botao = byId("mestre-button");
+  const mestre = mestres.get(voiceRoomId);
+  const souEu = Boolean(mestre && key(mestre) === key(session?.username || ""));
+  botao.classList.toggle("active", souEu);
+  const rotulo = botao.querySelector("small");
+  if (rotulo) rotulo.textContent = souEu ? "Sou o mestre" : "Mestre";
+  botao.title = souEu ? "Largar a prioridade de fala"
+    : mestre ? getDisplayName(mestre) + " tem a prioridade de fala. Clique para assumir."
+    : "Assumir a prioridade de fala: quando você fala, a voz dos outros abaixa";
+}
+
+byId("mestre-button").addEventListener("click", () => {
+  if (chat?.readyState !== WebSocket.OPEN) { showToast("Sem conexão."); return; }
+  const mestre = mestres.get(voiceRoomId);
+  const souEu = Boolean(mestre && key(mestre) === key(session?.username || ""));
+  chat.send(JSON.stringify({ type: "mestre", acao: souEu ? "largar" : "assumir" }));
+});
+
+// --------------------------------------------------------- assistir junto
+const assistindoPorSala = new Map<string, Assistindo>();
+let quadroAssistindo: HTMLIFrameElement | null = null;
+let videoNoQuadro = "";
+let assistirEscondido = false;
+
+/// Onde o video deveria estar agora, contando o tempo desde que o estado chegou.
+function posicaoEsperada(estado: Assistindo): number {
+  const passou = estado.tocando ? (performance.now() - (estado.recebido || performance.now())) / 1000 : 0;
+  return estado.posicao + passou;
+}
+
+function receberAssistindo(sala: string, estado: Assistindo | null, por: string) {
+  const antes = assistindoPorSala.get(sala);
+  if (estado) assistindoPorSala.set(sala, { ...estado, recebido: performance.now() });
+  else assistindoPorSala.delete(sala);
+  if (sala === voiceRoomId && por && key(por) !== key(session?.username || "")) {
+    if (!antes && estado) showToast(getDisplayName(por) + " começou um vídeo para todos.");
+    if (antes && !estado) showToast(getDisplayName(por) + " parou o vídeo.");
+  }
+  renderAssistir();
+}
+
+function mandarAoPlayer() {
+  const estado = assistindoPorSala.get(voiceRoomId);
+  if (!estado || !quadroAssistindo?.contentWindow) return;
+  quadroAssistindo.contentWindow.postMessage({ tipo: "estado", posicao: posicaoEsperada(estado), tocando: estado.tocando }, "*");
+}
+
+function renderAssistir() {
+  const painel = byId("assistir-panel");
+  const estado = inCall() ? assistindoPorSala.get(voiceRoomId) : undefined;
+  byId("assistir-button").classList.toggle("active", Boolean(estado));
+  if (!estado) {
+    painel.classList.add("hidden");
+    byId("assistir-quadro").replaceChildren();
+    quadroAssistindo = null; videoNoQuadro = "";
+    return;
+  }
+  painel.classList.remove("hidden");
+  painel.classList.toggle("minimizado", assistirEscondido);
+  byId("assistir-titulo").textContent = "Assistindo junto · começou com " + getDisplayName(estado.quem);
+  byId("assistir-esconder").textContent = assistirEscondido ? "Mostrar" : "Esconder";
+  if (videoNoQuadro !== estado.video || !quadroAssistindo) {
+    const ponte = ehTauri() ? new URL("/app/yt-junto.html", servidor.endereco()) : new URL("yt-junto.html", location.href);
+    ponte.searchParams.set("v", estado.video);
+    ponte.searchParams.set("t", String(Math.floor(posicaoEsperada(estado))));
+    const quadro = document.createElement("iframe");
+    quadro.src = ponte.toString();
+    quadro.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+    quadro.allowFullscreen = true;
+    byId("assistir-quadro").replaceChildren(quadro);
+    quadroAssistindo = quadro;
+    videoNoQuadro = estado.video;
+  } else {
+    mandarAoPlayer();
+  }
+}
+
+/// O que a pessoa fez no proprio player vira ordem para a sala inteira.
+window.addEventListener("message", evento => {
+  if (!quadroAssistindo || evento.source !== quadroAssistindo.contentWindow) return;
+  const dados = evento.data as { tipo?: string; posicao?: number } | null;
+  if (!dados?.tipo) return;
+  if (dados.tipo === "pronto") { mandarAoPlayer(); return; }
+  if ((dados.tipo === "tocar" || dados.tipo === "pausar") && chat?.readyState === WebSocket.OPEN) {
+    chat.send(JSON.stringify({ type: "assistir", acao: dados.tipo, posicao: Number(dados.posicao) || 0 }));
+  }
+});
+// Corrige o desvio de tempos em tempos: rede, aba em segundo plano, anuncio.
+window.setInterval(mandarAoPlayer, 5000);
+
+async function comecarVideo() {
+  const link = await askInput({
+    title: "Assistir junto", label: "Link do YouTube", placeholder: "https://youtu.be/...",
+    submit: "Começar", maxLength: 300, hint: "Todo mundo nesta chamada vê o mesmo vídeo, no mesmo ponto. Qualquer um pausa ou pula.",
+  });
+  if (!link) return;
+  const video = idDoYoutube(link.trim());
+  if (!video) { showToast("Esse link não é de um vídeo do YouTube."); return; }
+  if (chat?.readyState !== WebSocket.OPEN) { showToast("Sem conexão."); return; }
+  assistirEscondido = false;
+  chat.send(JSON.stringify({ type: "assistir", acao: "iniciar", text: video.id, posicao: video.inicio || 0 }));
+}
+
+byId("assistir-button").addEventListener("click", evento => {
+  if (!assistindoPorSala.get(voiceRoomId)) { void comecarVideo(); return; }
+  abrirMenuSimples(byId("assistir-button"), { x: evento.clientX, y: evento.clientY }, [
+    menuAcao("Trocar o vídeo", "theater", () => void comecarVideo()),
+    menuAcao("Parar para todos", "hangup", () => chat?.send(JSON.stringify({ type: "assistir", acao: "parar" }))),
+  ]);
+});
+byId("assistir-esconder").addEventListener("click", () => { assistirEscondido = !assistirEscondido; renderAssistir(); });
+byId("assistir-parar").addEventListener("click", () => chat?.send(JSON.stringify({ type: "assistir", acao: "parar" })));
+
+// ------------------------------------------------------------ jogando agora
+const JOGO_KEY = "naoconcordo.mostrar-jogo";
+const mostrarJogo = () => localStorage.getItem(JOGO_KEY) !== "0";
+/// O que o servidor ja sabe. So manda de novo quando muda.
+let jogoAnunciado = "";
+
+/// Pergunta ao lado nativo que jogo esta aberto e avisa o servidor se mudou.
+/// So no aplicativo instalado: o navegador nao enxerga os outros programas.
+async function vigiarJogo() {
+  if (!ehTauri() || !session || chat?.readyState !== WebSocket.OPEN) return;
+  let jogo = "";
+  if (mostrarJogo()) {
+    try { jogo = (await invoke<string | null>("jogo_aberto")) || ""; } catch { jogo = ""; }
+  }
+  if (jogo === jogoAnunciado || !session || chat?.readyState !== WebSocket.OPEN) return;
+  jogoAnunciado = jogo;
+  chat.send(JSON.stringify({ type: "jogo", text: jogo }));
+  // O servidor nao devolve a propria presenca (ver `presenceChanged`).
+  if (jogo) jogosDeGente.set(key(session.username), jogo); else jogosDeGente.delete(key(session.username));
+  renderPeople();
+}
+window.setInterval(() => void vigiarJogo(), 15_000);
+byId<HTMLInputElement>("mostrar-jogo").addEventListener("change", evento => {
+  localStorage.setItem(JOGO_KEY, (evento.target as HTMLInputElement).checked ? "1" : "0");
+  void vigiarJogo();
+});
 
 /// Seletor de emote do compositor: escreve `:apelido:` onde o cursor estiver.
 ///
@@ -9693,6 +10434,12 @@ function linhasDeVoz(item: RoomInfo): HTMLElement[] {
       + (item.id === voiceRoomId ? " active" : "")
       + (olhandoAChamada && item.id === voiceRoomId ? " olhando" : "");
     button.append(icon("speaker", "room-dot"), document.createTextNode(item.name));
+    if (item.temporaria) {
+      button.classList.add("temporaria");
+      button.title = "Sala temporária: some sozinha quando todo mundo sai";
+    }
+    const mestreDaSala = servers.find(s => s.id === item.serverId)?.modoMestre ? mestreDesignado(item.id) : null;
+    if (mestreDaSala) button.title = (button.title ? button.title + "\n" : "") + "Mestre: " + getDisplayName(mestreDaSala);
     // Clicar no canal em que voce ja esta **nao** desconecta: abre o palco, e o
     // clique de novo devolve o canal de texto. Sair e o botao de desligar, que
     // existe para isso e nao se aperta sem querer ao procurar quem esta na sala.
@@ -9819,6 +10566,14 @@ function personRow(name: string, online: boolean, naChamada: boolean) {
     for (const no of renderText(recado).childNodes) linha.append(no);
     text.append(linha);
   }
+  const jogo = online ? jogosDeGente.get(key(name)) : undefined;
+  if (jogo) {
+    const linha = document.createElement("small");
+    linha.className = "person-jogo";
+    linha.textContent = "Jogando " + jogo;
+    linha.title = linha.textContent;
+    text.append(linha);
+  }
   row.append(retrato, text);
   if (naChamada) {
     const marks = document.createElement("span");
@@ -9923,6 +10678,7 @@ function renderPeople() {
     // saída de alguém.
     + "~" + (estadosDeGente.get(key(name)) || "online")
     + "~" + recadoDe(name)
+    + "~" + (jogosDeGente.get(key(name)) || "")
     + (naChamada.has(key(name)) ? "!" : "")
     + (sharesAudio(name) ? "+t" : "")
     + (micMuted(name) ? "+m" : "")
@@ -9963,6 +10719,20 @@ function resetMediaState() {
 function updateCallControls() {
   const ativa = Boolean(voiceRoomId) || room?.state === "connected" || room?.state === "connecting";
   byId("call-controls").classList.toggle("hidden", !ativa);
+  // Soundboard e do servidor: em chamada privada nao ha de onde tirar os sons.
+  byId("sons-button").classList.toggle("hidden", !ativa || !serverDaChamada());
+  byId("assistir-button").classList.toggle("hidden", !ativa || !serverDaChamada());
+  // So em servidor que ligou o modo mestre: em servidor que nao e de mesa de
+  // RPG seria um botao sem sentido.
+  // So para quem foi escolhido mestre desta sala, e so em servidor que ligou o
+  // modo mestre. Para o resto da mesa o botao nao existe.
+  const designado = mestreDesignado(voiceRoomId);
+  byId("mestre-button").classList.toggle("hidden", !ativa
+    || !servers.find(s => s.id === serverDaChamada())?.modoMestre
+    || !designado || key(designado) !== key(session?.username || ""));
+  pintarMestre();
+  renderAssistir();
+  vigiarSolidao();
   // O espaco do rodape pertence a barra: sem ela, o redator desce ate o fim.
   byId("app-view").querySelector(".main-panel")?.classList.toggle("com-chamada", ativa);
   // Quem transmite precisa saber se tem plateia: desde o botao "Assistir",
