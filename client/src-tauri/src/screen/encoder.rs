@@ -607,7 +607,13 @@ unsafe fn laco(
     // entrega troca imagem feia por pacote perdido. O teto continua sendo o
     // degrau que a pessoa escolheu; o piso so evita que o codificador desca a
     // numeros onde nem 360p fecha.
-    let piso_de_taxa = 1_000_000;
+    //
+    // 300 kbps e nao 1 Mbps (ate a 0.7.46): piso acima do que o WebRTC
+    // autorizou faz o codificador produzir mais do que a subida leva, e o
+    // excedente vira quadro ja comprimido descartado no caminho — referencia
+    // quebrada, imagem esfarelada. Abaixo de 1 Mbps a escada ja entrega 360p,
+    // e 360p pobre e melhor que 1080p quebrado.
+    let piso_de_taxa = 300_000;
     // Quadro recusado seguido. Um sozinho e soluco; muitos em sequencia sao
     // codificador morto — e ai vale desistir e dizer por que.
     let mut recusas = 0u32;
@@ -629,9 +635,9 @@ unsafe fn laco(
             // captura, noutra thread, e ela precisa do numero atual mesmo
             // quando a diferenca e pequena demais para reconfigurar o MFT.
             alvo_publicado.store(alvo, Ordering::Relaxed);
-            if alvo.abs_diff(bitrate_atual) * 20 > bitrate_atual {
+            if alvo.abs_diff(bitrate_atual) * 20 > bitrate_atual
+                && unsafe { mft.definir_bitrate(alvo, fps) } {
                 bitrate_atual = alvo;
-                unsafe { mft.definir_bitrate(alvo, fps) };
             }
         }
         // Contados separadamente: o pedido vem de quem assiste, e a chave e o
@@ -1012,6 +1018,12 @@ impl Mft {
                 // logo em tela cheia de texto.
                 let _ = saida.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32);
             }
+            // Sem B-frames, e antes do tipo de saida: alguns drivers so leem
+            // isto na negociacao. B-frame reordena quadros, e o caminho sem
+            // recompressao ate o WebRTC espera cada quadro na ordem em que sai.
+            if let Some(api) = &self.codec_api {
+                let _ = api.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variante_u32(0));
+            }
             self.transform
                 .SetOutputType(0, &saida, 0)
                 .map_err(|e| format!("saida recusada ({}): {e}", self.nome))?;
@@ -1106,6 +1118,7 @@ impl Mft {
             // reagir — que e exatamente o "derretido em blocos" com o que esta
             // parado ainda nitido.
             tentar("lowlatency", &CODECAPI_AVEncCommonLowLatency, variante_bool(true));
+            tentar("sem-b", &CODECAPI_AVEncMPVDefaultBPictureCount, variante_u32(0));
             // Teto igual a media: em CBR de verdade os dois andam juntos. Sem
             // o teto, o AMF trata o valor medio como alvo frouxo.
             tentar(
@@ -1113,18 +1126,13 @@ impl Mft {
                 &CODECAPI_AVEncCommonMaxBitRate,
                 variante_u32(bitrate.min(u64::from(u32::MAX)) as u32),
             );
-            // Tamanho do balde (VBV/HRD), em bits. O padrao da AMD e grande o
-            // bastante para o codificador gastar varios quadros de orcamento
-            // num quadro so e passar os seguintes se recuperando — em video
-            // gravado ninguem ve, numa chamada e o esfarelamento. Dois quadros
-            // de folga: o suficiente para um corte de cena, pouco o bastante
-            // para nao virar divida.
-            let balde = ((bitrate as f64 / fps.max(1.0)) * 2.0) as u64;
-            tentar(
-                "vbv",
-                &CODECAPI_AVEncCommonBufferSize,
-                variante_u32(balde.clamp(1, u64::from(u32::MAX)) as u32),
-            );
+            // Tamanho do balde (VBV/HRD). O padrao da AMD e grande o bastante
+            // para o codificador gastar varios quadros de orcamento num quadro
+            // so e passar os seguintes se recuperando — em video gravado
+            // ninguem ve, numa chamada e o esfarelamento. Dois quadros de
+            // folga: o suficiente para um corte de cena, pouco o bastante para
+            // nao virar divida. Ver `balde_em_bytes`.
+            tentar("vbv", &CODECAPI_AVEncCommonBufferSize, variante_u32(balde_em_bytes(bitrate, fps)));
             // 0 e "o mais rapido", 100 e "o melhor". O padrao do AMF puxa para
             // a velocidade; numa GPU que esta codificando um quadro a cada
             // 16 ms com folga, essa troca nao paga.
@@ -1207,15 +1215,21 @@ impl Mft {
     /// codificador em CBR com um balde dimensionado para a taxa antiga, que e
     /// o pior dos dois mundos — apertado quando a banda sobe, frouxo quando
     /// ela cai.
-    unsafe fn definir_bitrate(&self, bps: u64, fps: f64) {
-        let Some(api) = &self.codec_api else { return };
+    ///
+    /// Devolve `false` se o driver recusou a media: ai o alvo antigo continua
+    /// valendo, e quem chamou nao pode fingir que trocou.
+    unsafe fn definir_bitrate(&self, bps: u64, fps: f64) -> bool {
+        let Some(api) = &self.codec_api else { return false };
         let teto = bps.min(u64::from(u32::MAX)) as u32;
-        let balde = (((bps as f64 / fps.max(1.0)) * 2.0) as u64).clamp(1, u64::from(u32::MAX)) as u32;
-        unsafe {
-            let _ = api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variante_u32(teto));
-            let _ = api.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &variante_u32(teto));
-            let _ = api.SetValue(&CODECAPI_AVEncCommonBufferSize, &variante_u32(balde));
+        let media = unsafe { api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variante_u32(teto)) };
+        let maximo = unsafe { api.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &variante_u32(teto)) };
+        let balde = unsafe { api.SetValue(&CODECAPI_AVEncCommonBufferSize, &variante_u32(balde_em_bytes(bps, fps))) };
+        for (nome, resultado) in [("media", &media), ("teto", &maximo), ("balde", &balde)] {
+            if let Err(erro) = resultado {
+                eprintln!("[encoder] {}: {nome} de {bps} bps recusado: {erro}", self.nome);
+            }
         }
+        media.is_ok()
     }
 
     /// Pede um quadro-chave pelos dois caminhos que existem.
@@ -1472,6 +1486,17 @@ fn comeca_com(todo: &[u8], prefixo: &[u8]) -> bool {
     }
 }
 
+/// Tamanho do balde para `CODECAPI_AVEncCommonBufferSize`: dois quadros de
+/// orcamento, **em bytes**.
+///
+/// Ate a 0.7.46 ia em bits — oito vezes maior que o pretendido. A 12 Mbps e
+/// 60 fps eram ~400 KB, dezesseis quadros de folga (~267 ms), e a AMD usava a
+/// folga toda em rajadas de 16 a 19 Mbps contra um alvo de 12.
+fn balde_em_bytes(bps: u64, fps: f64) -> u32 {
+    let bytes = bps as f64 * 2.0 / fps.max(1.0) / 8.0;
+    (bytes as u64).clamp(1, u64::from(u32::MAX)) as u32
+}
+
 /// Taxa de quadros como fracao. Os degraus da interface sao inteiros, mas a
 /// captura pode pedir 59,94 quando o monitor e de 60 Hz de verdade.
 fn fracao_de_fps(fps: f64) -> (u32, u32) {
@@ -1523,6 +1548,15 @@ fn copiar_com_folga(origem: &[u8], largura: usize, destino: &mut [u8], passo: us
 
 #[cfg(test)]
 mod testes {
+    /// O balde vai em bytes: 12 Mbps a 60 fps sao 25.000 bytes por quadro,
+    /// e dois quadros de folga sao 50.000 — nao os 400.000 de antes.
+    #[test]
+    fn balde_e_dois_quadros_em_bytes() {
+        assert_eq!(balde_em_bytes(12_000_000, 60.0), 50_000);
+        assert_eq!(balde_em_bytes(3_000_000, 30.0), 25_000);
+        assert_eq!(balde_em_bytes(0, 60.0), 1);
+    }
+
     use super::*;
 
     /// 12 Mbps pagam 1080p60 inteiro; 2 Mbps nao pagam nem o terco.
