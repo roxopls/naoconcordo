@@ -51,10 +51,13 @@ type TermoDeRolagem =
 type Rolagem = { expressao: string; motivo?: string; termos: TermoDeRolagem[]; total: number };
 type Enquete = { pergunta: string; opcoes: { texto: string; votos: string[] }[] };
 type Som = { id: string; serverId: string; name: string; fileId: string; createdBy: string; createdAt: string };
-type AuthSession = { token: string; username: string; expiresAt: number };
+/// `lembrar: false` = "Manter conectado" desmarcado: a sessao vale so enquanto
+/// o aplicativo estiver aberto. Ausente (sessao gravada antes da opcao) conta
+/// como lembrada, para ninguem ser deslogado pela atualizacao.
+type AuthSession = { token: string; username: string; expiresAt: number; lembrar?: boolean };
 type ServerInfo = { id: string; name: string; iconFile?: string | null; bannerFile?: string | null; description?: string | null; modoMestre?: boolean } & Skin;
 type RoomKind = "text" | "voice";
-type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind; categoryId?: string | null; posicao?: number; temporaria?: boolean; mestre?: string | null } & Skin;
+type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind; categoryId?: string | null; posicao?: number; temporaria?: boolean; mestre?: string | null; capa?: string | null } & Skin;
 /// Cor e fundo de um servidor ou canal. Campos independentes: da para trocar so
 /// a cor de destaque, so o fundo, ou os dois.
 type Skin = { accent?: string | null; bgColor?: string | null; bgFile?: string | null; bgOpacity?: number | null };
@@ -405,11 +408,36 @@ function persistComposerDraft(value: string, agora = false) {
   rascunhoPendente = window.setTimeout(() => saveDraft(quem, conversation, value), 400);
 }
 
+// A sessao fica no localStorage mesmo sem "Manter conectado", porque as janelas
+// de cameras e telas leem de la. O que a torna temporaria e esta marca no
+// sessionStorage da janela principal, que morre quando o aplicativo fecha e
+// sobrevive a recarregar.
+const MARCA_SESSAO_TEMPORARIA = "naoconcordo.sessao-desta-abertura";
 function readSession(): AuthSession | null {
-  try { const value = JSON.parse(localStorage.getItem("naoconcordo.session") || "null") as AuthSession | null; return value && value.expiresAt * 1000 > Date.now() ? value : null; }
+  try {
+    const value = JSON.parse(localStorage.getItem("naoconcordo.session") || "null") as AuthSession | null;
+    if (!value || value.expiresAt * 1000 <= Date.now()) return null;
+    if (value.lembrar === false && !sessionStorage.getItem(MARCA_SESSAO_TEMPORARIA)) {
+      localStorage.removeItem("naoconcordo.session");
+      return null;
+    }
+    return value;
+  }
   catch { return null; }
 }
-function saveSession(value: AuthSession | null) { session = value; if (value) localStorage.setItem("naoconcordo.session", JSON.stringify(value)); else localStorage.removeItem("naoconcordo.session"); }
+function saveSession(value: AuthSession | null) {
+  session = value;
+  try {
+    if (value) localStorage.setItem("naoconcordo.session", JSON.stringify(value)); else localStorage.removeItem("naoconcordo.session");
+    if (value?.lembrar === false) sessionStorage.setItem(MARCA_SESSAO_TEMPORARIA, "1"); else sessionStorage.removeItem(MARCA_SESSAO_TEMPORARIA);
+  } catch { /* sem armazenamento, a sessao vive so na memoria */ }
+}
+/// "Manter conectado" lembra a ultima escolha; o padrao e marcado.
+const lembrarLogin = byId<HTMLInputElement>("lembrar-login");
+try { lembrarLogin.checked = localStorage.getItem("naoconcordo.lembrar-login") !== "0"; } catch { /* fica o padrao */ }
+lembrarLogin.addEventListener("change", () => {
+  try { localStorage.setItem("naoconcordo.lembrar-login", lembrarLogin.checked ? "1" : "0"); } catch { /* nada a fazer */ }
+});
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers); headers.set("Content-Type", "application/json");
   if (session) headers.set("Authorization", "Bearer " + session.token);
@@ -564,6 +592,7 @@ loginForm.addEventListener("submit", async event => {
   const username = byId<HTMLInputElement>("username").value.trim();
   const password = byId<HTMLInputElement>("password").value;
   const invite = byId<HTMLInputElement>("invite").value;
+  const lembrar = lembrarLogin.checked;
   loginError.textContent = "";
   if (password.length < 8) { loginError.textContent = "A senha precisa ter pelo menos 8 caracteres."; return; }
   submit.setAttribute("disabled", "true");
@@ -579,12 +608,12 @@ loginForm.addEventListener("submit", async event => {
       const auth = await api<AuthSession>("/api/auth/register", {
         method: "POST",
         body: JSON.stringify({
-          username, nonce: challenge.nonce, inviteProof,
+          username, nonce: challenge.nonce, inviteProof, lembrar,
           verifier: bytesToBase64Url(verifier),
           recoveryVerifier: bytesToBase64Url(recoveryVerifier)
         })
       });
-      saveSession(auth);
+      saveSession({ ...auth, lembrar });
       // Conta nova ja nasce com os dois embrulhos: e o unico momento, fora da
       // recuperacao, em que o codigo esta a vista.
       chaveDeSenha = await chaveDoCofre(password, challenge.passwordSalt, challenge.passwordIterations);
@@ -593,7 +622,8 @@ loginForm.addEventListener("submit", async event => {
     } else {
       if (!challenge.accountExists) throw new Error("Usuario nao cadastrado. Use Criar conta.");
       const proof = await signProof(verifier, challenge.nonce, username);
-      saveSession(await api<AuthSession>("/api/auth/login", { method: "POST", body: JSON.stringify({ username, nonce: challenge.nonce, proof }) }));
+      const auth = await api<AuthSession>("/api/auth/login", { method: "POST", body: JSON.stringify({ username, nonce: challenge.nonce, proof, lembrar }) });
+      saveSession({ ...auth, lembrar });
       // Derivada aqui, enquanto a senha esta em maos; e o que abre as conversas
       // nesta maquina pela primeira vez.
       chaveDeSenha = await chaveDoCofre(password, challenge.passwordSalt, challenge.passwordIterations);
@@ -652,10 +682,12 @@ recoveryForm.addEventListener("submit", async event => {
     // reembrulhar depois. Derivar antes de trocar a senha evita perder o unico
     // caminho de volta para o historico.
     const chaveAntiga = await chaveDoCofre(recoveryCode, challenge.recoverySalt, challenge.passwordIterations);
-    saveSession(await api<AuthSession>("/api/auth/recover", {
+    const lembrar = lembrarLogin.checked;
+    const auth = await api<AuthSession>("/api/auth/recover", {
       method: "POST",
-      body: JSON.stringify({ username, nonce: challenge.nonce, recoveryProof, verifier: bytesToBase64Url(verifier), recoveryVerifier: bytesToBase64Url(nextRecoveryVerifier) })
-    }));
+      body: JSON.stringify({ username, nonce: challenge.nonce, recoveryProof, lembrar, verifier: bytesToBase64Url(verifier), recoveryVerifier: bytesToBase64Url(nextRecoveryVerifier) })
+    });
+    saveSession({ ...auth, lembrar });
     chaveDeSenha = await chaveDoCofre(password, challenge.passwordSalt, challenge.passwordIterations);
     chaveDeRecuperacao = await chaveDoCofre(nextRecoveryCode, challenge.recoverySalt, challenge.passwordIterations);
     await recuperarCofre(username, chaveAntiga);
@@ -4115,12 +4147,57 @@ async function vigiarPrimeirosQuadros() {
   } catch { /* a transmissao pode ter parado nesse meio tempo */ }
 }
 
+// ------------------------------------------------------ qualidade da camera
+// "Normal" e o 720p24 a 1,2 Mbps que ja era o padrao da sala. O limite e o
+// total do VP9 em camadas (720p + 360p + 180p num fluxo so), entao a camada
+// cheia leva so uma parte dele: e isso que pixela com movimento. "Maxima" volta
+// ao 1080p que afogou a descida com quatro cameras em 2026-09-20 — fica como
+// escolha de quem transmite, nao como padrao.
+type QualidadeCamera = "economica" | "normal" | "alta" | "maxima";
+const QUALIDADES_CAMERA: Record<QualidadeCamera, { largura: number; altura: number; fps: number; bitrate: number }> = {
+  economica: { largura: 640, altura: 360, fps: 15, bitrate: 450_000 },
+  normal: { largura: 1280, altura: 720, fps: 24, bitrate: 1_200_000 },
+  alta: { largura: 1280, altura: 720, fps: 30, bitrate: 2_500_000 },
+  maxima: { largura: 1920, altura: 1080, fps: 30, bitrate: 4_000_000 },
+};
+const QUALIDADE_CAMERA_KEY = "naoconcordo.qualidade-camera";
+function qualidadeCamera(): QualidadeCamera {
+  try {
+    const valor = localStorage.getItem(QUALIDADE_CAMERA_KEY);
+    if (valor && valor in QUALIDADES_CAMERA) return valor as QualidadeCamera;
+  } catch { /* fica o padrao */ }
+  return "normal";
+}
+/// Liga a camera com a qualidade escolhida. O aparelho vem do
+/// `videoCaptureDefaults.deviceId` que o `switchActiveDevice` ja deixou na sala.
+async function ligarCamera(sala: Room) {
+  const q = QUALIDADES_CAMERA[qualidadeCamera()];
+  await sala.localParticipant.setCameraEnabled(true,
+    { resolution: { width: q.largura, height: q.altura, frameRate: q.fps } },
+    { videoEncoding: { maxBitrate: q.bitrate, maxFramerate: q.fps } });
+}
+const seletorQualidadeCamera = byId<HTMLSelectElement>("qualidade-camera");
+seletorQualidadeCamera.value = qualidadeCamera();
+seletorQualidadeCamera.addEventListener("change", async () => {
+  try { localStorage.setItem(QUALIDADE_CAMERA_KEY, seletorQualidadeCamera.value); } catch { /* nada a fazer */ }
+  if (!camEnabled || !room) return;
+  // Desligar a camera no LiveKit so muta a faixa, e religar reaproveitaria o
+  // encoding antigo. Para a qualidade nova valer agora, a faixa e despublicada
+  // e publicada de novo.
+  const sala = room;
+  try {
+    const atual = sala.localParticipant.getTrackPublication(Track.Source.Camera)?.track;
+    if (atual) await sala.localParticipant.unpublishTrack(atual);
+    await ligarCamera(sala);
+  } catch { camEnabled = false; camButton.classList.remove("active"); showToast("Não foi possível religar a câmera."); }
+});
+
 // Camera e compartilhamento sao independentes: dao para ficar ligados juntos.
 camButton.onclick = async () => {
   if (!await ensureInCall() || !room) return;
   try {
     camEnabled = !camEnabled;
-    await room.localParticipant.setCameraEnabled(camEnabled);
+    if (camEnabled) await ligarCamera(room); else await room.localParticipant.setCameraEnabled(false);
     camButton.classList.toggle("active", camEnabled);
   } catch { camEnabled = false; camButton.classList.remove("active"); showToast("O Windows não liberou a câmera."); }
 };
@@ -9423,6 +9500,7 @@ function menuDoCanal(item: RoomInfo, ancora: HTMLElement, evento: MouseEvent) {
     const daCategoria = categorias.find(c => c.id === item.categoryId);
     opcoesDeMestre(menu, item.mestre, daCategoria ? (daCategoria.mestre || "") : null,
       nome => void escolherMestre("/api/rooms/" + encodeURIComponent(item.id) + "/mestre", nome));
+    acoesDeCapa(menu, item);
   }
 
   // A secao de mover so faz sentido onde ha grupos para onde mover.
@@ -10453,7 +10531,13 @@ function linhasDeVoz(item: RoomInfo): HTMLElement[] {
     };
     // Mesmo menu do canal de texto: sem isto, so metade dos canais entraria
     // numa categoria, e a mesa de voz da campanha ficaria de fora dela.
-    button.oncontextmenu = evento => menuDoCanal(item, button, evento);
+    // Quem esta na chamada, mesmo sem ser dono ou moderador, ainda tem o menu
+    // curto da imagem da chamada.
+    const menuDaSala = (evento: MouseEvent) => {
+      if (podeCriarCanal()) menuDoCanal(item, button, evento);
+      else if (estouNaSala(item)) menuDeCapa(item, button, evento);
+    };
+    button.oncontextmenu = menuDaSala;
     tornarArrastavel(button, { tipo: "canal", id: item.id });
     alvoDeCanal(button, item);
     const nodes: HTMLElement[] = [button];
@@ -10461,6 +10545,9 @@ function linhasDeVoz(item: RoomInfo): HTMLElement[] {
     // qualquer canal, nao so no seu: dava para entrar numa sala vazia sem
     // saber que a conversa estava na do lado.
     const naSala = peopleInVoice(item.id);
+    // A imagem da chamada fica guardada com a sala vazia, mas so aparece com
+    // gente dentro: ela diz o que esta acontecendo agora.
+    if (naSala.length && item.capa) nodes.push(cartaoDeCapa(item.capa, menuDaSala));
     if (naSala.length) {
       const box = document.createElement("div"); box.className = "voice-members";
       for (const name of naSala) {
@@ -10493,6 +10580,77 @@ function linhasDeVoz(item: RoomInfo): HTMLElement[] {
       nodes.push(box);
     }
     return nodes;
+}
+
+/// O cartao com a imagem da chamada, embaixo do nome do canal de voz.
+///
+/// Usa a miniatura, e nao o original: a barra lateral e redesenhada a cada
+/// entrada e saida de alguem, e a imagem ocupa uns 200 px de largura.
+function cartaoDeCapa(fileId: string, aoMenu: (evento: MouseEvent) => void) {
+  const cartao = document.createElement("div");
+  cartao.className = "voice-capa";
+  const img = document.createElement("img");
+  img.alt = "";
+  img.draggable = false;
+  // Da memoria na hora, sem esperar: a lista e redesenhada o tempo todo, e a
+  // imagem piscaria a cada vez.
+  const pronta = miniCache.get(fileId);
+  if (pronta) img.src = pronta.url;
+  else void miniaturaUrl(fileId).then(url => { img.src = url; }).catch(() => cartao.remove());
+  cartao.append(img);
+  cartao.oncontextmenu = aoMenu;
+  return cartao;
+}
+
+function estouNaSala(item: RoomInfo) {
+  return item.id === voiceRoomId && peopleInVoice(item.id).some(nome => key(nome) === key(session?.username || ""));
+}
+
+/// Trocar e tirar a imagem da chamada. Vai dentro do menu do canal para quem
+/// organiza, e sozinho para quem so esta na chamada.
+function acoesDeCapa(menu: HTMLElement, item: RoomInfo) {
+  const acao = (rotulo: string, aoClicar: () => void) => {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.textContent = rotulo;
+    botao.onclick = () => { closeUserMenu(); aoClicar(); };
+    menu.append(botao);
+  };
+  acao(item.capa ? "Trocar imagem da chamada" : "Pôr imagem na chamada", () => escolherCapa(item));
+  if (item.capa) acao("Tirar imagem da chamada", () => void gravarCapa(item, null));
+}
+
+function menuDeCapa(item: RoomInfo, ancora: HTMLElement, evento: MouseEvent) {
+  evento.preventDefault();
+  evento.stopPropagation();
+  closeUserMenu();
+  const menu = document.createElement("div");
+  menu.className = "user-menu";
+  acoesDeCapa(menu, item);
+  montarMenu(menu, ancora, { x: evento.clientX, y: evento.clientY });
+}
+
+function escolherCapa(item: RoomInfo) {
+  const entrada = document.createElement("input");
+  entrada.type = "file";
+  entrada.accept = "image/png,image/jpeg,image/webp,image/gif";
+  entrada.onchange = async () => {
+    const arquivo = entrada.files?.[0];
+    if (!arquivo) return;
+    try { await gravarCapa(item, (await uploadFile(arquivo)).id); }
+    catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível enviar a imagem."); }
+  };
+  entrada.click();
+}
+
+async function gravarCapa(item: RoomInfo, fileId: string | null) {
+  try {
+    await api<void>("/api/rooms/" + encodeURIComponent(item.id) + "/capa", {
+      method: "PUT", body: JSON.stringify({ fileId }),
+    });
+    item.capa = fileId;
+    renderNavigation();
+  } catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível trocar a imagem."); }
 }
 
 function montarMenu(menu: HTMLElement, anchor: HTMLElement, ponto?: { x: number; y: number }) {
@@ -10832,7 +10990,20 @@ async function avisarOrigem(
   showToast(texto, ir);
 }
 function initials(name: string) { return name.split(/\s+/).slice(0, 2).map(part => part[0]?.toUpperCase()).join(""); }
-async function resume() { if (!session) return; try { await api("/api/session"); await enterApp(); } catch { saveSession(null); } }
+async function resume() {
+  if (!session) return;
+  const token = session.token;
+  try { await api("/api/session"); }
+  catch {
+    // So o 401 derruba a sessao guardada. Servidor fora do ar (deploy, queda da
+    // internet) nao diz nada sobre ela: tenta de novo em vez de deslogar.
+    // A guarda do token para a nova tentativa se a pessoa entrar na mao antes.
+    if (await sessaoAindaVale()) { window.setTimeout(() => { if (session?.token === token) void resume(); }, 5000); return; }
+    saveSession(null);
+    return;
+  }
+  try { await enterApp(); } catch { saveSession(null); }
+}
 void resume();
 void decidirAberturaInicial();
 void prepararNotificacoes();

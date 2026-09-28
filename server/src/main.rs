@@ -42,6 +42,8 @@ const MAX_ENVELOPES: usize = 5_000;
 /// o conserto e gravar em fluxo, nao baixar o teto.
 const MAX_UPLOAD: usize = 200 * 1024 * 1024;
 const SESSION_SECONDS: u64 = 7 * 24 * 60 * 60;
+/// Prazo de quem marcou "Manter conectado" na entrada.
+const SESSION_LEMBRAR_SECONDS: u64 = 90 * 24 * 60 * 60;
 const PASSWORD_ITERATIONS: u32 = 210_000;
 /// Teto das preferencias de uma conta. Elas seguem a pessoa entre computadores,
 /// entao viajam em toda entrada; sem teto viravam um lugar barato de guardar
@@ -132,7 +134,14 @@ struct AppState {
     dj_estado: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     events: broadcast::Sender<Broadcast>,
 }
-#[derive(Clone)] struct Session { username: String, expires_at: u64, is_owner: bool }
+/// Sessoes vivem em `sessions.json` para sobreviver a reinicio do servidor —
+/// antes, cada deploy deslogava todo mundo. O arquivo e o mapa em memoria sao
+/// indexados pelo SHA-256 do token, nunca pelo token: vazar o arquivo nao da
+/// sessao a ninguem.
+///
+/// `is_owner` fica fora do disco de proposito: o codigo de proprietario e pedido
+/// de novo depois de um reinicio, como sempre foi.
+#[derive(Clone, Serialize, Deserialize)] struct Session { username: String, expires_at: u64, #[serde(skip)] is_owner: bool }
 #[derive(Clone)] struct Challenge { username: String, expires_at: u64, ip: String, password_salt: String, recovery_salt: String, account_exists: bool }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -192,6 +201,10 @@ struct RoomInfo {
     /// Quem pode ligar a prioridade de fala nesta sala. Sem ele vale o da
     /// categoria. Ver `sala::mestre_designado`.
     #[serde(default, skip_serializing_if = "Option::is_none")] mestre: Option<String>,
+    /// Imagem da chamada, como id de anexo: o cartao que aparece embaixo do
+    /// canal de voz na barra lateral ("jogando tal coisa"). So canal de voz.
+    /// Fica guardada com a sala vazia, e o cliente so desenha com gente dentro.
+    #[serde(default, skip_serializing_if = "Option::is_none")] capa: Option<String>,
 }
 
 /// Um grupo de canais dentro de um servidor.
@@ -584,11 +597,12 @@ impl Broadcast {
 }
 
 #[derive(Deserialize)] struct UsernameInput { username: String }
-#[derive(Deserialize)] struct LoginInput { username: String, nonce: String, proof: String }
+// `lembrar` ausente (cliente antigo) cai no prazo curto de sempre.
+#[derive(Deserialize)] struct LoginInput { username: String, nonce: String, proof: String, #[serde(default)] lembrar: bool }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")]
-struct RegisterInput { username: String, nonce: String, invite_proof: String, verifier: String, recovery_verifier: String }
+struct RegisterInput { username: String, nonce: String, invite_proof: String, verifier: String, recovery_verifier: String, #[serde(default)] lembrar: bool }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")]
-struct RecoverInput { username: String, nonce: String, recovery_proof: String, verifier: String, recovery_verifier: String }
+struct RecoverInput { username: String, nonce: String, recovery_proof: String, verifier: String, recovery_verifier: String, #[serde(default)] lembrar: bool }
 #[derive(Deserialize)] struct WsQuery { token: String, #[serde(default)] estado: Option<String> }
 #[derive(Deserialize)] struct EditMessageInput { text: String }
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")] struct ClientMessage { #[serde(rename = "type")] kind: String, text: Option<String>, room_id: Option<String>, #[serde(default)] attachments: Vec<String>, #[serde(default)] reply_to: Option<Uuid>,
@@ -921,7 +935,8 @@ async fn main() {
         grupos_mensagens: Arc::new(RwLock::new(mensagens_de_grupo)),
         chamadas_privadas: Default::default(),
         dj_estado: Default::default(),
-        config, auth_key, sessions: Default::default(), challenges: Default::default(), events,
+        sessions: Arc::new(RwLock::new(load_sessions(&config.data_dir).await)),
+        config, auth_key, challenges: Default::default(), events,
     };
     let cors = CorsLayer::new().allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS]).allow_headers(Any);
@@ -963,6 +978,7 @@ async fn main() {
         .route("/api/sons/{id}", axum::routing::delete(apagar_som))
         .route("/api/servers/{id}/skin", put(skin_do_servidor))
         .route("/api/rooms/{id}/skin", put(skin_do_canal))
+        .route("/api/rooms/{id}/capa", put(capa_do_canal))
         .route("/api/servers/{id}/organizacao", put(reorganizar))
         .route("/api/profile/avatar", put(update_avatar))
         .route("/api/profile", put(update_profile))
@@ -1080,9 +1096,32 @@ async fn auth_challenge(State(state): State<AppState>, ConnectInfo(addr): Connec
 fn valid_challenge(challenge: &Challenge, username: &str, addr: SocketAddr) -> bool {
     challenge.expires_at >= now() && challenge.ip == addr.ip().to_string() && challenge.username == username
 }
-async fn create_session(state: &AppState, username: String) -> Response {
-    let token = random_token(32); let expires_at = now() + SESSION_SECONDS;
-    state.sessions.write().await.insert(token.clone(), Session { username: username.clone(), expires_at, is_owner: false });
+/// Chave de uma sessao no mapa e no disco. Ver `Session`.
+fn chave_de_sessao(token: &str) -> String {
+    <Sha256 as sha2::Digest>::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+/// Le `sessions.json` jogando fora o que ja venceu.
+async fn load_sessions(dir: &Path) -> HashMap<String, Session> {
+    let mut sessoes: HashMap<String, Session> = load_json(dir, "sessions.json").await;
+    let agora = now();
+    sessoes.retain(|_, s| s.expires_at >= agora);
+    sessoes
+}
+/// Grava as sessoes, aproveitando para podar as vencidas. Chamado com o lock
+/// de escrita na mao, entao duas gravacoes nunca se cruzam.
+async fn persist_sessions(dir: &Path, sessoes: &mut HashMap<String, Session>) {
+    let agora = now();
+    sessoes.retain(|_, s| s.expires_at >= agora);
+    persist_json(dir, "sessions.json", &*sessoes).await;
+}
+async fn create_session(state: &AppState, username: String, lembrar: bool) -> Response {
+    let token = random_token(32);
+    let expires_at = now() + if lembrar { SESSION_LEMBRAR_SECONDS } else { SESSION_SECONDS };
+    {
+        let mut sessoes = state.sessions.write().await;
+        sessoes.insert(chave_de_sessao(&token), Session { username: username.clone(), expires_at, is_owner: false });
+        persist_sessions(&state.config.data_dir, &mut sessoes).await;
+    }
     let mut profiles = state.profiles.write().await;
     if !profiles.contains_key(&profile_key(&username)) {
         profiles.insert(profile_key(&username), Profile { username: username.clone(), color: None, avatar: None, avatar_file: None, bio: None, banner_file: None, recado: None });
@@ -1135,7 +1174,7 @@ async fn auth_register(State(state): State<AppState>, ConnectInfo(addr): Connect
         persist_json(&state.config.data_dir, "invites.json", &*invites).await;
     }
     drop(invites);
-    create_session(&state, username).await
+    create_session(&state, username, body.lembrar).await
 }
 async fn auth_login(State(state): State<AppState>, ConnectInfo(addr): ConnectInfo<SocketAddr>, Json(body): Json<LoginInput>) -> Response {
     let username = normalize_name(&body.username);
@@ -1148,7 +1187,7 @@ async fn auth_login(State(state): State<AppState>, ConnectInfo(addr): ConnectInf
     password_mac.update(format!("{}:{}", body.nonce, username).as_bytes());
     let Ok(proof) = URL_SAFE_NO_PAD.decode(body.proof.as_bytes()) else { return error(StatusCode::UNAUTHORIZED, "Usuario ou senha incorretos."); };
     if password_mac.verify_slice(&proof).is_err() { return error(StatusCode::UNAUTHORIZED, "Usuario ou senha incorretos."); }
-    create_session(&state, account.username).await
+    create_session(&state, account.username, body.lembrar).await
 }
 async fn auth_recover(State(state): State<AppState>, ConnectInfo(addr): ConnectInfo<SocketAddr>, Json(body): Json<RecoverInput>) -> Response {
     let username = normalize_name(&body.username);
@@ -1171,19 +1210,25 @@ async fn auth_recover(State(state): State<AppState>, ConnectInfo(addr): ConnectI
     }
     persist_json(&state.config.data_dir, "users.json", &*users).await;
     drop(users);
-    create_session(&state, account.username).await
+    create_session(&state, account.username, body.lembrar).await
 }
 fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers.get("authorization")?.to_str().ok()?.strip_prefix("Bearer ")
 }
 async fn authenticated(state: &AppState, headers: &HeaderMap) -> Option<(String, Session)> {
-    let token = bearer(headers)?.to_string(); let session = state.sessions.read().await.get(&token)?.clone();
+    let token = bearer(headers)?.to_string(); let session = state.sessions.read().await.get(&chave_de_sessao(&token))?.clone();
     (session.expires_at >= now()).then_some((token, session))
 }
 async fn get_session(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match authenticated(&state, &headers).await { Some((_, s)) => Json(SessionOutput { username: s.username }).into_response(), None => error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada.") }
 }
-async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response { if let Some(token) = bearer(&headers) { state.sessions.write().await.remove(token); } StatusCode::NO_CONTENT.into_response() }
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(token) = bearer(&headers) {
+        let mut sessoes = state.sessions.write().await;
+        if sessoes.remove(&chave_de_sessao(token)).is_some() { persist_sessions(&state.config.data_dir, &mut sessoes).await; }
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
 /// Papel da pessoa no servidor, ou None se ela nao participa.
 fn role_of(memberships: &HashMap<String, Vec<Member>>, server_id: &str, username: &str) -> Option<ServerRole> {
     let key = profile_key(username);
@@ -1326,7 +1371,7 @@ async fn revoke_invite(State(state): State<AppState>, headers: HeaderMap, Json(b
 async fn unlock_owner(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<OwnerInput>) -> Response {
     let Some((token, _)) = authenticated(&state, &headers).await else { return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."); };
     if body.code != state.config.owner_password { return error(StatusCode::FORBIDDEN, "Codigo de proprietario incorreto."); }
-    if let Some(session) = state.sessions.write().await.get_mut(&token) { session.is_owner = true; }
+    if let Some(session) = state.sessions.write().await.get_mut(&chave_de_sessao(&token)) { session.is_owner = true; }
     Json(OwnerOutput { is_owner: true }).into_response()
 }
 async fn create_server(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<CreateServerInput>) -> Response {
@@ -1346,8 +1391,8 @@ async fn create_server(State(state): State<AppState>, headers: HeaderMap, Json(b
     drop(memberships);
     // Servidor novo nasce com um canal de texto e um de voz, como no Discord.
     let mut rooms = state.rooms.write().await;
-    rooms.push(RoomInfo { id: format!("{id}-geral"), name: "geral".into(), created_at: Utc::now(), server_id: id.clone(), kind: RoomKind::Text, category_id: None, posicao: 0, skin: Skin::default(), temporaria: false, mestre: None });
-    rooms.push(RoomInfo { id: format!("{id}-voz-geral"), name: "Geral".into(), created_at: Utc::now(), server_id: id, kind: RoomKind::Voice, category_id: None, posicao: 0, skin: Skin::default(), temporaria: false, mestre: None });
+    rooms.push(RoomInfo { id: format!("{id}-geral"), name: "geral".into(), created_at: Utc::now(), server_id: id.clone(), kind: RoomKind::Text, category_id: None, posicao: 0, skin: Skin::default(), temporaria: false, mestre: None, capa: None });
+    rooms.push(RoomInfo { id: format!("{id}-voz-geral"), name: "Geral".into(), created_at: Utc::now(), server_id: id, kind: RoomKind::Voice, category_id: None, posicao: 0, skin: Skin::default(), temporaria: false, mestre: None, capa: None });
     persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
     Json(server).into_response()
 }
@@ -1393,6 +1438,7 @@ async fn create_room(State(state): State<AppState>, headers: HeaderMap, Json(bod
         skin: Skin::default(),
         temporaria: body.temporaria,
         mestre: None,
+        capa: None,
     };
     if room.temporaria { sala::agendar_arrumacao(state.clone(), room.id.clone(), sala::ESPERA_SALA_NOVA); }
     rooms.push(room.clone()); persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
@@ -1972,6 +2018,37 @@ async fn skin_do_canal(State(state): State<AppState>, headers: HeaderMap, Caminh
     }
     // `CanaisOrganizados` em vez de um evento proprio: ele ja manda o cliente
     // reler a lista de canais inteira, que e onde a skin viaja.
+    let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
+    let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)] #[serde(rename_all = "camelCase")]
+struct CapaInput { #[serde(default)] file_id: Option<String> }
+
+/// Troca ou tira a imagem da chamada de um canal de voz.
+///
+/// Pode quem esta na chamada, alem de dono e moderador: a imagem diz o que a
+/// turma esta fazendo agora, e quem esta fazendo e quem sabe. `fileId` null tira.
+async fn capa_do_canal(State(state): State<AppState>, headers: HeaderMap, Caminho(id): Caminho<String>, Json(body): Json<CapaInput>) -> Response {
+    let Some((_, session)) = authenticated(&state, &headers).await else { return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."); };
+    let Some((server_id, kind)) = state.rooms.read().await.iter().find(|r| r.id == id).map(|r| (r.server_id.clone(), r.kind)) else {
+        return error(StatusCode::NOT_FOUND, "Canal nao encontrado.");
+    };
+    if kind != RoomKind::Voice { return error(StatusCode::BAD_REQUEST, "So canal de voz tem imagem de chamada."); }
+    let gerencia = { let memberships = state.memberships.read().await; manages(&memberships, &server_id, &session.username) };
+    let na_chamada = state.voice.read().await.get(&id)
+        .is_some_and(|gente| gente.iter().any(|p| profile_key(&p.username) == profile_key(&session.username)));
+    if !gerencia && !na_chamada { return error(StatusCode::FORBIDDEN, "Entre na chamada para trocar a imagem dela."); }
+    if let Some(file_id) = &body.file_id {
+        if !arquivo_e_imagem(&state, file_id).await { return error(StatusCode::BAD_REQUEST, "A imagem da chamada precisa ser uma imagem."); }
+    }
+    {
+        let mut rooms = state.rooms.write().await;
+        let Some(room) = rooms.iter_mut().find(|r| r.id == id) else { return error(StatusCode::NOT_FOUND, "Canal nao encontrado."); };
+        room.capa = body.file_id;
+        persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
+    }
     let audience = { let memberships = state.memberships.read().await; members_of(&memberships, &server_id) };
     let _ = state.events.send(Broadcast::to_many(audience, ServerEvent::CanaisOrganizados { server_id }));
     StatusCode::NO_CONTENT.into_response()
@@ -3454,7 +3531,7 @@ async fn delete_message(State(state): State<AppState>, headers: HeaderMap, axum:
 }
 
 async fn websocket(State(state): State<AppState>, Query(query): Query<WsQuery>, ws: WebSocketUpgrade) -> Response {
-    let Some(s) = state.sessions.read().await.get(&query.token).cloned() else { return StatusCode::UNAUTHORIZED.into_response(); };
+    let Some(s) = state.sessions.read().await.get(&chave_de_sessao(&query.token)).cloned() else { return StatusCode::UNAUTHORIZED.into_response(); };
     if s.expires_at < now() { return StatusCode::UNAUTHORIZED.into_response(); }
     ws.on_upgrade(move |socket| handle_socket(socket, state, s, query.estado)).into_response()
 }

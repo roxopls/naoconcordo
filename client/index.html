@@ -59,6 +59,7 @@
           <label>Usuario<input id="username" maxlength="24" autocomplete="username" placeholder="Seu usuario" required /></label>
           <label>Senha<input id="password" type="password" minlength="8" autocomplete="current-password" placeholder="No minimo 8 caracteres" required /></label>
           <label id="invite-row" class="hidden">Convite<input id="invite" type="password" autocomplete="one-time-code" placeholder="Codigo do grupo" /></label>
+          <label class="switch-row"><input id="lembrar-login" type="checkbox" checked /> Manter conectado</label>
           <button id="auth-submit" class="primary" type="submit">Entrar</button>
           <button id="auth-mode-toggle" class="auth-switch" type="button">Primeiro acesso? Criar conta</button>
           <button id="forgot-password" class="auth-switch" type="button">Esqueci minha senha</button>
@@ -571,6 +572,12 @@
             <p class="muted">Fica salvo para as próximas chamadas.</p>
             <label>Microfone<select id="device-mic"></select></label>
             <label>Câmera<select id="device-cam"></select></label>
+            <label>Qualidade da câmera<select id="qualidade-camera">
+              <option value="economica">Econômica (360p)</option>
+              <option value="normal">Normal (720p)</option>
+              <option value="alta">Alta (720p, mais nítida)</option>
+              <option value="maxima">Máxima (1080p, pesa na rede)</option>
+            </select></label>
             <label>Saída de áudio<select id="device-out"></select></label>
 
             <p class="section-label">TESTE DO MICROFONE</p>
