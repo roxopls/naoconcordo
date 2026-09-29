@@ -46,6 +46,8 @@
       <symbol id="i-user-plus" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></symbol>
       <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
       <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+      <symbol id="i-people" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
     </svg>
 
     <div id="login-view" class="login-shell">
@@ -162,6 +164,8 @@
 
       <main class="main-panel">
         <header class="topbar">
+          <!-- So aparece no celular: abre a gaveta de servidores e canais. -->
+          <button id="gaveta-abrir" class="ghost-button so-icone so-celular" type="button" title="Servidores e canais" aria-label="Servidores e canais"><svg class="ic ic-sm"><use href="#i-menu"/></svg></button>
           <div><strong id="room-title"># geral</strong><span id="room-subtitle">Sala de texto e voz</span></div>
           <div class="topbar-acoes">
             <button id="update-pill" class="ghost-button update-pill hidden" type="button" title="Novidades desta versão"><svg class="ic ic-sm"><use href="#i-spark"/></svg> <span id="update-pill-text">Atualizado</span></button>
@@ -170,6 +174,7 @@
             <button id="chamada-ligar" class="ghost-button so-icone hidden" type="button" title="Iniciar chamada"><svg class="ic ic-sm"><use href="#i-phone"/></svg></button>
             <button id="grupo-config" class="ghost-button hidden" type="button" title="Membros e nome do grupo"><svg class="ic ic-sm"><use href="#i-user-plus"/></svg> Grupo</button>
             <button id="fingerprint-button" class="ghost-button hidden" title="Conferir identidade"><svg class="ic ic-sm"><use href="#i-lock"/></svg> Identidade</button>
+            <button id="pessoas-abrir" class="ghost-button so-icone so-celular" type="button" title="Pessoas" aria-label="Pessoas"><svg class="ic ic-sm"><use href="#i-people"/></svg></button>
             <div id="status-pill" class="status-pill">offline</div>
           </div>
         </header>
@@ -178,7 +183,9 @@
         <section id="assistir-panel" class="assistir-panel hidden" aria-label="Assistindo junto">
           <div class="assistir-topo">
             <span id="assistir-titulo" class="muted small"></span>
+            <button id="assistir-entrar" type="button" class="ghost-button hidden">Assistir</button>
             <button id="assistir-esconder" type="button" class="ghost-button">Esconder</button>
+            <button id="assistir-sair" type="button" class="ghost-button" title="Para de assistir só para você">Sair</button>
             <button id="assistir-parar" type="button" class="ghost-button">Parar para todos</button>
           </div>
           <div id="assistir-quadro" class="assistir-quadro"></div>
@@ -221,6 +228,7 @@
         </form>
       </main>
 
+      <div id="gaveta-veu" class="gaveta-veu" aria-hidden="true"></div>
       <aside class="people-panel">
         <p class="section-label" id="people-title">ONLINE — <span id="people-count">0</span></p>
         <div id="people-list"></div>
@@ -613,7 +621,7 @@
             <div class="atalho-linha"><span>Mudo</span><button id="atalho-mudo" type="button" class="ghost-button" data-atalho="mudo">—</button></div>
             <div class="atalho-linha"><span>Ensurdecer</span><button id="atalho-surdo" type="button" class="ghost-button" data-atalho="surdo">—</button></div>
             <div class="atalho-linha"><span>Salvar clipe (últimos 30 s da sua tela)</span><button id="atalho-clipe" type="button" class="ghost-button" data-atalho="clipe">—</button></div>
-            <p id="atalhos-nota" class="muted small">Clique num atalho e aperte a combinação desejada. Esc cancela, Delete limpa.</p>
+            <p id="atalhos-nota" class="muted small">Clique num atalho e aperte a combinação desejada. Esc cancela; o × tira o atalho. Botões laterais do mouse não servem: o Windows só aceita teclas aqui.</p>
           </section>
 
           <section class="config-pane" data-pane="notificacoes">
@@ -643,6 +651,8 @@
           </section>
 
           <section class="config-pane" data-pane="aplicativo">
+            <label>Zoom<select id="zoom-app"></select></label>
+            <p class="muted small">No automático, o naoconcordo fica do mesmo tamanho com o Windows em 100% ou 150%. Também dá com Ctrl + e Ctrl −, e Ctrl 0 volta ao automático. Vale só neste computador.</p>
             <label class="switch-row"><input id="abrir-com-windows" type="checkbox" /> Abrir junto com o Windows</label>
             <label class="switch-row"><input id="mostrar-jogo" type="checkbox" checked /> Mostrar na lista o jogo que estou jogando</label>
             <p class="muted small">Jogos da Steam aparecem pelo nome; os outros, pelo título da janela em tela cheia. Só quem está nos seus servidores e amigos vê.</p>

@@ -41,7 +41,7 @@
 #app-view.com-skin-imagem .main-panel { background: transparent; }
 
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 900px; min-height: 620px; overflow: hidden; }
+body { margin: 0; min-width: 760px; min-height: 500px; overflow: hidden; }
 button, input, textarea { font: inherit; }
 button { color: inherit; }
 .hidden { display: none !important; }
@@ -115,7 +115,7 @@ nav { flex: 1; padding: 16px 10px; overflow-y: auto; }
 .main-panel > .messages { flex: 1 1 auto; }
 .main-panel > .composer { flex: 0 0 auto; }
 .topbar { display: flex; justify-content: space-between; align-items: center; padding: 0 20px; border-bottom: 1px solid var(--line); box-shadow: 0 4px 20px rgba(0,0,0,.12); }
-.topbar div:first-child { display: flex; gap: 12px; align-items: baseline; }
+.topbar > div:first-of-type { display: flex; gap: 12px; align-items: baseline; }
 .topbar span { color: var(--muted); font-size: 12px; }
 /* Os botoes da direita como um grupo so.
    `.ghost-button` traz `margin-left: auto`, e num flex com varios deles o
@@ -347,9 +347,9 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 .camera-tile, .person .avatar, .voice-member .avatar { transition: box-shadow .12s ease, border-color .12s ease; }
 
 /* janela nativa de cameras */
-/* O `min-width: 900px` do `body` existe para a janela principal. Esta janela
+/* O `min-width: 760px` do `body` existe para a janela principal. Esta janela
    abre com 640 de largura e a pessoa a encolhe mais: sem zerar o piso, o corpo
-   continua com 900px dentro de uma janela menor e o conteudo e cortado. */
+   continua com 760px dentro de uma janela menor e o conteudo e cortado. */
 .cameras-body { margin: 0; min-width: 0; min-height: 0; height: 100vh; background: #0d0d10; color: #e6e6ea; overflow: hidden; }
 /* `pointer-events: none` porque este aviso cobre a janela inteira (`inset: 0`)
    e, com ele visivel — "Ninguem transmitindo agora", que e o estado normal ao
@@ -653,6 +653,7 @@ input[type="range"]::-webkit-slider-thumb {
 .dj-barra span { display: block; height: 100%; background: var(--accent); }
 .dj-acoes { display: flex; gap: 6px; flex-shrink: 0; }
 .dj-botao { padding: 4px 10px; font-size: 12px; }
+.dj-botao.ligado { color: var(--accent); border-color: var(--accent); }
 .dj-fila { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 2px; font-size: 12px; color: var(--muted); }
 .dj-fila li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dj-resto { list-style: none; margin-left: -20px; font-style: italic; }
@@ -1013,6 +1014,9 @@ input[type="range"]::-webkit-slider-thumb {
 .atalho-linha { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line); }
 .atalho-linha button { min-width: 148px; font-family: inherit; }
 .atalho-linha button.gravando { background: #752e32; color: #fff; }
+.atalho-linha [data-atalho] { margin-left: auto; }
+.atalho-linha .atalho-limpar { min-width: 0; width: 30px; padding: 6px 0; }
+.atalho-linha .invisivel { visibility: hidden; }
 
 /* Cabecalho de perfil dentro do menu da pessoa. A capa fica no topo e a foto
    monta sobre ela, como no cartao grande — quem clica num nome espera
@@ -1177,3 +1181,50 @@ body.com-barra .cameras-status { top: 32px; }
 .rail-pessoa { background: transparent; padding: 0; }
 .rail-pessoa .avatar { width: 46px; height: 46px; border-radius: 50%; font-size: 15px; }
 .rail-pessoa .rail-badge { top: auto; bottom: -2px; right: -3px; border: 3px solid #0a0a0c; height: 22px; min-width: 22px; border-radius: 11px; }
+
+/* ---------------------------------------------------------------- celular
+   A conversa ocupa a tela inteira. Servidores e canais viram uma gaveta que
+   entra pela esquerda (botao do topo), e a lista de pessoas outra, pela direita.
+   So a versao web chega aqui: a janela do aplicativo nao fica tao estreita. */
+.so-celular, .gaveta-veu { display: none; }
+@media (max-width: 720px) {
+  body { min-width: 0; min-height: 0; }
+  .login-card { padding: 28px 22px; }
+  .app-shell, .app-shell.sem-pessoas { grid-template-columns: 1fr; height: 100dvh; }
+  .so-celular { display: grid; }
+  .rail, .sidebar, .people-panel {
+    position: fixed; z-index: 20; top: 0; bottom: 0;
+    transition: transform .2s ease;
+  }
+  .rail { left: 0; width: 68px; transform: translateX(-100%); }
+  .sidebar { left: 68px; width: min(272px, calc(100vw - 108px)); transform: translateX(calc(-100% - 68px)); }
+  .app-shell.gaveta-aberta .rail, .app-shell.gaveta-aberta .sidebar { transform: none; }
+  .app-shell:not(.sem-pessoas) .people-panel { display: block; }
+  .app-shell.sem-pessoas #pessoas-abrir { display: none; }
+  #gaveta-abrir { margin: 0; }
+  .people-panel { right: 0; width: min(280px, 84vw); overflow-y: auto; transform: translateX(100%); }
+  .app-shell.pessoas-abertas .people-panel { transform: none; }
+  .app-shell.gaveta-aberta .gaveta-veu, .app-shell.pessoas-abertas .gaveta-veu {
+    display: block; position: fixed; inset: 0; z-index: 19; background: rgba(0,0,0,.55);
+  }
+
+  .topbar { padding: 0 8px; gap: 6px; }
+  .topbar > div:first-of-type { min-width: 0; flex: 1; }
+  #room-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #room-subtitle, .update-pill #update-pill-text, #status-pill { display: none; }
+  .topbar-acoes { gap: 4px; }
+  .messages { padding: 12px 10px 6px; }
+  .composer { margin: 0 8px 8px; }
+  /* 16px: abaixo disto o Safari do iPhone aproxima a pagina ao tocar no campo. */
+  .composer textarea { font-size: 16px; }
+  .call-controls { left: 50%; bottom: 8px; max-width: calc(100vw - 16px); overflow-x: auto; }
+  .stage { height: 38vh; padding: 8px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .camera-dock { right: 8px; width: min(292px, calc(100vw - 16px)); }
+  .toast { left: 12px; right: 12px; bottom: 12px; max-width: none; }
+
+  dialog { max-width: calc(100vw - 16px); }
+  .config-dialog { width: calc(100vw - 16px); }
+  .config-layout { grid-template-columns: 1fr; gap: 10px; }
+  .config-nav { flex-direction: row; flex-wrap: nowrap; overflow-x: auto; gap: 4px; border-right: 0; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
+  .config-nav button { flex: 0 0 auto; }
+}

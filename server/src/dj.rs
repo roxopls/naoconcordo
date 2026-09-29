@@ -52,6 +52,8 @@ pub enum Comando {
     Parar,
     /// Não muda nada: serve para o painel reaparecer para quem fechou.
     Fila,
+    /// Vazio gira o modo; senão `musica`, `fila` ou `desligado`.
+    Loop(String),
 }
 
 /// Reconhece o comando no texto da mensagem, ou `None` se não for um.
@@ -72,6 +74,7 @@ pub fn ler_comando(texto: &str) -> Option<Comando> {
         "pausar" | "pause" => Some(Comando::Pausar),
         "parar" | "stop" => Some(Comando::Parar),
         "fila" | "queue" | "q" => Some(Comando::Fila),
+        "loop" | "repetir" => Some(Comando::Loop(modo_de_loop(resto))),
         _ => None,
     }
 }
@@ -82,6 +85,18 @@ pub fn ler_comando(texto: &str) -> Option<Comando> {
 /// que vira o aviso que a pessoa lê, e o resto, que só o painel usa. O texto do
 /// erro sai do bot porque é lá que se sabe o que deu errado — "nada encontrado"
 /// e "passa de três horas" não são coisas que este arquivo poderia adivinhar.
+/// Aceita o jeito de falar de cada um e devolve o nome que o bot conhece.
+/// O que não se reconhece segue como veio, e o bot responde com o jeito certo.
+fn modo_de_loop(resto: &str) -> String {
+    match resto.to_lowercase().as_str() {
+        "" => String::new(),
+        "musica" | "música" | "faixa" | "uma" | "track" | "song" => "musica".into(),
+        "fila" | "tudo" | "queue" | "all" => "fila".into(),
+        "desligado" | "off" | "nao" | "não" | "desligar" => "desligado".into(),
+        outro => outro.chars().take(20).collect(),
+    }
+}
+
 pub async fn falar(ligacao: &Ligacao, rota: &str, corpo: Value) -> Result<Value, String> {
     let cliente = reqwest::Client::builder()
         // Resolver um link do YouTube leva alguns segundos; o resto é instantâneo.
@@ -122,6 +137,9 @@ mod testes {
         assert_eq!(ler_comando("/tocar"), Some(Comando::Tocar(String::new())));
         assert_eq!(ler_comando("/PULAR"), Some(Comando::Pular));
         assert_eq!(ler_comando("/q"), Some(Comando::Fila));
+        assert_eq!(ler_comando("/loop"), Some(Comando::Loop(String::new())));
+        assert_eq!(ler_comando("/repetir música"), Some(Comando::Loop("musica".into())));
+        assert_eq!(ler_comando("/loop off"), Some(Comando::Loop("desligado".into())));
 
         // Texto comum continua sendo texto comum.
         assert_eq!(ler_comando("tocar alguma coisa"), None);

@@ -1664,6 +1664,7 @@ async fn executar_dj(
         dj::Comando::Pular => ("pular", serde_json::json!({ "roomId": sala_de_voz })),
         dj::Comando::Pausar => ("pausar", serde_json::json!({ "roomId": sala_de_voz })),
         dj::Comando::Parar => ("parar", serde_json::json!({ "roomId": sala_de_voz })),
+        dj::Comando::Loop(modo) => ("loop", serde_json::json!({ "roomId": sala_de_voz, "modo": modo })),
         dj::Comando::Fila => unreachable!("tratado acima"),
     };
     dj::falar(&ligacao, rota, corpo).await.map(|_| ())

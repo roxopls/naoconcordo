@@ -19,11 +19,6 @@ dialog h2 { margin: 0; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
 .dialog-actions button { width: auto; margin: 0; padding: 10px 16px; border: 0; border-radius: 9px; background: #29292f; cursor: pointer; }
 .dialog-actions .primary { background: var(--accent); }
-@media (max-width: 760px) {
-  body { min-width: 640px; }
-  .app-shell { grid-template-columns: 190px 1fr; }
-  .call-controls { left: calc(190px + (100vw - 190px)/2); }
-}
 
 .auth-switch { width: 100%; margin-top: 11px; border: 0; background: transparent; color: #aaaab5; font-size: 12px; cursor: pointer; }
 .auth-switch:hover { color: white; text-decoration: underline; }

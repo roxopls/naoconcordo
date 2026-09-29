@@ -64,6 +64,12 @@ BYTES_POR_QUADRO = AMOSTRAS_POR_QUADRO * CANAIS * 2
 # Sem ninguém pedindo nada, o bot sai da sala. Ele ocupa uma vaga de participante
 # e continua assinando o áudio de todo mundo enquanto estiver lá dentro.
 OCIOSO_ATE_SAIR = 60.0
+"""Depois disto o endereço resolvido pode ter vencido, e a volta do loop resolve de novo."""
+VALIDADE_DA_FONTE = 2 * 60 * 60
+"""Faixa que acaba antes disto não tocou, falhou: o loop não a devolve à fila,
+senão um endereço morto giraria sem parar."""
+TOCOU_DE_VERDADE = 3.0
+MODOS_DE_LOOP = ("desligado", "musica", "fila")
 # Nenhum vídeo justifica segurar a fila por horas; a fila é para a conversa
 # continuar, não para tocar podcast de madrugada.
 DURACAO_MAXIMA = 3 * 60 * 60
@@ -95,6 +101,9 @@ class Faixa:
     link: str
     capa: str
     quem: str
+    """O que foi pedido, para resolver de novo quando a fonte vencer no loop."""
+    pedido: str = ""
+    resolvida_em: float = field(default_factory=time.monotonic)
 
     def resumo(self) -> dict:
         return {
@@ -124,6 +133,8 @@ class Sala:
     """Levantado por `/pular`: faz o laço soltar a faixa atual sem parar a fila."""
     pulando: bool = False
     ocioso_desde: float = 0.0
+    """`desligado`, `musica` (repete a atual) ou `fila` (a que acaba vai para o fim)."""
+    loop: str = "desligado"
 
     def estado(self) -> dict:
         return {
@@ -131,6 +142,7 @@ class Sala:
             "tocando": self.tocando.resumo() if self.tocando else None,
             "decorrido": round(self.decorrido),
             "pausado": self.pausado,
+            "loop": self.loop,
             "fila": [faixa.resumo() for faixa in self.fila],
         }
 
@@ -186,6 +198,7 @@ def _resolver(pedido: str, quem: str) -> Faixa:
         link=dados.get("webpage_url") or "",
         capa=dados.get("thumbnail") or "",
         quem=quem,
+        pedido=pedido,
     )
 
 
@@ -326,11 +339,21 @@ async def rodar(sala: Sala) -> None:
                 # não pode morrer com a tentativa — a próxima volta a tentar.
                 await entrar(sala)
                 await avisar(sala)
+                await renovar(faixa)
                 await tocar_faixa(sala, faixa)
             except Exception as erro:
                 # Uma faixa que não toca não pode levar a fila junto: o mais
                 # comum é endereço vencido, e a próxima costuma tocar.
                 print(f"[dj] {faixa.titulo}: {erro}", flush=True)
+                continue
+            if sala.decorrido < TOCOU_DE_VERDADE:
+                continue
+            # Pular com loop de música passa para a próxima; com loop de fila,
+            # a pulada vai para o fim como qualquer outra.
+            if sala.loop == "musica" and not sala.pulando:
+                sala.fila.insert(0, faixa)
+            elif sala.loop == "fila":
+                sala.fila.append(faixa)
     finally:
         sala.tocando = None
         sala.pausado = False
@@ -338,6 +361,14 @@ async def rodar(sala: Sala) -> None:
         sala.tarefa = None
         await sair(sala)
         await avisar(sala)
+
+
+async def renovar(faixa: Faixa) -> None:
+    """Resolve de novo a faixa cujo endereço já pode ter vencido (volta do loop)."""
+    if not faixa.pedido or time.monotonic() - faixa.resolvida_em < VALIDADE_DA_FONTE:
+        return
+    nova = await resolver(faixa.pedido, faixa.quem)
+    faixa.fonte, faixa.resolvida_em = nova.fonte, time.monotonic()
 
 
 def pegar(sala_id: str) -> Sala:
@@ -389,7 +420,26 @@ async def rota_pular(pedido: web.Request) -> web.Response:
         return web.json_response({"erro": "não há nada tocando"}, status=409)
     sala.pulando = True
     sala.pausado = False
+    # O que já foi entregue ao LiveKit (até um segundo) tocaria depois do pular.
+    if sala.fonte is not None:
+        with contextlib.suppress(Exception):
+            sala.fonte.clear_queue()
     return web.json_response({"ok": True})
+
+
+async def rota_loop(pedido: web.Request) -> web.Response:
+    """Sem `modo`, gira: desligado → música → fila → desligado."""
+    conferido(pedido)
+    corpo = await pedido.json()
+    sala = pegar(corpo["roomId"])
+    modo = (corpo.get("modo") or "").strip()
+    if not modo:
+        modo = MODOS_DE_LOOP[(MODOS_DE_LOOP.index(sala.loop) + 1) % len(MODOS_DE_LOOP)]
+    if modo not in MODOS_DE_LOOP:
+        return web.json_response({"erro": "use /loop musica, /loop fila ou /loop desligado"}, status=400)
+    sala.loop = modo
+    await avisar(sala)
+    return web.json_response({"loop": sala.loop})
 
 
 async def rota_pausar(pedido: web.Request) -> web.Response:
@@ -406,6 +456,7 @@ async def rota_parar(pedido: web.Request) -> web.Response:
     conferido(pedido)
     sala = pegar((await pedido.json())["roomId"])
     sala.fila.clear()
+    sala.loop = "desligado"
     sala.pulando = True
     sala.pausado = False
     if sala.tarefa is not None:
@@ -440,6 +491,7 @@ def montar() -> web.Application:
             web.post("/pular", rota_pular),
             web.post("/pausar", rota_pausar),
             web.post("/parar", rota_parar),
+            web.post("/loop", rota_loop),
             web.get("/estado", rota_estado),
             web.get("/saude", lambda _: web.json_response({"ok": True})),
         ]

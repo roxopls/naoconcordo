@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { abrirExterno, abrirJanela, bloquearRecarregar, ehTauri } from "./ambiente";
+import { ZOOMS, mudarZoom, prepararEscala, vigiarAtalhosDeZoom, zoomEscolhido } from "./escala";
 import { baixarPreferencias, vigiarPreferencias } from "./preferencias";
 import {
   LocalTrackPublication, RemoteAudioTrack, RemoteParticipant, RemoteTrack, RemoteTrackPublication, Room, RoomEvent,
@@ -2552,6 +2553,7 @@ function comandosDisponiveis(): { comando: string; dica: string }[] {
     { comando: "pular", dica: "próxima música" },
     { comando: "pausar", dica: "pausa ou continua o DJ" },
     { comando: "parar", dica: "para o DJ" },
+    { comando: "loop", dica: "repete: música, fila ou desligado (sem nada, alterna)" },
     { comando: "fila", dica: "mostra a fila do DJ" },
   );
   return lista;
@@ -5666,6 +5668,18 @@ async function decidirAberturaInicial() {
   }
 }
 
+// ------------------------------------------------------------------ zoom
+// Ver `escala.ts`. O seletor so existe no aplicativo; no navegador o zoom e o
+// do proprio navegador.
+const seletorDeZoom = byId<HTMLSelectElement>("zoom-app");
+seletorDeZoom.add(new Option("Automático (desfaz a escala do Windows)", ""));
+for (const fator of ZOOMS) seletorDeZoom.add(new Option(Math.round(fator * 100) + "%", String(fator)));
+seletorDeZoom.value = String(zoomEscolhido() ?? "");
+if (!ehTauri()) (seletorDeZoom.closest("label") as HTMLElement | null)?.classList.add("hidden");
+seletorDeZoom.addEventListener("change", () => void mudarZoom(seletorDeZoom.value ? Number(seletorDeZoom.value) : null));
+vigiarAtalhosDeZoom(fator => { seletorDeZoom.value = String(fator ?? ""); });
+void prepararEscala();
+
 async function carregarAberturaAutomatica() {
   const linha = byId("abrir-com-windows").closest(".switch-row") as HTMLElement | null;
   const plugin = await pluginDeInicio();
@@ -6504,23 +6518,45 @@ function combinacaoDe(evento: KeyboardEvent): string | null {
   if (evento.altKey) partes.push("Alt");
   if (evento.shiftKey) partes.push("Shift");
   if (evento.metaKey) partes.push("Super");
-  const tecla = evento.key;
-  if (["Control", "Alt", "Shift", "Meta"].includes(tecla)) return null;
-  if (tecla === " ") partes.push("Space");
-  else if (tecla.length === 1) partes.push(tecla.toUpperCase());
-  else partes.push(tecla);
+  // `code`, e nao `key`: `key` muda com o layout e com o Shift (Shift+1 vira
+  // "!", o ç e os acentos viram simbolos), e o Windows recusava esses nomes.
+  // `code` e a tecla fisica ("KeyM", "Digit1", "F13"), que o plugin entende.
+  const tecla = evento.code;
+  if (!tecla || /^(Control|Alt|Shift|Meta)(Left|Right)$/.test(tecla)) return null;
+  partes.push(tecla);
   return partes.join("+");
+}
+
+/// O atalho como a pessoa le: "Control+M", e nao "Control+KeyM".
+function rotuloDeAtalho(combinacao: string) {
+  return combinacao.split("+").map(parte => parte.replace(/^Key(?=[A-Z]$)/, "").replace(/^Digit(?=\d$)/, "")).join(" + ");
 }
 
 function pintarAtalhos() {
   const atalhos = lerAtalhos();
   for (const botao of document.querySelectorAll<HTMLButtonElement>("[data-atalho]")) {
     const acao = botao.dataset.atalho as Acao;
-    botao.textContent = atalhos[acao] || "—";
+    botao.textContent = atalhos[acao] ? rotuloDeAtalho(atalhos[acao]) : "—";
+    botao.nextElementSibling?.classList.toggle("invisivel", !atalhos[acao]);
   }
 }
 
 for (const botao of document.querySelectorAll<HTMLButtonElement>("[data-atalho]")) {
+  // Apagar pelo Delete durante a gravacao existia, mas ninguem descobria.
+  const limpar = document.createElement("button");
+  limpar.type = "button";
+  limpar.className = "ghost-button atalho-limpar";
+  limpar.textContent = "×";
+  limpar.title = "Tirar este atalho";
+  limpar.setAttribute("aria-label", "Tirar este atalho");
+  limpar.addEventListener("click", () => {
+    const atalhos = lerAtalhos();
+    atalhos[botao.dataset.atalho as Acao] = "";
+    guardarAtalhos(atalhos);
+    void registrarAtalhos();
+    pintarAtalhos();
+  });
+  botao.after(limpar);
   botao.addEventListener("click", () => {
     const acao = botao.dataset.atalho as Acao;
     botao.classList.add("gravando");
@@ -6560,13 +6596,24 @@ for (const botao of document.querySelectorAll<HTMLButtonElement>("[data-atalho]"
 /// separados, entao da para tratar como botao de radio amador.
 async function registrarAtalhos() {
   if (!ehTauri()) return;
+  let plugin: typeof import("@tauri-apps/plugin-global-shortcut");
   try {
-    const plugin = await import("@tauri-apps/plugin-global-shortcut");
+    plugin = await import("@tauri-apps/plugin-global-shortcut");
     await plugin.unregisterAll();
-    const atalhos = lerAtalhos();
-
+  } catch (erro) {
+    showToast("Os atalhos não puderam ser ativados: " + String(erro));
+    return;
+  }
+  const atalhos = lerAtalhos();
+  // Um por vez: tecla ja tomada por outro programa (o caso comum) nao pode
+  // levar junto os atalhos que vinham depois dela.
+  const registrar = async (nome: string, combinacao: string, aoApertar: Parameters<typeof plugin.register>[1]) => {
+    try { await plugin.register(combinacao, aoApertar); }
+    catch { showToast("O atalho de " + nome + " (" + rotuloDeAtalho(combinacao) + ") já está em uso por outro programa. Escolha outra tecla."); }
+  };
+  {
     if (atalhos.ptt && voz.lerModo() === "ptt") {
-      await plugin.register(atalhos.ptt, evento => {
+      await registrar("apertar para falar", atalhos.ptt, evento => {
         const pressionado = evento.state === "Pressed";
         if (pressionado === pttPressionado) return;
         pttPressionado = pressionado;
@@ -6575,26 +6622,23 @@ async function registrarAtalhos() {
       });
     }
     if (atalhos.mudo) {
-      await plugin.register(atalhos.mudo, evento => {
+      await registrar("silenciar microfone", atalhos.mudo, evento => {
         if (evento.state !== "Pressed") return;
         void definirMicrofone(!micEnabled);
       });
     }
     if (atalhos.surdo) {
-      await plugin.register(atalhos.surdo, evento => {
+      await registrar("ensurdecer", atalhos.surdo, evento => {
         if (evento.state !== "Pressed") return;
         audioButton.click();
       });
     }
     if (atalhos.clipe) {
-      await plugin.register(atalhos.clipe, evento => {
+      await registrar("clipe", atalhos.clipe, evento => {
         if (evento.state !== "Pressed") return;
         void salvarClipe();
       });
     }
-  } catch (erro) {
-    // Tecla ja tomada por outro programa e o caso comum, e nao e culpa nossa.
-    showToast("Não foi possível registrar um dos atalhos: " + String(erro));
   }
 }
 
@@ -7649,7 +7693,8 @@ async function queueFiles(list: FileList | File[]) {
 // mesma razao pela qual o cartao de previa passa a imagem pelo nosso servidor.
 
 type DjFaixa = { titulo: string; autor: string; duracao: number; link: string; quem: string };
-type DjEstado = { roomId: string; tocando: DjFaixa | null; decorrido: number; pausado: boolean; fila: DjFaixa[] };
+type DjLoop = "desligado" | "musica" | "fila";
+type DjEstado = { roomId: string; tocando: DjFaixa | null; decorrido: number; pausado: boolean; loop?: DjLoop; fila: DjFaixa[] };
 
 /// Este servidor tem bot DJ? Sem ele, `/tocar` e so uma mensagem com barra.
 let temDj = false;
@@ -7666,11 +7711,28 @@ function relogioDeDj(estado: DjEstado | undefined) {
       const atual = djEstados.get(voiceRoomId);
       if (!atual?.tocando || atual.pausado) return;
       atual.decorrido += 1;
-      renderDj();
+      andarRelogioDeDj(atual);
     }, 1000);
   }
   if (!andando && djRelogio) { window.clearInterval(djRelogio); djRelogio = 0; }
 }
+
+/// So a barra e o tempo, no lugar. Refazer o painel inteiro a cada segundo
+/// trocava os botoes debaixo do cursor: o clique que comecava num botao e
+/// terminava no substituto se perdia, e "Pular" parecia nao funcionar.
+function andarRelogioDeDj(estado: DjEstado) {
+  const total = estado.tocando?.duracao || 0;
+  const cheio = document.querySelector<HTMLElement>("#dj-panel .dj-barra span");
+  if (cheio) cheio.style.width = total > 0 ? Math.min(100, (estado.decorrido / total) * 100) + "%" : "0";
+  const tempo = document.querySelector<HTMLElement>("#dj-panel .dj-tempo");
+  if (tempo) tempo.textContent = comoRelogio(estado.decorrido) + (total > 0 ? " / " + comoRelogio(total) : "");
+}
+
+const ROTULO_DE_LOOP: Record<DjLoop, [string, string]> = {
+  desligado: ["Loop", "Repetir: desligado. Clique para repetir a música"],
+  musica: ["Loop: música", "Repetindo a música atual. Clique para repetir a fila"],
+  fila: ["Loop: fila", "Repetindo a fila inteira. Clique para desligar"],
+};
 
 /// `m:ss`, que e como se le duracao de musica.
 function comoRelogio(segundos: number) {
@@ -7687,6 +7749,7 @@ async function mandarAoDj(texto: string) {
   }
 }
 
+let assinaturaDoDj = "";
 function renderDj() {
   const painel = byId("dj-panel");
   const estado = voiceRoomId ? djEstados.get(voiceRoomId) : undefined;
@@ -7699,6 +7762,12 @@ function renderDj() {
     return;
   }
   painel.classList.remove("hidden");
+  // Mesma fila, mesmo estado: nada a refazer alem do relogio. Este painel e
+  // chamado por toda mudanca da chamada, e refaze-lo trocaria o botao debaixo
+  // de um clique em andamento.
+  const assinatura = JSON.stringify({ ...estado, decorrido: 0 });
+  if (assinatura === assinaturaDoDj && painel.childElementCount) { andarRelogioDeDj(estado); return; }
+  assinaturaDoDj = assinatura;
 
   const agora = document.createElement("div");
   agora.className = "dj-agora";
@@ -7735,14 +7804,17 @@ function renderDj() {
 
   const acoes = document.createElement("div");
   acoes.className = "dj-acoes";
+  const [rotuloDoLoop, dicaDoLoop] = ROTULO_DE_LOOP[estado.loop || "desligado"];
   for (const [rotulo, comando, titulo] of [
     [estado.pausado ? "Continuar" : "Pausar", "/pausar", "Pausar ou continuar"],
     ["Pular", "/pular", "Ir para a próxima da fila"],
+    [rotuloDoLoop, "/loop", dicaDoLoop],
     ["Parar", "/parar", "Esvaziar a fila e tirar o DJ da chamada"],
-  ] as const) {
+  ]) {
     const botao = document.createElement("button");
     botao.type = "button";
     botao.className = "ghost-button dj-botao";
+    if (comando === "/loop" && estado.loop && estado.loop !== "desligado") botao.classList.add("ligado");
     botao.textContent = rotulo;
     botao.title = titulo;
     botao.disabled = !estado.tocando;
@@ -10127,6 +10199,10 @@ const assistindoPorSala = new Map<string, Assistindo>();
 let quadroAssistindo: HTMLIFrameElement | null = null;
 let videoNoQuadro = "";
 let assistirEscondido = false;
+/// Canal de voz em cujo video esta pessoa entrou. Assistir e escolha: quem
+/// comeca entra sozinho, os outros veem so o aviso com o botao, e o player (som,
+/// banda, anuncio) so carrega para quem apertou.
+let assistindoNaSala = "";
 
 /// Onde o video deveria estar agora, contando o tempo desde que o estado chegou.
 function posicaoEsperada(estado: Assistindo): number {
@@ -10138,8 +10214,9 @@ function receberAssistindo(sala: string, estado: Assistindo | null, por: string)
   const antes = assistindoPorSala.get(sala);
   if (estado) assistindoPorSala.set(sala, { ...estado, recebido: performance.now() });
   else assistindoPorSala.delete(sala);
+  if (!estado && assistindoNaSala === sala) assistindoNaSala = "";
   if (sala === voiceRoomId && por && key(por) !== key(session?.username || "")) {
-    if (!antes && estado) showToast(getDisplayName(por) + " começou um vídeo para todos.");
+    if (!antes && estado) showToast(getDisplayName(por) + " está passando um vídeo. Aperte Assistir para ver junto.");
     if (antes && !estado) showToast(getDisplayName(por) + " parou o vídeo.");
   }
   renderAssistir();
@@ -10147,7 +10224,7 @@ function receberAssistindo(sala: string, estado: Assistindo | null, por: string)
 
 function mandarAoPlayer() {
   const estado = assistindoPorSala.get(voiceRoomId);
-  if (!estado || !quadroAssistindo?.contentWindow) return;
+  if (!estado || assistindoNaSala !== voiceRoomId || !quadroAssistindo?.contentWindow) return;
   quadroAssistindo.contentWindow.postMessage({ tipo: "estado", posicao: posicaoEsperada(estado), tocando: estado.tocando }, "*");
 }
 
@@ -10156,12 +10233,26 @@ function renderAssistir() {
   const estado = inCall() ? assistindoPorSala.get(voiceRoomId) : undefined;
   byId("assistir-button").classList.toggle("active", Boolean(estado));
   if (!estado) {
+    // Saiu da chamada: voltar a ela depois nao pode abrir o video sozinho.
+    if (!inCall()) assistindoNaSala = "";
     painel.classList.add("hidden");
     byId("assistir-quadro").replaceChildren();
     quadroAssistindo = null; videoNoQuadro = "";
     return;
   }
   painel.classList.remove("hidden");
+  const dentro = assistindoNaSala === voiceRoomId;
+  byId("assistir-entrar").classList.toggle("hidden", dentro);
+  byId("assistir-esconder").classList.toggle("hidden", !dentro);
+  byId("assistir-sair").classList.toggle("hidden", !dentro);
+  if (!dentro) {
+    // So o aviso: nada de player carregado para quem nao quis.
+    painel.classList.add("minimizado");
+    byId("assistir-titulo").textContent = getDisplayName(estado.quem) + " está passando um vídeo";
+    byId("assistir-quadro").replaceChildren();
+    quadroAssistindo = null; videoNoQuadro = "";
+    return;
+  }
   painel.classList.toggle("minimizado", assistirEscondido);
   byId("assistir-titulo").textContent = "Assistindo junto · começou com " + getDisplayName(estado.quem);
   byId("assistir-esconder").textContent = assistirEscondido ? "Mostrar" : "Esconder";
@@ -10204,17 +10295,21 @@ async function comecarVideo() {
   if (!video) { showToast("Esse link não é de um vídeo do YouTube."); return; }
   if (chat?.readyState !== WebSocket.OPEN) { showToast("Sem conexão."); return; }
   assistirEscondido = false;
+  assistindoNaSala = voiceRoomId;
   chat.send(JSON.stringify({ type: "assistir", acao: "iniciar", text: video.id, posicao: video.inicio || 0 }));
 }
 
 byId("assistir-button").addEventListener("click", evento => {
   if (!assistindoPorSala.get(voiceRoomId)) { void comecarVideo(); return; }
   abrirMenuSimples(byId("assistir-button"), { x: evento.clientX, y: evento.clientY }, [
+    ...(assistindoNaSala === voiceRoomId ? [] : [menuAcao("Assistir junto", "theater", () => { assistindoNaSala = voiceRoomId; assistirEscondido = false; renderAssistir(); })]),
     menuAcao("Trocar o vídeo", "theater", () => void comecarVideo()),
     menuAcao("Parar para todos", "hangup", () => chat?.send(JSON.stringify({ type: "assistir", acao: "parar" }))),
   ]);
 });
 byId("assistir-esconder").addEventListener("click", () => { assistirEscondido = !assistirEscondido; renderAssistir(); });
+byId("assistir-entrar").addEventListener("click", () => { assistindoNaSala = voiceRoomId; assistirEscondido = false; renderAssistir(); });
+byId("assistir-sair").addEventListener("click", () => { assistindoNaSala = ""; renderAssistir(); });
 byId("assistir-parar").addEventListener("click", () => chat?.send(JSON.stringify({ type: "assistir", acao: "parar" })));
 
 // ------------------------------------------------------------ jogando agora
@@ -10464,6 +10559,37 @@ async function criarCategoria() {
 
 byId("add-category").addEventListener("click", () => void criarCategoria());
 
+// ------------------------------------------------------------ celular
+// No celular (ver o fim do `styles.css`) servidores e canais moram numa gaveta
+// que entra pela esquerda, e as pessoas noutra, pela direita. Nada disto tem
+// efeito na tela larga: as classes existem, mas o CSS so as usa abaixo de 720 px.
+const casca = byId("app-view");
+function fecharGavetas() { casca.classList.remove("gaveta-aberta", "pessoas-abertas"); }
+byId("gaveta-abrir").addEventListener("click", () => {
+  casca.classList.remove("pessoas-abertas");
+  casca.classList.toggle("gaveta-aberta");
+});
+byId("pessoas-abrir").addEventListener("click", () => {
+  casca.classList.remove("gaveta-aberta");
+  casca.classList.toggle("pessoas-abertas");
+});
+byId("gaveta-veu").addEventListener("click", fecharGavetas);
+window.addEventListener("keydown", evento => { if (evento.key === "Escape") fecharGavetas(); });
+// Fecha quando o toque trocou o que esta na tela — canal, conversa, chamada —,
+// e nao quando so trocou de servidor: ai a pessoa ainda vai escolher o canal.
+// Comparar antes e depois evita ensinar cada botao da barra a fechar a gaveta.
+const lugarNaTela = () => [mode, currentRoomId, currentFriend, grupoAtual()?.id, voiceRoomId, olhandoAChamada].join("|");
+let lugarAntesDoToque = "";
+const barraLateral = document.querySelector<HTMLElement>(".sidebar");
+barraLateral?.addEventListener("click", () => { lugarAntesDoToque = lugarNaTela(); }, true);
+barraLateral?.addEventListener("click", evento => {
+  const antes = lugarAntesDoToque;
+  // Tocar no canal que ja esta aberto nao muda nada na tela, mas quem toca
+  // quer ver a conversa: fecha do mesmo jeito.
+  const escolheu = (evento.target as HTMLElement | null)?.closest(".channel, .friend-row, #grupo-list button");
+  window.setTimeout(() => { if (escolheu || lugarNaTela() !== antes) fecharGavetas(); }, 60);
+});
+
 /// Mostra ou esconde o rotulo de uma secao conforme ela tenha conteudo.
 function esconderSecaoVazia(listaId: string, tem: boolean) {
   const lista = byId(listaId);
@@ -10547,7 +10673,7 @@ function linhasDeVoz(item: RoomInfo): HTMLElement[] {
     const naSala = peopleInVoice(item.id);
     // A imagem da chamada fica guardada com a sala vazia, mas so aparece com
     // gente dentro: ela diz o que esta acontecendo agora.
-    if (naSala.length && item.capa) nodes.push(cartaoDeCapa(item.capa, menuDaSala));
+    if (naSala.length && item.capa) nodes.push(cartaoDeCapa(item.id, item.capa, menuDaSala));
     if (naSala.length) {
       const box = document.createElement("div"); box.className = "voice-members";
       for (const name of naSala) {
@@ -10582,23 +10708,34 @@ function linhasDeVoz(item: RoomInfo): HTMLElement[] {
     return nodes;
 }
 
+/// Um cartao por canal, guardado entre um desenho e outro da barra lateral.
+///
+/// `renderNavigation` refaz a lista inteira a cada fala, entrada e saida. Um
+/// `<img>` novo a cada vez piscava — e, com a miniatura ainda chegando, o
+/// desenho seguinte jogava fora o elemento antes de ela aparecer, entao a
+/// imagem nunca assentava. O mesmo elemento movido de lugar nao recarrega.
+const cartoesDeCapa = new Map<string, { fileId: string; el: HTMLElement }>();
+
 /// O cartao com a imagem da chamada, embaixo do nome do canal de voz.
 ///
-/// Usa a miniatura, e nao o original: a barra lateral e redesenhada a cada
-/// entrada e saida de alguem, e a imagem ocupa uns 200 px de largura.
-function cartaoDeCapa(fileId: string, aoMenu: (evento: MouseEvent) => void) {
+/// Usa a miniatura, e nao o original: a imagem ocupa uns 200 px de largura.
+function cartaoDeCapa(roomId: string, fileId: string, aoMenu: (evento: MouseEvent) => void) {
+  const guardado = cartoesDeCapa.get(roomId);
+  if (guardado?.fileId === fileId) {
+    guardado.el.oncontextmenu = aoMenu;
+    return guardado.el;
+  }
   const cartao = document.createElement("div");
   cartao.className = "voice-capa";
   const img = document.createElement("img");
   img.alt = "";
   img.draggable = false;
-  // Da memoria na hora, sem esperar: a lista e redesenhada o tempo todo, e a
-  // imagem piscaria a cada vez.
   const pronta = miniCache.get(fileId);
   if (pronta) img.src = pronta.url;
-  else void miniaturaUrl(fileId).then(url => { img.src = url; }).catch(() => cartao.remove());
+  else void miniaturaUrl(fileId).then(url => { img.src = url; }).catch(() => cartao.classList.add("hidden"));
   cartao.append(img);
   cartao.oncontextmenu = aoMenu;
+  cartoesDeCapa.set(roomId, { fileId, el: cartao });
   return cartao;
 }
 
