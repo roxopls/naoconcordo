@@ -17,7 +17,12 @@ const pessoa = await createUser("prev");
 for (const [rotulo, url] of [
   ["canal do YouTube", "https://www.youtube.com/@alguem"],
   ["playlist", "https://www.youtube.com/playlist?list=PL123"],
-  ["perfil sem tuíte", "https://x.com/fulano"],
+  // "perfil sem tuíte" (`https://x.com/fulano`) saiu daqui em 2026-09-30: o X
+  // passou a publicar marcas `og:` em página de perfil, então ela agora vira
+  // cartão genérico e responde 200. A asserção media o mundo lá fora, não o
+  // nosso código — o que ela protegia (perfil **não** vira cartão de Twitter) é
+  // o caso `("https://x.com/fulano", Fonte::Site)` do teste `reconhece_cada_fonte`,
+  // que não depende de rede nenhuma.
   ["site qualquer", "https://exemplo.com/pagina"],
   ["endereço vazio", ""],
   ["texto que não é link", "nao-e-link"],
@@ -27,7 +32,13 @@ for (const [rotulo, url] of [
 }
 
 // Endereço gigante é cortado antes de virar requisição.
-const gigante = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&x=" + "a".repeat(600);
+//
+// Acima do teto do servidor (1500 caracteres, em `previa_de_link`), que subiu de
+// 500 quando entrou o cartão de site qualquer — link de loja e de notícia carrega
+// rastreio e passa dos 500. A fixture tinha ficado em 600 e não era mais grande o
+// bastante: o endereço passava do teto para dentro, virava cartão de YouTube de
+// verdade e a verificação media outra coisa.
+const gigante = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&x=" + "a".repeat(1600);
 check("endereço longo demais responde 204",
   (await get("/api/previa?url=" + encodeURIComponent(gigante), pessoa.token)).status === 204);
 

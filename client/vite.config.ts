@@ -21,8 +21,9 @@ export default defineConfig({
     target: "es2022",
     minify: "esbuild",
     sourcemap: false,
-    // Tres paginas: a principal e as janelas separadas de cameras e de telas.
-    rollupOptions: { input: { main: "index.html", cameras: "cameras.html", telas: "telas.html" } }
+    // A principal, as janelas separadas de cameras e de telas, e o espelho que
+    // o OBS abre como Browser Source (`obs.html`, servido em `/app/`).
+    rollupOptions: { input: { main: "index.html", cameras: "cameras.html", telas: "telas.html", obs: "obs.html" } }
   }
 });
 

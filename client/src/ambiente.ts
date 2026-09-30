@@ -11,6 +11,24 @@
 export const ehTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/// Aplicativo instalado num celular (o APK do Android, e o que vier depois).
+///
+/// Aqui o agente **serve**, ao contrario de `ehTauri`: o que se quer saber é o
+/// sistema, e o WebView do Android se anuncia como Android. A pergunta é outra
+/// da anterior e não dá para responder com ela — o aplicativo do celular também
+/// é Tauri, e o que não existe lá é outra lista: atalho global (não há teclado
+/// nem foco de janela), autostart, captura nativa de tela, janela separada de
+/// câmeras e o atualizador (no Android quem atualiza é a loja ou o APK novo).
+export const ehCelularNativo = (): boolean =>
+  ehTauri() && /android|iphone|ipad|ipod/i.test(navigator.userAgent);
+
+/// Aplicativo de mesa: Windows, macOS ou Linux.
+///
+/// É esta a pergunta que a maior parte do código quer fazer antes de usar um
+/// recurso do sistema — e era `ehTauri` que estava fazendo o papel dela, o que
+/// funcionava só enquanto não existia versão de celular.
+export const ehDesktop = (): boolean => ehTauri() && !ehCelularNativo();
+
 /// Abre um endereco externo no navegador do sistema.
 ///
 /// No aplicativo, `window.open` e engolido: o Tauri intercepta o pedido de

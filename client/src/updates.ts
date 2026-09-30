@@ -13,6 +13,7 @@
 
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { ehDesktop } from "./ambiente";
 
 const CANAL_KEY = "naoconcordo.canal";
 export type Canal = "stable" | "unstable";
@@ -33,7 +34,10 @@ export function limparNotas() { localStorage.removeItem(NOTAS_KEY); }
 /// reiniciar no meio de uma chamada e a pior hora possivel. Quem decide o
 /// momento e quem clicou.
 export async function procurarAtualizacao(): Promise<Update | null> {
-  if (!("__TAURI_INTERNALS__" in window)) return null;
+  // Só o aplicativo de mesa se atualiza sozinho: no celular quem instala é o
+  // APK ou a loja, e o updater do Tauri não tem o que fazer ali. Ver
+  // `ehDesktop` em `ambiente.ts`.
+  if (!ehDesktop()) return null;
   const canal = canalAtual();
   return await check(canal === "unstable" ? { headers: { "X-Canal": "unstable" } } : undefined);
 }
@@ -54,7 +58,7 @@ export async function instalarAtualizacao(update: Update, notify: (text: string,
 /// nao ha chamada em andamento — o aplicativo acabou de subir — entao
 /// perguntar so atrasaria a atualizacao de quem nem percebeu.
 export async function checkForUpdate(notify: (text: string, notes: string) => void) {
-  if (!("__TAURI_INTERNALS__" in window)) return;
+  if (!ehDesktop()) return;
   try {
     const update = await procurarAtualizacao();
     if (!update) return;

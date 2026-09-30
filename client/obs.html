@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Espelho — naoconcordo</title>
+    <style>
+      /* Página de Browser Source do OBS: fundo transparente, nada de enfeite.
+         O CSS mora aqui, e não em `styles.css`, porque nada do aplicativo serve
+         nesta tela — e o que o OBS captura tem de ser só a imagem. */
+      html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+      #grade { height: 100vh; display: grid; gap: 0; }
+      .quadro { position: relative; min-width: 0; min-height: 0; }
+      .quadro video { width: 100%; height: 100%; object-fit: contain; display: block; background: transparent; }
+      /* Sem câmera no ar a página fica vazia e transparente: no OBS isso
+         aparece como cena limpa, que é melhor do que um aviso entrando no
+         meio da transmissão. O texto existe só para quem abrir no navegador
+         para testar, e sai de cena no OBS porque é quase invisível. */
+      #aviso { position: absolute; left: 8px; top: 8px; color: rgba(255,255,255,.35); font: 12px system-ui, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <div id="aviso">Conectando…</div>
+    <div id="grade"></div>
+    <script type="module" src="/src/obs.ts"></script>
+  </body>
+</html>

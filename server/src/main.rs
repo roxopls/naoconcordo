@@ -21,6 +21,7 @@ use uuid::Uuid;
 mod dados;
 mod dj;
 mod enquete;
+mod espelho;
 mod gifs;
 mod grupos;
 mod chamadas;
@@ -205,7 +206,18 @@ struct RoomInfo {
     /// canal de voz na barra lateral ("jogando tal coisa"). So canal de voz.
     /// Fica guardada com a sala vazia, e o cliente so desenha com gente dentro.
     #[serde(default, skip_serializing_if = "Option::is_none")] capa: Option<String>,
+    /// Espelho para OBS ligado neste canal de voz. Ver `espelho.rs`.
+    ///
+    /// Vai para todos os membros de propósito: quem liga a câmera precisa ver
+    /// no canal que ela pode estar numa transmissão. Só dono e moderador
+    /// conseguem os endereços em si.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] espelho: bool,
+    /// Qual geração de endereços vale. Trocar invalida todos os links deste
+    /// canal de uma vez; o número em si não revela nada, porque sem a chave do
+    /// servidor não dá para derivar etiqueta nenhuma a partir dele.
+    #[serde(default, skip_serializing_if = "is_zero")] espelho_geracao: u32,
 }
+fn is_zero(valor: &u32) -> bool { *valor == 0 }
 
 /// Um grupo de canais dentro de um servidor.
 ///
@@ -968,6 +980,10 @@ async fn main() {
         .route("/api/rooms/{id}", put(renomear_canal).delete(apagar_canal))
         .route("/api/rooms/{id}/categoria", put(mover_canal))
         .route("/api/rooms/{id}/mestre", put(mestre_do_canal))
+        .route("/api/rooms/{id}/espelho", get(espelho::ver).put(espelho::ajustar))
+        // Sem sessao: o OBS nao tem uma, e a etiqueta assinada no proprio
+        // endereco e a credencial. Ver `espelho.rs`.
+        .route("/api/espelho/{id}/{alvo}/{tag}", get(espelho::acessar))
         .route("/api/categorias/{id}/mestre", put(mestre_da_categoria))
         .route("/api/categorias", post(criar_categoria))
         .route("/api/categorias/{id}", put(renomear_categoria).delete(apagar_categoria))
@@ -1391,8 +1407,8 @@ async fn create_server(State(state): State<AppState>, headers: HeaderMap, Json(b
     drop(memberships);
     // Servidor novo nasce com um canal de texto e um de voz, como no Discord.
     let mut rooms = state.rooms.write().await;
-    rooms.push(RoomInfo { id: format!("{id}-geral"), name: "geral".into(), created_at: Utc::now(), server_id: id.clone(), kind: RoomKind::Text, category_id: None, posicao: 0, skin: Skin::default(), temporaria: false, mestre: None, capa: None });
-    rooms.push(RoomInfo { id: format!("{id}-voz-geral"), name: "Geral".into(), created_at: Utc::now(), server_id: id, kind: RoomKind::Voice, category_id: None, posicao: 0, skin: Skin::default(), temporaria: false, mestre: None, capa: None });
+    rooms.push(RoomInfo { id: format!("{id}-geral"), name: "geral".into(), created_at: Utc::now(), server_id: id.clone(), kind: RoomKind::Text, category_id: None, posicao: 0, skin: Skin::default(), temporaria: false, mestre: None, capa: None, espelho: false, espelho_geracao: 0 });
+    rooms.push(RoomInfo { id: format!("{id}-voz-geral"), name: "Geral".into(), created_at: Utc::now(), server_id: id, kind: RoomKind::Voice, category_id: None, posicao: 0, skin: Skin::default(), temporaria: false, mestre: None, capa: None, espelho: false, espelho_geracao: 0 });
     persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;
     Json(server).into_response()
 }
@@ -1439,6 +1455,10 @@ async fn create_room(State(state): State<AppState>, headers: HeaderMap, Json(bod
         temporaria: body.temporaria,
         mestre: None,
         capa: None,
+        // Canal novo nasce sem espelho: ligar e uma escolha de quem administra,
+        // e nao um padrao que ninguem pediu.
+        espelho: false,
+        espelho_geracao: 0,
     };
     if room.temporaria { sala::agendar_arrumacao(state.clone(), room.id.clone(), sala::ESPERA_SALA_NOVA); }
     rooms.push(room.clone()); persist_json(&state.config.data_dir, "rooms.json", &*rooms).await;

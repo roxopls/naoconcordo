@@ -180,11 +180,28 @@ pub fn reconhecer(url: &str) -> Option<(Fonte, String)> {
         host.as_str(),
         "twitter.com" | "x.com" | "vxtwitter.com" | "fxtwitter.com" | "fixupx.com" | "fixvx.com"
     );
-    if do_twitter && caminho.len() >= 3 && caminho[1] == "status" {
-        let usuario = caminho[0];
-        let id: String = caminho[2].chars().take_while(|c| c.is_ascii_digit()).collect();
-        if !id.is_empty() && usuario.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Some((Fonte::Twitter, format!("{usuario}/{id}")));
+    // `status` pela posição, não em `caminho[1]` fixo: o próprio site gera
+    // `/i/web/status/<id>` (link antigo, ainda em circulação) e
+    // `/i/status/<id>` (link sem autor). Preso ao índice 1, o primeiro caía no
+    // cartão genérico, e a página do X não publica `og:` de tuíte para quem não
+    // fez login — o cartão simplesmente não vinha.
+    if do_twitter {
+        if let Some(pos) = caminho.iter().position(|p| *p == "status" || *p == "statuses") {
+            let id: String = caminho
+                .get(pos + 1)
+                .map(|bruto| bruto.chars().take_while(|c| c.is_ascii_digit()).collect())
+                .unwrap_or_default();
+            // O autor é o primeiro pedaço do caminho, quando ele for um nome de
+            // verdade. `/i/...` e `/i/web/...` não trazem autor, e o espelho
+            // resolve o tuíte pelo id de qualquer jeito.
+            let usuario = caminho
+                .first()
+                .copied()
+                .filter(|u| *u != "i" && !u.is_empty() && u.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or("i");
+            if !id.is_empty() {
+                return Some((Fonte::Twitter, format!("{usuario}/{id}")));
+            }
         }
     }
 
@@ -385,8 +402,26 @@ pub async fn montar(chave: &[u8; 32], fonte: Fonte, alvo: &str) -> Result<Cartao
         Fonte::Site => og(chave, fonte, alvo).await,
         Fonte::Twitter => {
             let (usuario, id) = alvo.split_once('/').ok_or("alvo invalido")?;
+            // O link leva ao original, não ao espelho: o espelho existe para a
+            // prévia, e quem clica quer a página de verdade.
+            let link = format!("https://x.com/{usuario}/status/{id}");
             let pedido = format!("https://api.vxtwitter.com/{usuario}/status/{id}");
-            let dados: TuiteBruto = json(&pedido).await.map_err(|_| "Tuite indisponivel.".to_string())?;
+            let dados: TuiteBruto = match json(&pedido).await {
+                Ok(dados) => dados,
+                // Reserva, pelo mesmo motivo dos dois espelhos do Instagram: o
+                // vxtwitter cai, e caía levando o cartão embora. O fxtwitter
+                // publica as marcas `og:` do tuíte na própria página — dá menos
+                // (texto cortado, sem o `.mp4`), mas é outra máquina e outro
+                // dono, e o que derruba um raramente derruba os dois.
+                Err(_) => {
+                    let espelho = format!("https://fxtwitter.com/{usuario}/status/{id}");
+                    let mut cartao = og(chave, fonte, &espelho)
+                        .await
+                        .map_err(|_| "Tuite indisponivel.".to_string())?;
+                    cartao.link = link;
+                    return Ok(cartao);
+                }
+            };
             // A primeira mídia é a que o cartão mostra: um tuíte com quatro fotos
             // vira um cartão com uma foto e o texto, não uma galeria.
             let primeira = dados.media_extended.first();
@@ -410,9 +445,7 @@ pub async fn montar(chave: &[u8; 32], fonte: Fonte, alvo: &str) -> Result<Cartao
                 imagem,
                 video,
                 site: String::new(),
-                // O link leva ao original, não ao espelho: o espelho existe para
-                // a prévia, e quem clica quer a página de verdade.
-                link: format!("https://x.com/{usuario}/status/{id}"),
+                link,
             })
         }
     }
@@ -804,13 +837,22 @@ mod testes {
     /// tem cartão nenhum a mostrar.
     #[test]
     fn reconhece_cada_fonte() {
-        let casos: [(&str, Option<(Fonte, &str)>); 16] = [
+        let casos: [(&str, Option<(Fonte, &str)>); 19] = [
             ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", Some((Fonte::Youtube, "dQw4w9WgXcQ"))),
             ("https://youtu.be/dQw4w9WgXcQ?si=abc", Some((Fonte::Youtube, "dQw4w9WgXcQ"))),
             ("https://www.youtube.com/shorts/dQw4w9WgXcQ", Some((Fonte::Youtube, "dQw4w9WgXcQ"))),
             ("https://m.youtube.com/watch?v=dQw4w9WgXcQ&t=30s", Some((Fonte::Youtube, "dQw4w9WgXcQ"))),
             ("https://x.com/fulano/status/1234567890", Some((Fonte::Twitter, "fulano/1234567890"))),
             ("https://vxtwitter.com/fulano/status/1234567890", Some((Fonte::Twitter, "fulano/1234567890"))),
+            // Formas que o próprio site gera e que o `caminho[1] == "status"`
+            // fixo deixava passar para o cartão genérico — e a página do X não
+            // publica `og:` de tuíte para quem não fez login, então não vinha
+            // cartão nenhum. O espelho resolve pelo id, por isso o autor sai
+            // como `i` quando o endereço não traz autor.
+            ("https://x.com/i/web/status/1234567890", Some((Fonte::Twitter, "i/1234567890"))),
+            ("https://x.com/i/status/1234567890", Some((Fonte::Twitter, "i/1234567890"))),
+            // Link de foto: o `/photo/1` no fim é do site, não do tuíte.
+            ("https://x.com/fulano/status/1234567890/photo/1", Some((Fonte::Twitter, "fulano/1234567890"))),
             ("https://www.instagram.com/p/Abc123_-x/", Some((Fonte::Instagram, "p/Abc123_-x"))),
             // `reels` no plural e o que o aplicativo compartilha; o espelho so
             // entende `reel`, entao a forma normalizada e a que sai daqui.

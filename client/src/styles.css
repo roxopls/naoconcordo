@@ -79,6 +79,9 @@ nav { flex: 1; padding: 16px 10px; overflow-y: auto; }
 .section-label { color: #747480; font-weight: 800; font-size: 10px; letter-spacing: .11em; margin: 5px 8px 8px; }
 .voice-label { margin-top: 25px; }
 .channel { width: 100%; display: flex; align-items: center; gap: 10px; border: 0; padding: 9px 10px; border-radius: 7px; color: #aaaab5; background: transparent; cursor: pointer; text-align: left; }
+/* Espelho para OBS ligado neste canal de voz. Cor de alerta, e nao de destaque:
+   e um aviso de que a camera pode sair da sala, nao um enfeite. */
+.espelho-marca { margin-left: auto; flex: 0 0 auto; padding: 1px 5px; border-radius: 5px; background: rgba(224,86,79,.18); color: #ff9b9e; font-size: 9px; font-weight: 800; letter-spacing: .04em; }
 .channel span { color: #777783; }
 .channel:hover, .channel.active { color: white; background: #1c1c21; }
 .voice-users { margin: 6px 0 0 18px; display: grid; gap: 5px; }
@@ -145,6 +148,15 @@ nav { flex: 1; padding: 16px 10px; overflow-y: auto; }
 .stage.grade-topo { display: flex; flex-wrap: wrap; justify-content: center; align-content: flex-start; padding-left: max(18px, calc((100% - var(--faixa-largura, 100%)) / 2)); padding-right: max(18px, calc((100% - var(--faixa-largura, 100%)) / 2)); }
 .stage.grade-topo .track-tile { flex: 0 0 auto; width: var(--tile-largura, 100%); max-width: none; margin: 0; }
 .track-tile video { width: 100%; height: 100%; object-fit: contain; display: block; }
+/* Pinça no celular (ver `gestos.ts`). O que cresce é a imagem dentro da
+   moldura: a tile continua do tamanho que a grade deu, então ampliar uma não
+   empurra as outras para fora da tela. `will-change` porque isto anda junto com
+   o dedo — sem ele o Chromium repinta a moldura toda a cada quadro. */
+.track-tile.ampliada video { transform: translate(var(--zoom-x, 0), var(--zoom-y, 0)) scale(var(--zoom, 1)); will-change: transform; }
+/* `manipulation` desliga o "toque duplo aproxima a página" do navegador. Sem
+   isto o toque duplo na tile ia para o zoom da página e o `dblclick` que abre a
+   tela cheia nunca chegava. */
+.track-tile, .camera-tile, .tela-tile { touch-action: manipulation; }
 .track-tile label { position: absolute; left: 9px; bottom: 9px; margin: 0; padding: 4px 8px; background: rgba(0,0,0,.65); border-radius: 6px; font-size: 11px; }
 /* Convite para assistir: ocupa o lugar da transmissao ate alguem pedir. */
 .track-tile.oferta { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: #121216; border-style: dashed; }
@@ -452,6 +464,9 @@ input[type="range"]::-webkit-slider-thumb {
 .rail-button.home.active { background: rgba(255,122,69,.16); }
 .rail-logo { width: 34px; height: 34px; border-radius: 11px; object-fit: cover; }
 .rail-badge { position: absolute; top: -3px; right: -3px; min-width: 18px; height: 18px; padding: 0 5px; display: grid; place-items: center; border-radius: 9px; background: var(--danger, #e0564f); color: #fff; font-size: 11px; font-weight: 800; }
+/* Citacao: anel da cor de destaque em volta do selo. O numero nao muda, entao
+   ele nao mente sobre a contagem; o que muda e o peso visual. */
+.rail-badge.mencao { box-shadow: 0 0 0 2px var(--accent), 0 0 10px rgba(255,122,69,.55); }
 .update-pill { border-color: rgba(84,209,139,.45); color: var(--green, #54d18b); }
 .update-pill.baixando { border-color: rgba(255,122,69,.45); color: var(--accent, #ff7a45); }
 .rail-button.add { background: transparent; border: 1px dashed rgba(255,255,255,.14); color: #7c7c88; }
@@ -518,10 +533,29 @@ input[type="range"]::-webkit-slider-thumb {
 .telas-current { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A moldura ocupa o resto da janela: redimensionar a janela redimensiona a
    transmissao, que e o ponto de ter uma janela propria. */
-.telas-grid { flex: 1 1 auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 6px; padding: 6px; overflow: auto; align-content: start; }
-.tela-tile { position: relative; min-height: 160px; background: #000; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+/* Linhas e colunas vem do JS (`grade`), como na janela de cameras.
+   Com `auto-fit` e `align-content: start` a altura da linha saia da proporcao
+   do video, nao da janela: uma tela 16:9 numa janela mais alta deixava uma
+   faixa morta embaixo — o "vao" que se via. Agora as linhas dividem a altura
+   disponivel e o `object-fit: contain` cuida do formato dentro da tile. */
+.telas-grid { flex: 1 1 auto; min-height: 0; display: grid; gap: 6px; padding: 6px; overflow: hidden; }
+/* `min-width`/`min-height` zerados pelo mesmo motivo da grade de cameras: item
+   de grade nasce com `min-width: auto`, que num <video> resolve na largura do
+   quadro, e a grade estoura ao encolher a janela. */
+.tela-tile { position: relative; min-width: 0; min-height: 0; background: #000; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .tela-tile video { width: 100%; height: 100%; object-fit: contain; display: block; }
 .tela-tile label { position: absolute; left: 6px; bottom: 6px; padding: 2px 7px; border-radius: 6px; background: rgba(0,0,0,.6); font-size: 11px; }
+/* Seletor de telas: um botao por transmissao disponivel, ligado ou desligado.
+   `flex-wrap` porque a barra e estreita e cinco transmissoes empurrariam as
+   ultimas para fora da janela. */
+.telas-escolha { flex: 1 1 auto; display: flex; flex-wrap: wrap; gap: 6px; }
+.telas-fonte { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; background: #17171b; color: var(--muted); font-size: 11px; cursor: pointer; }
+.telas-fonte:hover { background: #22222a; }
+.telas-fonte .ponto { width: 7px; height: 7px; border-radius: 50%; background: #55555f; }
+/* Ligada: cor de destaque no ponto, e nao no texto todo, para a barra nao
+   virar um arco-iris com varias telas ligadas ao mesmo tempo. */
+.telas-fonte.ligada { color: #f3f3f4; border-color: #3a3a45; }
+.telas-fonte.ligada .ponto { background: var(--accent); }
 
 /* menu de cada pessoa: volume e silenciamento saem da lista e vem para ca */
 .person.clickable, .voice-member.clickable { cursor: pointer; }
@@ -547,7 +581,10 @@ input[type="range"]::-webkit-slider-thumb {
 
 
 /* icone do servidor no rail: respeita o formato quadrado arredondado do botao */
-.rail-servers .rail-button { overflow: hidden; }
+/* Sem `overflow: hidden`: o selo de nao lidas mora nos cantos do botao, e
+   qualquer recorte aqui o apagava. O icone continua redondo porque a imagem
+   herda o `border-radius` do botao na regra abaixo. */
+.rail-servers .rail-button { overflow: visible; }
 .rail-servers .rail-button img { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
 
 /* preview de banner e icone nos dialogs de edicao */
@@ -619,9 +656,15 @@ input[type="range"]::-webkit-slider-thumb {
 .cartao-link img, .cartao-link video { width: 100%; display: block; aspect-ratio: 16 / 9; object-fit: cover; background: #000; }
 /* A capa e o palco do play: a imagem embaixo, o botao no meio dela. */
 .cartao-capa { position: relative; display: block; min-height: 40px; }
-.cartao-play { position: absolute; inset: 0; margin: auto; width: 54px; height: 54px; border: 0; border-radius: 50%; background: rgba(0,0,0,.62); cursor: pointer; }
-/* O triangulo e desenhado com borda: um so elemento, sem imagem a carregar. */
-.cartao-play::before { content: ""; display: block; width: 0; height: 0; margin: 0 auto 0 20px; border-style: solid; border-width: 10px 0 10px 16px; border-color: transparent transparent transparent #fff; }
+/* `padding: 0` e `place-items: center` em vez de margem contada a mao: o botao
+   herdava o preenchimento padrao do navegador (`1px 6px`), e o triangulo, sendo
+   o primeiro bloco do conteudo, encostava no alto — o play saia acima do centro
+   do circulo. */
+.cartao-play { position: absolute; inset: 0; margin: auto; width: 54px; height: 54px; padding: 0; border: 0; border-radius: 50%; background: rgba(0,0,0,.62); cursor: pointer; display: grid; place-items: center; }
+/* O triangulo e desenhado com borda: um so elemento, sem imagem a carregar.
+   A folga a esquerda e optica: o peso do triangulo fica no lado achatado, e
+   centrado na matematica ele parece deslocado para a esquerda. */
+.cartao-play::before { content: ""; display: block; width: 0; height: 0; margin-left: 4px; border-style: solid; border-width: 10px 0 10px 16px; border-color: transparent transparent transparent #fff; }
 .cartao-play:hover { background: rgba(0,0,0,.8); }
 .cartao-play.carregando { opacity: .5; cursor: progress; }
 /* Video vertical de celular cortado em 16:9 vira uma tira no meio da cena. */
@@ -1103,6 +1146,9 @@ body.com-barra .cameras-status { top: 32px; }
    que da para clicar. */
 .toast.clicavel { cursor: pointer; border-color: #4a4a55; }
 .toast.clicavel:hover { background: #34343b; }
+/* Aviso de mensagem: o que precisa ser visto de longe, do outro lado da tela,
+   com uma chamada acontecendo na frente. */
+.toast.grande { max-width: 420px; padding: 15px 17px; border-left: 3px solid var(--accent); font-size: 14px; font-weight: 600; box-shadow: 0 16px 40px rgba(0,0,0,.5); }
 
 
 /* Quadro de quem esta na chamada sem camera. Mesma moldura das outras tiles,

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { abrirExterno, abrirJanela, bloquearRecarregar, ehTauri } from "./ambiente";
+import { abrirExterno, abrirJanela, bloquearRecarregar, ehCelularNativo, ehDesktop, ehTauri } from "./ambiente";
 import { ZOOMS, mudarZoom, prepararEscala, vigiarAtalhosDeZoom, zoomEscolhido } from "./escala";
 import { baixarPreferencias, vigiarPreferencias } from "./preferencias";
 import {
@@ -16,6 +16,7 @@ import {
   abrirNoGrupo, novaChaveDeGrupo, selarNoGrupo,
   type Embrulho, type Identity,
 } from "./private";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { checkForUpdate, procurarAtualizacao, instalarAtualizacao, canalAtual, definirCanal, notasSalvas, limparNotas } from "./updates";
 import {
   pickSource, startShare, stopShare, pauseShare, switchShare, targetAlive,
@@ -30,6 +31,7 @@ import {
   sendTestNotification, setDesktopNotifications, setNotificationPreview, setNotificationsInCall,
 } from "./notifications";
 import { atualizarSelo } from "./selo";
+import { instalarGestos } from "./gestos";
 import { grade } from "./gridlayout";
 import { chamadaDoPar, criarChamadaPrivada } from "./chamada";
 
@@ -58,7 +60,7 @@ type Som = { id: string; serverId: string; name: string; fileId: string; created
 type AuthSession = { token: string; username: string; expiresAt: number; lembrar?: boolean };
 type ServerInfo = { id: string; name: string; iconFile?: string | null; bannerFile?: string | null; description?: string | null; modoMestre?: boolean } & Skin;
 type RoomKind = "text" | "voice";
-type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind; categoryId?: string | null; posicao?: number; temporaria?: boolean; mestre?: string | null; capa?: string | null } & Skin;
+type RoomInfo = { id: string; name: string; serverId: string; kind: RoomKind; categoryId?: string | null; posicao?: number; temporaria?: boolean; mestre?: string | null; capa?: string | null; espelho?: boolean } & Skin;
 /// Cor e fundo de um servidor ou canal. Campos independentes: da para trocar so
 /// a cor de destaque, so o fundo, ou os dois.
 type Skin = { accent?: string | null; bgColor?: string | null; bgFile?: string | null; bgOpacity?: number | null };
@@ -762,6 +764,7 @@ async function enterApp() {
   if (restoredFriend && friends.some(friend => key(friend) === key(restoredFriend))) await openDirect(restoredFriend);
   else if (restoredGrupo && grupos.some(grupo => grupo.id === restoredGrupo)) await abrirGrupo(restoredGrupo);
   else { persistNavigation(); restoreComposerDraft(); }
+  if (modoDev()) voltarDepoisDeRecomecar();
 }
 function leaveApp() {
   void chamadaPrivada?.sair();
@@ -797,14 +800,46 @@ function renderRail() {
       const cache = blobCache.get(arquivo);
       if (cache) img.src = cache;
       else fileUrl(arquivo).then(url => { img.src = url; }).catch(() => {
-        button.classList.remove("has-image"); button.textContent = iniciais;
+        // `img.remove()` e `prepend`, e nao `textContent`: trocar o texto todo
+        // apagaria tambem o selo de nao lidas pendurado no botao.
+        button.classList.remove("has-image");
+        img.remove();
+        button.prepend(document.createTextNode(iniciais));
       });
     } else {
       button.textContent = iniciais;
     }
+    // De qual servidor veio a mensagem: o numero fica no icone dele, como nas
+    // conversas privadas. Antes so o titulo da janela contava, e com tres
+    // servidores abertos nao dava para saber onde tinha coisa por ler.
+    const porLer = naoLidasDoServidor(server.id);
+    if (porLer) {
+      const selo = seloDaBarra(porLer);
+      if (mencaoNoServidor(server.id)) selo.classList.add("mencao");
+      button.append(selo);
+      button.title = server.name + " · " + (porLer === 1 ? "1 mensagem por ler" : porLer + " mensagens por ler");
+    }
     button.onclick = () => void selectServer(server.id);
     return button;
   }));
+}
+
+/// Quantas mensagens por ler o servidor tem, somando os canais dele.
+function naoLidasDoServidor(serverId: string): number {
+  let total = 0;
+  for (const [roomId, quantas] of unreadRooms) {
+    if (rooms.find(sala => sala.id === roomId)?.serverId === serverId) total += quantas;
+  }
+  return total;
+}
+
+/// Alguma dessas mensagens cita voce? O selo muda de cara: mencao no meio de
+/// uma conversa movimentada se perde se o numero for igual ao das outras.
+function mencaoNoServidor(serverId: string): boolean {
+  for (const roomId of mencoesPorSala.keys()) {
+    if (rooms.find(sala => sala.id === roomId)?.serverId === serverId) return true;
+  }
+  return false;
 }
 // ------------------------------------------------------------ skins
 /// Junta a skin do canal com a do servidor, campo a campo.
@@ -1584,7 +1619,7 @@ function recordDirect(friend: string, message: DirectMessage) {
     contarNaoLida(quantasDoAmigo, key(friend));
     renderFriends(); updateUnreadTitle(); playPing();
     const mostrou = notifyMessage({ title: getDisplayName(friend), body: message.text, privateBody: "Nova mensagem privada", inCall: inCall(), naoPerturbe: emNaoPerturbe(), direta: true });
-    void avisarOrigem(mostrou, "Mensagem privada de " + getDisplayName(friend), () => void openDirect(friend));
+    void avisarOrigem(mostrou, "Mensagem privada de " + getDisplayName(friend), () => void openDirect(friend), true);
   }
 }
 async function handleIncomingEnvelope(envelope: Envelope) {
@@ -1804,7 +1839,7 @@ function registrarNoGrupo(grupoId: string, message: DirectMessage) {
     const grupo = grupos.find(item => item.id === grupoId);
     const titulo = grupo ? nomeDoGrupo(grupo) : "Grupo";
     const mostrou = notifyMessage({ title: titulo, body: getDisplayName(message.from) + ": " + message.text, privateBody: "Nova mensagem de " + getDisplayName(message.from), inCall: inCall(), naoPerturbe: emNaoPerturbe(), direta: true });
-    void avisarOrigem(mostrou, "Mensagem em " + titulo, () => void abrirGrupo(grupoId));
+    void avisarOrigem(mostrou, "Mensagem em " + titulo, () => void abrirGrupo(grupoId), true);
   }
 }
 
@@ -2064,7 +2099,9 @@ chamadaPrivada = criarChamadaPrivada({
     const mostrou = notifyMessage({ title: titulo, body: corpo, privateBody: "Chamada recebida", inCall: inCall(), naoPerturbe: emNaoPerturbe(), direta: true });
     void avisarOrigem(mostrou, corpo, aoClicar);
   },
-  telaNativa: ehTauri() ? {
+  // `ehDesktop`, e nao `ehTauri`: a captura nativa e um seletor de janela do
+  // Windows falando com o Rust, e nada disso existe no aplicativo de celular.
+  telaNativa: ehDesktop() ? {
     iniciar: async () => {
       const escolha = await pickSource(QUALITIES, readQuality(), byId);
       if (!escolha) return null;
@@ -3251,10 +3288,12 @@ async function connectVoice() {
         renderCameras();
       }, 60);
     };
-    next.on(RoomEvent.Connected, () => { if (!atual()) return; setStatus("online", true); playJoin(); silenciarAvisos(2000); announceDeafened(); refresh(); }).on(RoomEvent.Reconnecting, () => { if (!atual()) return; setStatus("reconectando", false); reconectandoDesde ||= Date.now(); })
-      .on(RoomEvent.Reconnected, () => { if (!atual()) return; reconectandoDesde = 0; setStatus("online", true); silenciarAvisos(2000); })
+    const quemE = (p?: { name?: string; identity: string }) => p ? (p.name || p.identity) : "?";
+    next.on(RoomEvent.Connected, () => { if (!atual()) return; logAudio("SALA conectada " + next.name); setStatus("online", true); playJoin(); silenciarAvisos(2000); announceDeafened(); refresh(); }).on(RoomEvent.Reconnecting, () => { if (!atual()) return; logAudio("SALA reconectando"); setStatus("reconectando", false); reconectandoDesde ||= Date.now(); })
+      .on(RoomEvent.Reconnected, () => { if (!atual()) return; logAudio("SALA reconectada"); reconectandoDesde = 0; setStatus("online", true); silenciarAvisos(2000); })
       .on(RoomEvent.Disconnected, motivo => {
         if (!atual()) return;
+        logAudio("SALA caiu motivo=" + motivo);
         reconectandoDesde = 0;
         setStatus("fora da chamada", false); playLeave(); voiceRoomId = ""; resetMediaState(); refresh();
         // 2 e `DUPLICATE_IDENTITY`: a mesma conta entrou na chamada de outro
@@ -3287,6 +3326,7 @@ async function connectVoice() {
       })
       .on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
         if (!atual()) return;
+        if (track.kind === Track.Kind.Audio) logAudio("ASSINOU " + quemE(participant) + " " + track.source + " " + publication.trackSid + " mst=" + track.mediaStreamTrack.id.slice(0, 8));
         // Quem ja estava transmitindo quando voce entrou chega por aqui, sem
         // passar por TrackPublished — sem esta recusa, essa tela ainda abria
         // sozinha.
@@ -3364,12 +3404,14 @@ async function connectVoice() {
       // a miniatura fica na tela ate a pessoa sair da chamada.
       .on(RoomEvent.TrackMuted, (publication, participant) => {
         if (!atual()) return;
+        if (publication.kind === Track.Kind.Audio) logAudio("MUDO " + quemE(participant) + " " + publication.source);
         if (publication.source === Track.Source.Camera) removeCamera(publication.trackSid);
         void participant;
         refresh();
       })
       .on(RoomEvent.TrackUnmuted, (publication, participant) => {
         if (!atual()) return;
+        if (publication.kind === Track.Kind.Audio) logAudio("DESMUDO " + quemE(participant) + " " + publication.source);
         if (publication.source === Track.Source.Camera && publication.track) {
           addCamera(publication.track, participant.name || participant.identity, participant === room?.localParticipant);
         }
@@ -3378,9 +3420,12 @@ async function connectVoice() {
         applyAllVolumes();
         refresh();
       })
+      .on(RoomEvent.TrackSubscriptionFailed, (sid, participant, motivo) => { if (atual()) logAudio("FALHA-ASSINATURA " + quemE(participant) + " " + sid + " " + String(motivo)); })
+      .on(RoomEvent.AudioPlaybackStatusChanged, () => { if (atual()) logAudio("REPRODUCAO liberada=" + next.canPlaybackAudio); })
       .on(RoomEvent.ParticipantAttributesChanged, () => { if (!atual()) return; updateCallControls(); refresh(); })
-      .on(RoomEvent.TrackUnsubscribed, track => {
+      .on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
         if (!atual()) return;
+        if (track.kind === Track.Kind.Audio) logAudio("DESASSINOU " + quemE(participant) + " " + track.source + " " + publication.trackSid);
         soltarDoReforco(track);
         detachTrack(track.sid);
         if (track.sid) removeCamera(track.sid);
@@ -3761,7 +3806,7 @@ function vigiaDeMidia() {
     const canal = voiceRoomId;
     if (!canal || Date.now() - reentrouEm < 90_000) return;
     reentrouEm = Date.now();
-    console.warn("[vigia] reentrando:", motivo);
+    console.warn("[vigia] reentrando:", motivo); logAudio("VIGIA reentrando: " + motivo);
     showToast("A chamada travou. Reconectando.");
     await sairDaChamada();
     // `sairDaChamada` zera `room` antes do `Disconnected` chegar, e o guarda de
@@ -3813,7 +3858,7 @@ function vigiaDeMidia() {
       if (agora - tentou > 60_000) {
         reassinadaEm.set(pub.trackSid, agora);
         ultimo.delete(chave);
-        console.warn("[vigia] voz parada, reassinando:", who);
+        console.warn("[vigia] voz parada, reassinando:", who); logAudio("VIGIA voz parada, reassinando " + who);
         void pub.setSubscribed(false);
         window.setTimeout(() => { if (room === sala) void pub.setSubscribed(true); }, 500);
       } else if (agora - tentou > PARADA_MS * 2) {
@@ -4787,6 +4832,9 @@ function fecharPopup(rotulo: string) {
 
 async function openCameraWindow() {
   if (!voiceRoomId) { showToast("Entre num canal de voz primeiro."); return; }
+  // No celular nao ha segunda janela para onde tirar as cameras: o Tauri de
+  // Android roda uma janela so, e a tela do aparelho e a moldura.
+  if (ehCelularNativo()) { showToast("Janela separada só no computador."); return; }
   // No navegador nao ha sinal de vida por evento do Tauri: quem responde se a
   // janela ainda existe e a propria referencia devolvida por `window.open`.
   if (!ehTauri()) {
@@ -4932,6 +4980,8 @@ function onScreenWindowClosed() {
 
 async function openScreenWindow() {
   if (!voiceRoomId) { showToast("Entre num canal de voz primeiro."); return; }
+  // Mesma razao da janela de cameras: no celular ha uma janela so.
+  if (ehCelularNativo()) { showToast("Janela separada só no computador."); return; }
   if (!ehTauri()) {
     const url = "telas.html?room=" + encodeURIComponent(voiceRoomId)
       + "&sharing=" + (screenEnabled ? "1" : "0");
@@ -5639,7 +5689,9 @@ const forcarDuplicacao = () => localStorage.getItem(DXGI_KEY) === "1";
 // pode ter tirado o naoconcordo da inicializacao por fora, e o interruptor tem
 // de contar a verdade quando as configuracoes abrem.
 async function pluginDeInicio() {
-  if (!ehTauri()) return null;
+  // Abrir com o sistema e coisa de computador: no Android quem decide o que
+  // arranca e o proprio sistema, e o plugin nao existe ali.
+  if (!ehDesktop()) return null;
   try {
     return await import("@tauri-apps/plugin-autostart");
   } catch {
@@ -5872,6 +5924,7 @@ const modoDev = () => localStorage.getItem(DEV_KEY) === "1";
 function aplicarModoDev() {
   const ligado = modoDev();
   byId("forcar-dxgi-linha").classList.toggle("hidden", !ligado || !ehTauri());
+  byId("dev-button").classList.toggle("hidden", !ligado);
   if (!ligado) {
     byId("diag-box").classList.add("hidden");
     window.clearInterval(diagTimer);
@@ -5881,6 +5934,229 @@ function aplicarModoDev() {
     void atualizarDiagnostico();
   }
 }
+
+// ------------------------------------------------ diagnostico das vozes
+// "Nao ouco fulano, e so reabrir o app resolve" (2026-09-29): sair e entrar na
+// chamada nao resolvia, o servidor nao registrou erro e a faixa do outro lado
+// era a mesma antes e depois. O vigia de midia mede pacote, e a caixa so via
+// elemento pausado — nenhum dos dois enxerga pacote chegando e som nao saindo.
+// Aqui cada voz e acompanhada camada por camada: servidor diz que fala, pacote
+// chega, decodifica com energia, faixa viva, elemento tocando. A primeira
+// camada que falha e onde o som morre.
+
+/// Leitura anterior por faixa, para mostrar taxa em vez de total.
+const vozAnterior = new Map<string, { t: number; pacotes: number; energia: number; duracao: number; ocultas: number; amostras: number }>();
+
+/// Uma linha por voz (e por som de tela assinado), para a caixa e para o log.
+async function diagnosticoDeVozes(): Promise<string[]> {
+  const linhas: string[] = [];
+  if (!room) return linhas;
+  const agora = performance.now();
+  const vistas = new Set<string>();
+  for (const participante of room.remoteParticipants.values()) {
+    for (const fonte of [Track.Source.Microphone, Track.Source.ScreenShareAudio] as const) {
+      const pub = participante.getTrackPublication(fonte) as RemoteTrackPublication | undefined;
+      if (!pub) continue;
+      if (fonte === Track.Source.ScreenShareAudio && !pub.isSubscribed) continue;
+      const quem = getDisplayName(participante.name || participante.identity) + (fonte === Track.Source.ScreenShareAudio ? " (tela)" : "");
+      const partes = [quem, "sid=" + pub.trackSid];
+      // Servidor: o nivel que o LiveKit mede na entrada dele. Falando la e
+      // silencio aqui separa "fulano quieto" de "fulano mudo so para mim".
+      partes.push("srv=" + (participante.isSpeaking ? "fala" : "quieto") + "/" + participante.audioLevel.toFixed(2));
+      partes.push("assin=" + pub.subscriptionStatus + (pub.isMuted ? " MUDO-LA" : ""));
+      const faixa = pub.track as RemoteAudioTrack | undefined;
+      if (!faixa) { linhas.push("VOZ " + partes.join("  ") + "  SEM FAIXA"); continue; }
+      vistas.add(pub.trackSid);
+      // Rede e decodificacao, do inbound-rtp do proprio receptor.
+      try {
+        const relatorio = await faixa.getRTCStatsReport();
+        let achou = false;
+        relatorio?.forEach(item => {
+          if (item.type !== "inbound-rtp" || item.kind !== "audio") return;
+          achou = true;
+          const d = item as RTCInboundRtpStreamStats & {
+            totalAudioEnergy?: number; totalSamplesDuration?: number; audioLevel?: number;
+            concealedSamples?: number; totalSamplesReceived?: number; jitterBufferDelay?: number; jitterBufferEmittedCount?: number;
+          };
+          const atual = {
+            t: agora, pacotes: d.packetsReceived || 0, energia: d.totalAudioEnergy || 0, duracao: d.totalSamplesDuration || 0,
+            ocultas: d.concealedSamples || 0, amostras: d.totalSamplesReceived || 0,
+          };
+          const antes = vozAnterior.get(pub.trackSid);
+          vozAnterior.set(pub.trackSid, atual);
+          if (antes && agora - antes.t > 500) {
+            const s = (agora - antes.t) / 1000;
+            const dDur = atual.duracao - antes.duracao;
+            // RMS do trecho: energia e soma de nivel^2 * duracao.
+            const rms = dDur > 0 ? Math.sqrt(Math.max(0, atual.energia - antes.energia) / dDur) : 0;
+            const dAm = atual.amostras - antes.amostras;
+            partes.push("pk/s=" + Math.round((atual.pacotes - antes.pacotes) / s));
+            partes.push("rms=" + rms.toFixed(3));
+            partes.push("ocult=" + (dAm > 0 ? Math.round(100 * (atual.ocultas - antes.ocultas) / dAm) : 0) + "%");
+          } else {
+            partes.push("pk=" + atual.pacotes);
+          }
+          partes.push("nivel=" + (d.audioLevel ?? 0).toFixed(3) + " perd=" + (d.packetsLost || 0));
+          if (d.jitterBufferEmittedCount) partes.push("jb=" + Math.round(1000 * (d.jitterBufferDelay || 0) / d.jitterBufferEmittedCount) + "ms");
+        });
+        if (!achou) partes.push("SEM INBOUND-RTP");
+      } catch (erro) { partes.push("stats-erro=" + String(erro)); }
+      // A faixa crua do WebRTC.
+      const mst = faixa.mediaStreamTrack;
+      partes.push("mst=" + mst.readyState + (mst.muted ? "/MUTED" : "") + (mst.enabled ? "" : "/DESLIGADA") + " id=" + mst.id.slice(0, 8));
+      // Elementos: quantos, e cada um tocando o que.
+      const els = [...document.querySelectorAll<HTMLAudioElement>("#audio-" + CSS.escape(pub.trackSid))];
+      const presos = faixa.attachedElements.length;
+      partes.push("els=" + els.length + "/lk=" + presos);
+      for (const el of els) {
+        const fluxo = el.srcObject instanceof MediaStream ? el.srcObject.getAudioTracks()[0] : undefined;
+        const sink = (el as HTMLAudioElement & { sinkId?: string }).sinkId;
+        partes.push("[" + (el.paused ? "PAUSADO" : "toca") + (el.muted ? " muted" : "") + " vol=" + el.volume.toFixed(2)
+          + " rs=" + el.readyState + " sink=" + (sink ? sink.slice(0, 6) : "padrao")
+          + (fluxo ? (fluxo === mst ? "" : " FLUXO-OUTRO") : " SEM-FLUXO")
+          + (el.dataset.reforcado ? " reforco" : "") + "]");
+      }
+      linhas.push("VOZ " + partes.join("  "));
+    }
+  }
+  for (const sid of vozAnterior.keys()) if (!vistas.has(sid)) vozAnterior.delete(sid);
+  if (contextoDeEscuta) linhas.push("VOZ contexto-reforco=" + contextoDeEscuta.state + " faixas=" + reforcadas.size);
+  return linhas;
+}
+
+// ----------------------------------------------------- log de audio (dev)
+// Guardado no `localStorage`, e nao na memoria: o caso que interessa e
+// justamente o que so reabrir o app resolve, e reabrir apagaria a memoria.
+// Fica so neste computador (a chave nao esta entre as preferencias que viajam).
+const LOG_AUDIO_KEY = "naoconcordo.dev.audiolog";
+const LOG_AUDIO_MAX = 4000;
+function logAudio(...linhas: string[]) {
+  if (!modoDev() || !linhas.length) return;
+  try {
+    const atual = JSON.parse(localStorage.getItem(LOG_AUDIO_KEY) || "[]") as string[];
+    const carimbo = new Date().toISOString();
+    for (const linha of linhas) atual.push(carimbo + " " + linha);
+    localStorage.setItem(LOG_AUDIO_KEY, JSON.stringify(atual.slice(-LOG_AUDIO_MAX)));
+  } catch { /* cheio ou corrompido: o log nao pode derrubar a chamada */ }
+}
+
+async function salvarLogDeAudio() {
+  let linhas: string[] = [];
+  try { linhas = JSON.parse(localStorage.getItem(LOG_AUDIO_KEY) || "[]") as string[]; } catch { /* vazio */ }
+  if (!linhas.length) { showToast("Log de áudio vazio."); return; }
+  const texto = "naoconcordo v" + __APP_VERSION__ + " — log de audio\n" + linhas.join("\n") + "\n";
+  const nome = "naoconcordo-audio-" + new Date().toISOString().replace(/[:.]/g, "-") + ".log";
+  try {
+    if (!ehTauri()) {
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(new Blob([texto], { type: "text/plain" }));
+      link.download = nome; link.click();
+      return;
+    }
+    const bytes = new TextEncoder().encode(texto);
+    let binario = "";
+    for (let inicio = 0; inicio < bytes.length; inicio += 0x8000) {
+      binario += String.fromCharCode(...bytes.subarray(inicio, inicio + 0x8000));
+    }
+    const onde = await invoke<string>("salvar_em_downloads", { nome, conteudoBase64: btoa(binario) });
+    showToast("Log salvo em " + onde);
+  } catch (erro) {
+    console.warn("[dev] log de audio", erro);
+    showToast("Não foi possível salvar o log.");
+  }
+}
+
+// --------------------------------------------- ferramentas de audio (dev)
+// Escada para achar onde o estado quebrado mora. Cada degrau zera mais que o
+// anterior; o primeiro que devolve o som diz a camada:
+//   elementos  -> o `<audio>` ou o renderer dele
+//   assinatura -> o receptor/transceptor dessa faixa
+//   chamada    -> a sala/conexao (ja se sabe que NAO resolvia)
+//   interface  -> estado do JS da pagina
+//   aplicativo -> o processo do WebView2 inteiro
+const VOLTAR_KEY = "naoconcordo.dev.voltar";
+
+/// Refaz so os `<audio>`, sem mexer na assinatura.
+function recriarElementosDeAudio() {
+  if (!room) return;
+  logAudio("ACAO recriar elementos");
+  for (const participante of room.remoteParticipants.values()) {
+    for (const pub of participante.trackPublications.values()) {
+      const faixa = pub.track;
+      if (!faixa || faixa.kind !== Track.Kind.Audio || !faixa.sid) continue;
+      soltarDoReforco(faixa);
+      detachTrack(faixa.sid);
+      attachTrack(faixa as RemoteTrack, participante);
+    }
+  }
+  applyAllVolumes();
+  showToast("Elementos de áudio recriados.");
+}
+
+/// Cancela a assinatura de todo audio e assina de novo.
+async function reassinarTodoAudio() {
+  const sala = room;
+  if (!sala) return;
+  logAudio("ACAO reassinar audio");
+  const pubs = [...sala.remoteParticipants.values()]
+    .flatMap(p => [...p.trackPublications.values()] as RemoteTrackPublication[])
+    .filter(pub => pub.kind === Track.Kind.Audio && pub.isSubscribed);
+  for (const pub of pubs) pub.setSubscribed(false);
+  await new Promise(pronto => window.setTimeout(pronto, 1000));
+  if (room !== sala) return;
+  for (const pub of pubs) pub.setSubscribed(true);
+  showToast("Áudio reassinado (" + pubs.length + " faixa(s)).");
+}
+
+async function reentrarNaChamadaDev() {
+  const canal = voiceRoomId;
+  if (!canal) return;
+  logAudio("ACAO reentrar " + canal);
+  await sairDaChamada();
+  voiceRoomId = canal; announceVoice(canal); renderNavigation(); updateCallControls();
+  await connectVoice();
+}
+
+/// Sai da chamada, marca para voltar e recarrega (so a pagina) ou reinicia (o
+/// processo). A marca faz o app voltar sozinho ao mesmo canal, como a pessoa
+/// fez na mao ao reabrir.
+async function recomecarDev(como: "pagina" | "processo") {
+  const canal = voiceRoomId;
+  logAudio("ACAO " + (como === "pagina" ? "recarregar interface" : "reiniciar aplicativo") + (canal ? " (volta a " + canal + ")" : ""));
+  if (canal) localStorage.setItem(VOLTAR_KEY, JSON.stringify({ canal, em: Date.now() }));
+  await sairDaChamada();
+  if (como === "processo" && ehTauri()) await relaunch();
+  else location.reload();
+}
+
+/// Chamado no fim da entrada: volta ao canal marcado por `recomecarDev`.
+function voltarDepoisDeRecomecar() {
+  const bruto = localStorage.getItem(VOLTAR_KEY);
+  if (!bruto) return;
+  localStorage.removeItem(VOLTAR_KEY);
+  try {
+    const { canal, em } = JSON.parse(bruto) as { canal: string; em: number };
+    // Marca velha e de um reinicio que nao terminou: nao arrasta ninguem para
+    // uma chamada horas depois.
+    if (Date.now() - em > 120_000 || !rooms.some(item => item.id === canal)) return;
+    logAudio("APP voltou apos recomecar, entrando em " + canal);
+    void toggleVoice(canal);
+  } catch { /* marca corrompida */ }
+}
+
+byId("dev-button").addEventListener("click", event => {
+  const ponto = { x: event.clientX, y: event.clientY };
+  abrirMenuSimples(byId("dev-button"), ponto, [
+    menuAcao("1. Recriar elementos de áudio", "audio", recriarElementosDeAudio),
+    menuAcao("2. Reassinar todo o áudio", "audio", () => void reassinarTodoAudio()),
+    menuAcao("3. Sair e entrar na chamada", "phone", () => void reentrarNaChamadaDev()),
+    menuAcao("4. Recarregar interface", "window", () => void recomecarDev("pagina")),
+    menuAcao("5. Reiniciar aplicativo", "window", () => void recomecarDev("processo")),
+    menuAcao("Marcar \"não ouço alguém\" no log", "pin", () => { logAudio("MARCA usuario nao ouve alguem"); showToast("Marcado no log."); }),
+    menuAcao("Salvar log de áudio", "download", () => void salvarLogDeAudio()),
+    menuAcao("Limpar log de áudio", "trash", () => { localStorage.removeItem(LOG_AUDIO_KEY); showToast("Log limpo."); }),
+  ]);
+});
 
 // ------------------------------------------------ diagnostico da transmissao
 // O WebRTC ja sabe por que esta degradando; so ninguem estava perguntando.
@@ -6027,6 +6303,9 @@ async function atualizarDiagnostico() {
   // Pausado e elemento; isto aqui e pacote. Elemento tocando sem pacote era o
   // caso que so reentrar resolvia.
   if (vozesParadas.size) linhas.push("SEM PACOTE  " + [...vozesParadas].join(", "));
+  const vozes = await diagnosticoDeVozes();
+  linhas.push(...vozes);
+  logAudio(...vozes);
   linhas.push(...await diagnosticoDeRecepcao());
 
   caixa.classList.toggle("hidden", linhas.length === 0);
@@ -6595,7 +6874,9 @@ for (const botao of document.querySelectorAll<HTMLButtonElement>("[data-atalho]"
 /// segura fala, quem solta cala. O plugin entrega `Pressed` e `Released`
 /// separados, entao da para tratar como botao de radio amador.
 async function registrarAtalhos() {
-  if (!ehTauri()) return;
+  // Atalho global e tecla capturada fora da janela: no celular nao existe nem
+  // tecla nem "fora da janela", e o plugin nao e compilado para lá.
+  if (!ehDesktop()) return;
   let plugin: typeof import("@tauri-apps/plugin-global-shortcut");
   try {
     plugin = await import("@tauri-apps/plugin-global-shortcut");
@@ -6909,6 +7190,16 @@ async function montarCartao(url: string, into: HTMLElement) {
       dados = await api<CartaoDeLink | undefined>("/api/previa?url=" + encodeURIComponent(url)) || null;
     } catch { dados = null; }
     cartoesVistos.set(url, dados);
+    // A mensagem pode ter sido redesenhada enquanto a resposta vinha; sem isto o
+    // cartao entraria num pedaco de tela que ja saiu.
+    //
+    // **So neste caminho.** Com o cartao ja em cache nao ha espera nenhuma, e
+    // esta funcao roda inteira antes de `appendMessage` pendurar o corpo da
+    // mensagem na tela — `isConnected` seria falso para todo mundo. Era isto que
+    // fazia a previa aparecer na primeira vez (a ida ao servidor dava tempo de a
+    // mensagem entrar) e sumir ao voltar para o canal, quando o cache responde
+    // na hora.
+    if (!into.isConnected) return;
   }
   const doYoutube = idDoYoutube(url);
   // Sem previa do servidor, o video do YouTube ainda merece o player.
@@ -6916,9 +7207,6 @@ async function montarCartao(url: string, into: HTMLElement) {
     dados = { fonte: "youtube", titulo: "Vídeo do YouTube", autor: "", texto: "", imagem: "", video: "", site: "youtube.com", link: url };
   }
   if (!dados) return;
-  // A mensagem pode ter sido redesenhada enquanto a resposta vinha; sem isto o
-  // cartao entraria num pedaco de tela que ja saiu.
-  if (!into.isConnected) return;
 
   const cartao = document.createElement("div");
   cartao.className = "cartao-link cartao-" + dados.fonte;
@@ -6930,7 +7218,7 @@ async function montarCartao(url: string, into: HTMLElement) {
     a.href = dados!.link;
     a.onclick = evento => {
       evento.preventDefault();
-      void abrirExterno(dados!.link).catch(() => showToast("Não foi possível abrir o link."));
+      abrirLink(dados!.link);
     };
     return a;
   };
@@ -7169,12 +7457,50 @@ function imagemDeEmote(emote: Emote, classe = "emote"): HTMLImageElement {
   return img;
 }
 
+/// Onde o endereço termina de verdade.
+///
+/// A varredura vai até o espaço, então `olha (https://x.com/a/status/1)` e
+/// `vi em https://x.com/a.` levavam o fecha-parêntese e o ponto **para dentro**
+/// do link: o que ia para o navegador era um endereço que não existe, e o que
+/// aparecia era só "não foi possível abrir o link".
+///
+/// Parêntese e colchete saem apenas quando não há abertura correspondente dentro
+/// do próprio endereço. Sem essa conta, um link de Wikipédia
+/// (`.../wiki/Tauri_(software)`) perderia o fim — que é o caso oposto e igualmente
+/// comum.
+function fimDaUrl(url: string): number {
+  const pares: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+  let fim = url.length;
+  while (fim > 0) {
+    const ultimo = url[fim - 1];
+    if (".,;:!?'\"".includes(ultimo)) { fim -= 1; continue; }
+    const abre = pares[ultimo];
+    if (abre) {
+      const trecho = url.slice(0, fim);
+      const abertos = trecho.split(abre).length - 1;
+      const fechados = trecho.split(ultimo).length - 1;
+      if (fechados > abertos) { fim -= 1; continue; }
+    }
+    break;
+  }
+  return fim;
+}
+
 function renderText(texto: string) {
   const paragrafo = document.createElement("p");
   let ultimo = 0;
   for (const achado of texto.matchAll(RE_RICO)) {
     const inicio = achado.index ?? 0;
     if (inicio > ultimo) paragrafo.append(document.createTextNode(texto.slice(ultimo, inicio)));
+    const link = achado[1];
+    if (link) {
+      // A pontuação cortada não é descartada: `ultimo` avança só até o fim do
+      // endereço, e o pedaço que sobrou entra como texto na volta seguinte.
+      const fim = fimDaUrl(link);
+      paragrafo.append(linkDeTexto(link.slice(0, fim)));
+      ultimo = inicio + fim;
+      continue;
+    }
     paragrafo.append(pedacoRico(achado));
     ultimo = inicio + achado[0].length;
   }
@@ -7182,24 +7508,45 @@ function renderText(texto: string) {
   return paragrafo;
 }
 
-function pedacoRico(achado: RegExpMatchArray): Node {
-  const [inteiro, link, codigo, negrito, italico, spoiler, mencao, emote] = achado;
+/// Um endereço clicável no meio da conversa.
+function linkDeTexto(url: string) {
+  const a = document.createElement("a");
+  a.className = "chat-link";
+  a.textContent = url;
+  // O endereco de verdade, e nao `#`: o menu do botao direito copia daqui
+  // (`link.href`), e com `#` o que ia para a area de transferencia era
+  // `tauri.localhost/#`, que e no que `#` se resolve dentro da janela. O
+  // clique continua sendo tratado por nos.
+  a.href = url;
+  a.onclick = evento => {
+    evento.preventDefault();
+    abrirLink(url);
+  };
+  return a;
+}
 
-  if (link) {
-    const a = document.createElement("a");
-    a.className = "chat-link";
-    a.textContent = link;
-    // O endereco de verdade, e nao `#`: o menu do botao direito copia daqui
-    // (`link.href`), e com `#` o que ia para a area de transferencia era
-    // `tauri.localhost/#`, que e no que `#` se resolve dentro da janela. O
-    // clique continua sendo tratado por nos, logo abaixo.
-    a.href = link;
-    a.onclick = evento => {
-      evento.preventDefault();
-      void abrirExterno(link).catch(() => showToast("Nao foi possivel abrir o link."));
-    };
-    return a;
-  }
+/// Abre no navegador e **conta o motivo** quando não consegue.
+///
+/// O motivo vinha sendo jogado fora: os três lugares que abrem link chamavam
+/// `.catch(() => showToast("Não foi possível abrir o link."))`, e "dá um erro
+/// em alguns links" ficava sem como investigar — recusa de permissão do Tauri
+/// (`opener.forbidden url`), endereço malformado e navegador do sistema que não
+/// respondeu chegam todos aqui, e cada um pede uma correção diferente.
+function abrirLink(url: string) {
+  void abrirExterno(url).catch(erro => {
+    console.error("[link] não abriu", url, erro);
+    const motivo = erro instanceof Error ? erro.message : String(erro);
+    showToast("Não foi possível abrir o link: " + motivo);
+  });
+}
+
+/// Um pedaço formatado da mensagem.
+///
+/// Endereço não entra aqui: ele é tratado em `renderText`, que precisa saber
+/// onde o link termina para devolver a pontuação ao texto. Ver `fimDaUrl`.
+function pedacoRico(achado: RegExpMatchArray): Node {
+  const [inteiro, , codigo, negrito, italico, spoiler, mencao, emote] = achado;
+
   if (codigo !== undefined) {
     const el = document.createElement("code");
     el.className = "chat-codigo";
@@ -7451,7 +7798,10 @@ function abrirImagem(url: string, alt = "", anexo?: StoredFile) {
 function renderLinkEmbeds(texto: string, into: HTMLElement) {
   const vistos = new Set<string>();
   for (const achado of texto.matchAll(RE_URL)) {
-    const url = achado[0];
+    // Mesmo corte de `renderText`: sem ele a prévia era pedida para
+    // `https://x.com/a/status/1)`, o servidor não reconhecia o endereço e o
+    // cartão não vinha — só para os links que alguém escreveu entre parênteses.
+    const url = achado[0].slice(0, fimDaUrl(achado[0]));
     if (vistos.has(url)) continue;
     vistos.add(url);
     if (vistos.size > 3) break;
@@ -7488,7 +7838,7 @@ function renderLinkEmbeds(texto: string, into: HTMLElement) {
         fora.type = "button";
         fora.className = "embed-fora";
         fora.textContent = "abrir no navegador";
-        fora.onclick = () => void abrirExterno(url).catch(() => showToast("Nao foi possivel abrir o link."));
+        fora.onclick = () => abrirLink(url);
         box.append(quadro, fora);
       } else {
         // Sem player conhecido: pede o cartao ao servidor, que le as marcas
@@ -8254,28 +8604,52 @@ const soundOn = () => localStorage.getItem(SOUND_KEY) !== "0";
 /// sair, abrir transmissão) passam por `playChime` e continuam tocando em "não
 /// incomodar": quem está numa chamada pediu para estar lá, e deixar de ouvir
 /// que alguém entrou seria esconder o que está acontecendo na sua frente.
-function playPing() {
+/// Uma batida curta, com envelope proprio.
+///
+/// Envelope por batida, e nao um para a sequencia toda: com um so, duas batidas
+/// seguidas se somam e o que se ouve e uma nota longa, nao um ritmo.
+function batida(context: AudioContext, at: number, freq: number, peak: number) {
+  const gain = context.createGain();
+  gain.gain.setValueAtTime(0.0001, at);
+  // Subida em 8 ms: rapida o suficiente para soar percussiva, lenta o
+  // suficiente para nao estalar no alto-falante.
+  gain.gain.exponentialRampToValueAtTime(peak, at + 0.008);
+  gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.12);
+  gain.connect(context.destination);
+  const osc = context.createOscillator();
+  // Triangular: os avisos da chamada sao todos senoide, e timbre separa dois
+  // avisos melhor do que melodia.
+  osc.type = "triangle";
+  osc.frequency.setValueAtTime(freq, at);
+  osc.connect(gain);
+  osc.start(at);
+  osc.stop(at + 0.13);
+}
+
+/// Toca uma sequencia de batidas, se o momento permitir.
+function tocarBatidas(notas: [number, number][], peak: number) {
   if (emNaoPerturbe()) return;
   if (!soundOn()) return;
   try {
     const context = new AudioContext();
     const now = context.currentTime;
-    const gain = context.createGain();
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.12, now + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
-    gain.connect(context.destination);
-    for (const [freq, at] of [[880, 0], [1320, 0.09]] as [number, number][]) {
-      const osc = context.createOscillator();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(freq, now + at);
-      osc.connect(gain);
-      osc.start(now + at);
-      osc.stop(now + at + 0.12);
-    }
-    window.setTimeout(() => void context.close(), 600);
+    for (const [freq, at] of notas) batida(context, now + at, freq, peak);
+    window.setTimeout(() => void context.close(), 900);
   } catch { /* sem audio disponivel */ }
 }
+
+/// Mensagem nova.
+///
+/// Duas batidas na **mesma** nota, e nao um intervalo subindo: entrar, sair e
+/// abrir transmissao sao todos intervalos de senoide, e uma mensagem que
+/// tambem subia de nota virava o mesmo som para o ouvido — era por isso que
+/// nao se sabia se alguem escreveu ou se alguem entrou na chamada. O volume
+/// tambem subiu: 0.12 contra 0.1 dos avisos da chamada era diferenca que
+/// ninguem ouve.
+const playPing = () => tocarBatidas([[1174.66, 0], [1174.66, 0.13]], 0.22);
+/// Citacao: a mesma batida duas vezes e uma terceira mais aguda, alto. E o
+/// aviso que a pessoa nao pode perder.
+const playPingMencao = () => tocarBatidas([[1174.66, 0], [1174.66, 0.13], [1567.98, 0.28]], 0.27);
 
 /// Toca uma sequencia curta de notas. Senoide pura, sem ataque brusco: o que
 /// assusta num aviso e a subida instantanea, nao o volume em si.
@@ -8360,7 +8734,8 @@ function noteUnread(message: ChatMessage, fromMe: boolean) {
   if (olhando && !citado) return;
   if (citado) mencoesPorSala.set(message.roomId, (mencoesPorSala.get(message.roomId) || 0) + 1);
   if (!olhando) unreadRooms.set(message.roomId, (unreadRooms.get(message.roomId) || 0) + 1);
-  renderNavigation(); playPing();
+  renderNavigation();
+  if (citado) playPingMencao(); else playPing();
   const channel = rooms.find(item => item.id === message.roomId);
   const servidor = servers.find(item => item.id === channel?.serverId);
   const body = message.text || (message.attachments?.length ? "Enviou um anexo" : "Nova mensagem");
@@ -8375,7 +8750,7 @@ function noteUnread(message: ChatMessage, fromMe: boolean) {
   void avisarOrigem(mostrou, (citado ? "Citaram você — " : "") + de, () => {
     if (channel && channel.serverId !== currentServerId) void selectServer(channel.serverId);
     if (channel) void selectRoom(channel.id);
-  });
+  }, true);
 }
 // Contagem separada da de nao lidas: mencao merece marca propria na lista de
 // canais, senao ela se perde no meio de uma conversa movimentada.
@@ -9546,6 +9921,115 @@ function acoesDeCriar(menu: HTMLElement) {
   if (temCategorias) acao("Categoria", () => void criarCategoria());
 }
 
+// ------------------------------------------------------- espelho para OBS
+type EspelhoVisao = { ligado: boolean; geracao: number; grade: string; pessoas: { username: string; etiqueta: string }[] };
+
+/// O endereço que se cola no Browser Source do OBS.
+///
+/// Mesmo domínio do servidor: o Caddy serve a versão web em `/app/`, e o
+/// espelho é uma página dela. A etiqueta vai no **hash** de propósito — assim
+/// ela não entra no registro de acesso nem viaja em `Referer`.
+const linkDoEspelho = (canal: string, alvo: string, etiqueta: string) =>
+  servidor.endereco() + "/app/obs.html#" + canal + "/" + alvo + "/" + etiqueta;
+
+async function copiarParaArea(texto: string, oque: string) {
+  try {
+    await navigator.clipboard.writeText(texto);
+    showToast(oque + " copiado. Cole num Browser Source do OBS.");
+  } catch {
+    // Área de transferência bloqueada: mostrar o endereço ainda serve, dá para
+    // copiar do aviso com o mouse.
+    showToast(texto);
+  }
+}
+
+async function mudarEspelho(item: RoomInfo, ligado: boolean, rotacionar = false) {
+  try {
+    await api<void>("/api/rooms/" + encodeURIComponent(item.id) + "/espelho", {
+      method: "PUT",
+      body: JSON.stringify({ ligado, rotacionar }),
+    });
+    showToast(!ligado
+      ? "Espelho desligado. Os endereços antigos não valem mais."
+      : rotacionar
+        ? "Endereços trocados. Refaça as fontes no OBS."
+        : "Espelho ligado. Quem está no canal vê o aviso.");
+  } catch (erro) {
+    showToast(erro instanceof Error ? erro.message : "Não foi possível mudar o espelho.");
+  }
+}
+
+/// Copia o endereço de um alvo: `-` é a grade do canal, ou o nome da pessoa.
+async function copiarEspelho(item: RoomInfo, alvo: string, oque: string) {
+  try {
+    const visao = await api<EspelhoVisao>("/api/rooms/" + encodeURIComponent(item.id) + "/espelho");
+    const etiqueta = alvo === "-" ? visao.grade : visao.pessoas.find(p => key(p.username) === key(alvo))?.etiqueta;
+    if (!etiqueta) { showToast("Essa pessoa não participa mais deste servidor."); return; }
+    await copiarParaArea(linkDoEspelho(item.id, alvo, etiqueta), oque);
+  } catch (erro) {
+    showToast(erro instanceof Error ? erro.message : "Não foi possível montar o endereço.");
+  }
+}
+
+/// Troca o menu pela lista de quem tem endereço próprio.
+///
+/// Lista do servidor inteiro, e não só de quem está na chamada: quem monta a
+/// cena no OBS faz isso antes de a sessão começar, com a sala vazia.
+async function menuDePessoasDoEspelho(item: RoomInfo, ancora: HTMLElement) {
+  let visao: EspelhoVisao;
+  try { visao = await api<EspelhoVisao>("/api/rooms/" + encodeURIComponent(item.id) + "/espelho"); }
+  catch (erro) { showToast(erro instanceof Error ? erro.message : "Não foi possível ler o espelho."); return; }
+
+  closeUserMenu();
+  const menu = document.createElement("div");
+  menu.className = "user-menu";
+  const titulo = document.createElement("p");
+  titulo.className = "menu-title";
+  titulo.textContent = "Link de quem?";
+  menu.append(titulo);
+  for (const pessoa of visao.pessoas) {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.textContent = getDisplayName(pessoa.username);
+    botao.onclick = () => {
+      closeUserMenu();
+      void copiarParaArea(linkDoEspelho(item.id, pessoa.username, pessoa.etiqueta), "Link de " + getDisplayName(pessoa.username));
+    };
+    menu.append(botao);
+  }
+  montarMenu(menu, ancora);
+}
+
+/// A seção de espelho no menu do canal de voz.
+function acoesDeEspelho(menu: HTMLElement, item: RoomInfo, ancora: HTMLElement) {
+  const titulo = document.createElement("p");
+  titulo.className = "menu-title";
+  titulo.textContent = "Espelho para OBS";
+  menu.append(titulo);
+
+  const acao = (rotulo: string, aoClicar: () => void) => {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.textContent = rotulo;
+    botao.onclick = () => { closeUserMenu(); aoClicar(); };
+    menu.append(botao);
+  };
+
+  if (!item.espelho) {
+    acao("Ligar espelho", () => void mudarEspelho(item, true));
+    return;
+  }
+  acao("Copiar link da grade", () => void copiarEspelho(item, "-", "Link da grade"));
+  // Este não fecha o menu: ele troca o menu pela lista de pessoas.
+  const escolher = document.createElement("button");
+  escolher.type = "button";
+  escolher.textContent = "Copiar link de uma pessoa…";
+  escolher.onclick = () => void menuDePessoasDoEspelho(item, ancora);
+  menu.append(escolher);
+  acao("Trocar endereços", () => void mudarEspelho(item, true, true));
+  acao("Desligar espelho", () => void mudarEspelho(item, false));
+}
+
 /// Menu do canal: renomear, apagar e trocar de grupo.
 function menuDoCanal(item: RoomInfo, ancora: HTMLElement, evento: MouseEvent) {
   // `podeCriarCanal`, e nao `podeOrganizar`: este ultimo exige que o servidor
@@ -9573,6 +10057,7 @@ function menuDoCanal(item: RoomInfo, ancora: HTMLElement, evento: MouseEvent) {
     opcoesDeMestre(menu, item.mestre, daCategoria ? (daCategoria.mestre || "") : null,
       nome => void escolherMestre("/api/rooms/" + encodeURIComponent(item.id) + "/mestre", nome));
     acoesDeCapa(menu, item);
+    acoesDeEspelho(menu, item, ancora);
   }
 
   // A secao de mover so faz sentido onde ha grupos para onde mover.
@@ -10574,6 +11059,20 @@ byId("pessoas-abrir").addEventListener("click", () => {
   casca.classList.toggle("pessoas-abertas");
 });
 byId("gaveta-veu").addEventListener("click", fecharGavetas);
+// Os mesmos dois lugares, agora tambem pelo dedo. O estado continua morando
+// aqui: os gestos so pedem e perguntam. Ver `gestos.ts`.
+instalarGestos({
+  gaveta: (lado, abrir) => {
+    fecharGavetas();
+    if (abrir) casca.classList.add(lado === "esquerda" ? "gaveta-aberta" : "pessoas-abertas");
+  },
+  gavetaAberta: () =>
+    casca.classList.contains("gaveta-aberta") ? "esquerda"
+      : casca.classList.contains("pessoas-abertas") ? "direita"
+        : null,
+  palcoAberto: () => olhandoAChamada,
+  fecharPalco,
+});
 window.addEventListener("keydown", evento => { if (evento.key === "Escape") fecharGavetas(); });
 // Fecha quando o toque trocou o que esta na tela — canal, conversa, chamada —,
 // e nao quando so trocou de servidor: ai a pessoa ainda vai escolher o canal.
@@ -10644,6 +11143,17 @@ function linhasDeVoz(item: RoomInfo): HTMLElement[] {
     }
     const mestreDaSala = servers.find(s => s.id === item.serverId)?.modoMestre ? mestreDesignado(item.id) : null;
     if (mestreDaSala) button.title = (button.title ? button.title + "\n" : "") + "Mestre: " + getDisplayName(mestreDaSala);
+    // Espelho ligado fica na cara de todo mundo, e não escondido no menu de
+    // quem administra: a câmera de quem entra aqui pode estar numa transmissão,
+    // e isso não pode ser descoberto depois.
+    if (item.espelho) {
+      const marca = document.createElement("span");
+      marca.className = "espelho-marca";
+      marca.textContent = "OBS";
+      button.append(marca);
+      button.title = (button.title ? button.title + "\n" : "")
+        + "Espelho ligado: a câmera deste canal pode estar numa transmissão";
+    }
     // Clicar no canal em que voce ja esta **nao** desconecta: abre o palco, e o
     // clique de novo devolve o canal de texto. Sair e o botao de desligar, que
     // existe para isso e nao se aperta sem querer ao procurar quem esta na sala.
@@ -11093,15 +11603,19 @@ async function medirPing() {
 window.setInterval(() => void medirPing(), 10_000);
 /// Aviso curto no canto. Com `aoClicar`, ele vira botao: clicar leva ao lugar
 /// de onde o aviso veio, e some.
-function showToast(text: string, aoClicar?: () => void) {
+/// `grande` e para aviso de mensagem: fonte maior, faixa colorida na borda e
+/// mais tempo na tela. Um aviso de 12px no canto por 7 segundos se perdia no
+/// meio de uma chamada — era o que fazia "chegou mensagem" passar batido.
+function showToast(text: string, aoClicar?: () => void, grande = false) {
   toastEl.textContent = text;
   toastEl.classList.remove("hidden");
   toastEl.classList.toggle("clicavel", Boolean(aoClicar));
+  toastEl.classList.toggle("grande", grande);
   toastEl.onclick = aoClicar
     ? () => { toastEl.classList.add("hidden"); aoClicar(); }
     : null;
   window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => toastEl.classList.add("hidden"), aoClicar ? 7000 : 4000);
+  toastTimer = window.setTimeout(() => toastEl.classList.add("hidden"), grande ? 12000 : aoClicar ? 7000 : 4000);
 }
 
 /// Diz de onde veio a mensagem quando a notificacao do Windows nao apareceu.
@@ -11117,6 +11631,7 @@ async function avisarOrigem(
   mostrouNoSistema: Promise<boolean>,
   texto: string,
   ir: () => void,
+  grande = false,
 ) {
   // O aviso na tela é o "pop-up" que o não incomodar cala. Sai antes de esperar
   // o sistema: com o estado ligado, `notifyMessage` já devolveu falso.
@@ -11124,7 +11639,7 @@ async function avisarOrigem(
   if (await mostrouNoSistema) return;
   // Estando de olho na janela, o aviso e util; minimizado, quem resolve e a
   // notificacao do sistema, e ela ja foi decidida acima.
-  showToast(texto, ir);
+  showToast(texto, ir, grande);
 }
 function initials(name: string) { return name.split(/\s+/).slice(0, 2).map(part => part[0]?.toUpperCase()).join(""); }
 async function resume() {
@@ -11146,6 +11661,10 @@ void decidirAberturaInicial();
 void prepararNotificacoes();
 bloquearRecarregar();
 byId("app-version").textContent = "v" + __APP_VERSION__;
+// Log de audio (dev): marca inicio e troca de dispositivo, que suspende contexto
+// e pode trocar a saida sem ninguem tocar no app.
+logAudio("APP iniciou v" + __APP_VERSION__);
+navigator.mediaDevices?.addEventListener?.("devicechange", () => logAudio("DISPOSITIVOS de audio mudaram"));
 
 // ------------------------------------------------------ aviso de versao
 // Duas situacoes viram simbolo no alto da janela: uma versao nova baixando, e
