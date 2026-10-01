@@ -19,7 +19,7 @@ import {
 import { relaunch } from "@tauri-apps/plugin-process";
 import { checkForUpdate, procurarAtualizacao, instalarAtualizacao, canalAtual, definirCanal, notasSalvas, limparNotas } from "./updates";
 import {
-  pickSource, startShare, stopShare, pauseShare, switchShare, targetAlive,
+  pickSource, pickQuality, startShare, stopShare, pauseShare, switchShare, targetAlive,
   codecPreferido, guardarCodec, type CodecPreferido,
 } from "./screenshare";
 import {
@@ -1408,7 +1408,7 @@ byId("friend-search-form").addEventListener("submit", event => event.preventDefa
 byId<HTMLInputElement>("friend-search").addEventListener("input", async event => {
   const term = (event.currentTarget as HTMLInputElement).value.trim();
   const results = byId("friend-search-results");
-  if (term.length < 2) { results.replaceChildren(emptyLine("Digite 2 letras ou mais.")); return; }
+  if (term.length < 2) { results.replaceChildren(emptyLine("Digite o nome completo.")); return; }
   try {
     const found = await api<{ users: string[] }>("/api/users/search?q=" + encodeURIComponent(term));
     const candidates = found.users.filter(name => !friends.some(friend => key(friend) === key(name))
@@ -4090,7 +4090,9 @@ screenButton.onclick = async event => {
   // dentro do aplicativo — fora dele nao ha o que fugir, e `getDisplayMedia` e
   // o unico caminho possivel.
   if (!ehTauri()) {
-    const qualidade = readQuality();
+    const qualidade = await pickQuality(QUALITIES, readQuality(), byId);
+    if (!qualidade || !room) return;
+    saveQuality(qualidade.id);
     try {
       await room.localParticipant.setScreenShareEnabled(true, {
         audio: true,

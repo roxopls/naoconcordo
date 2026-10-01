@@ -3284,12 +3284,11 @@ async fn search_users(State(state): State<AppState>, headers: HeaderMap, Query(q
     let Some((_, session)) = authenticated(&state, &headers).await else { return error(StatusCode::UNAUTHORIZED, "Sessao invalida ou expirada."); };
     let needle = profile_key(query.q.unwrap_or_default().trim());
     if needle.chars().count() < 2 { return Json(SearchOutput { users: Vec::new() }).into_response(); }
-    let mine = profile_key(&session.username);
-    let mut users: Vec<String> = state.users.read().await.values()
-        .filter(|account| profile_key(&account.username) != mine && profile_key(&account.username).contains(&needle))
-        .map(|account| account.username.clone()).collect();
-    users.sort_by_key(|name| name.to_lowercase());
-    users.truncate(20);
+    // So o nome inteiro casa. Busca por trecho devolvia a lista de contas a
+    // quem digitasse duas letras.
+    let users: Vec<String> = if needle == profile_key(&session.username) { Vec::new() } else {
+        state.users.read().await.get(&needle).map(|account| account.username.clone()).into_iter().collect()
+    };
     Json(SearchOutput { users }).into_response()
 }
 async fn list_friends(State(state): State<AppState>, headers: HeaderMap) -> Response {

@@ -314,7 +314,7 @@
       <h2>Amigos</h2>
       <p class="muted">Você só conversa com quem for seu amigo.</p>
       <form id="friend-search-form">
-        <label>Procurar<input id="friend-search" maxlength="24" placeholder="Nome do usuário" autocomplete="off" /></label>
+        <label>Procurar<input id="friend-search" maxlength="24" placeholder="Nome completo do usuário" autocomplete="off" /></label>
       </form>
       <div id="friend-search-results" class="friend-rows"></div>
       <p class="section-label">SEUS AMIGOS</p>
@@ -529,6 +529,17 @@
       <div class="dialog-actions">
         <button id="source-cancel" type="button">Cancelar</button>
         <button id="source-start" class="primary" type="button" disabled>Compartilhar</button>
+      </div>
+    </dialog>
+
+    <dialog id="tela-web-dialog" class="wide-dialog">
+      <h2>Compartilhar tela</h2>
+      <h3 class="dialog-subtitle">Qualidade</h3>
+      <div id="tela-web-qualidade" class="quality-options"></div>
+      <p class="muted small">Se travar em vez de borrar, desça um nível.</p>
+      <div class="dialog-actions">
+        <button id="tela-web-cancelar" type="button">Cancelar</button>
+        <button id="tela-web-ok" class="primary" type="button">Escolher tela</button>
       </div>
     </dialog>
 

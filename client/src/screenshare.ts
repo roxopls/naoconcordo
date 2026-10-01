@@ -123,6 +123,77 @@ export type Escolha<T> = {
   audioGain: number;
 };
 
+/// Degraus de qualidade num slider: a ordem ja e crescente, entao arrastar
+/// para a direita sempre significa "mais pesado". Um radio por degrau
+/// ocupava a altura toda do dialogo e escondia a grade de fontes.
+function montarQualidade<T extends Option>(
+  qualities: T[],
+  current: T,
+  box: HTMLElement,
+  aoEscolher: (escolhida: T) => void,
+) {
+  const range = document.createElement("input");
+  range.type = "range";
+  range.className = "quality-range";
+  range.min = "0";
+  range.max = String(qualities.length - 1);
+  range.step = "1";
+  range.value = String(Math.max(0, qualities.findIndex(item => item.id === current.id)));
+
+  const ticks = document.createElement("div");
+  ticks.className = "quality-ticks";
+  ticks.replaceChildren(...qualities.map(item => {
+    const tick = document.createElement("span");
+    tick.textContent = item.label;
+    // Clicar no rotulo salta para o degrau: o alvo do slider e fino demais.
+    tick.onclick = () => { range.value = String(qualities.indexOf(item)); mostrar(); };
+    return tick;
+  }));
+
+  const readout = document.createElement("p");
+  readout.className = "quality-readout";
+
+  const mostrar = () => {
+    const escolhida = qualities[Number(range.value)] || qualities[0];
+    readout.textContent = escolhida.hint + " — até "
+      + Math.round(escolhida.bitrate / 100000) / 10 + " Mbps";
+    for (const [indice, tick] of Array.from(ticks.children).entries()) {
+      tick.classList.toggle("active", indice === Number(range.value));
+    }
+    aoEscolher(escolhida);
+  };
+  range.oninput = mostrar;
+
+  box.replaceChildren(range, ticks, readout);
+  mostrar();
+}
+
+/// No navegador quem escolhe a tela e o proprio navegador; aqui so se decide a
+/// qualidade antes de chamar o seletor dele. Devolve `null` se a pessoa desistir.
+export function pickQuality<T extends Option>(
+  qualities: T[],
+  current: T,
+  byId: <E extends HTMLElement>(id: string) => E,
+): Promise<T | null> {
+  return new Promise(resolve => {
+    const dialog = byId<HTMLDialogElement>("tela-web-dialog");
+    let escolhida = current;
+    montarQualidade(qualities, current, byId("tela-web-qualidade"), valor => { escolhida = valor; });
+    // Resolve no proprio clique, e nao no `close` do dialogo: esse evento chega
+    // numa tarefa depois, e o seletor do navegador so abre enquanto o clique
+    // ainda vale como gesto. O Esc vem pelo `cancel`.
+    const terminar = (valor: T | null) => {
+      dialog.oncancel = null;
+      if (dialog.open) dialog.close();
+      resolve(valor);
+    };
+    dialog.oncancel = () => terminar(null);
+    byId<HTMLButtonElement>("tela-web-cancelar").onclick = () => terminar(null);
+    byId<HTMLButtonElement>("tela-web-ok").onclick = () => terminar(escolhida);
+    dialog.showModal();
+  });
+}
+
 /// Mostra a grade de fontes e devolve o que a pessoa escolheu, ou `null` se
 /// desistir. `qualities` vem de fora para nao duplicar os degraus do app, e o
 /// tipo e generico para o `id` voltar estreito como entrou.
@@ -248,42 +319,7 @@ export function pickSource<T extends Option>(
       return card;
     }));
 
-    // Degraus de qualidade num slider: a ordem ja e crescente, entao arrastar
-    // para a direita sempre significa "mais pesado". Um radio por degrau
-    // ocupava a altura toda do dialogo e escondia a grade de fontes.
-    const range = document.createElement("input");
-    range.type = "range";
-    range.className = "quality-range";
-    range.min = "0";
-    range.max = String(qualities.length - 1);
-    range.step = "1";
-    range.value = String(Math.max(0, qualities.findIndex(item => item.id === chosenQuality.id)));
-
-    const ticks = document.createElement("div");
-    ticks.className = "quality-ticks";
-    ticks.replaceChildren(...qualities.map(item => {
-      const tick = document.createElement("span");
-      tick.textContent = item.label;
-      // Clicar no rotulo salta para o degrau: o alvo do slider e fino demais.
-      tick.onclick = () => { range.value = String(qualities.indexOf(item)); mostrar(); };
-      return tick;
-    }));
-
-    const readout = document.createElement("p");
-    readout.className = "quality-readout";
-
-    const mostrar = () => {
-      chosenQuality = qualities[Number(range.value)] || qualities[0];
-      readout.textContent = chosenQuality.hint + " — até "
-        + Math.round(chosenQuality.bitrate / 100000) / 10 + " Mbps";
-      for (const [indice, tick] of Array.from(ticks.children).entries()) {
-        tick.classList.toggle("active", indice === Number(range.value));
-      }
-    };
-    range.oninput = mostrar;
-
-    qualityBox.replaceChildren(range, ticks, readout);
-    mostrar();
+    montarQualidade(qualities, current, qualityBox, escolhida => { chosenQuality = escolhida; });
 
     // Por aplicativo, e nao por janela: duas janelas do mesmo programa sao a
     // mesma arvore de processos, e o loopback pega a arvore inteira.

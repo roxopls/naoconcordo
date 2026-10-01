@@ -51,9 +51,11 @@ check("historicoSemAmizadeBloqueado", blockedHistory.status === 403, String(bloc
 const blockedKey = await get("/api/keys/" + encodeURIComponent(bob.username), alice.token);
 check("chaveSemVinculoBloqueada", blockedKey.status === 403, String(blockedKey.status));
 
-// Busca encontra o usuario pelo prefixo.
-const search = await (await get("/api/users/search?q=" + encodeURIComponent(bob.username.slice(0, 6)), alice.token)).json();
-check("buscaEncontraUsuario", search.users.some(name => name === bob.username));
+// Busca so encontra pelo nome inteiro; trecho nao lista ninguem.
+const search = await (await get("/api/users/search?q=" + encodeURIComponent(bob.username), alice.token)).json();
+check("buscaEncontraUsuario", search.users.length === 1 && search.users[0] === bob.username);
+const trecho = await (await get("/api/users/search?q=" + encodeURIComponent(bob.username.slice(0, 6)), alice.token)).json();
+check("buscaPorTrechoNaoLista", trecho.users.length === 0, JSON.stringify(trecho.users));
 
 const requested = await post("/api/friends/request", { username: bob.username }, alice.token);
 check("pedidoCriado", requested.status === 201, String(requested.status));
