@@ -22,6 +22,8 @@ services:
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
       LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL}
+      # Por onde o servidor fala com o LiveKit para encerrar a sessao de quem saiu.
+      LIVEKIT_API_URL: ${LIVEKIT_API_URL:-http://127.0.0.1:7880}
       # Busca de GIF. Opcionais: sem chave o botao nao aparece no aplicativo.
       GIF_PROVIDER: ${GIF_PROVIDER:-giphy}
       GIF_API_KEY: ${GIF_API_KEY:-}

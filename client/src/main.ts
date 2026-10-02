@@ -3295,6 +3295,13 @@ async function connectVoice() {
         if (!atual()) return;
         logAudio("SALA caiu motivo=" + motivo);
         reconectandoDesde = 0;
+        // A captura de tela em Rust e as janelas separadas tem conexao propria
+        // com a sala e nao caem junto com esta. Sem encerrar aqui, entrar na
+        // chamada por outro computador derrubava a pessoa deste e deixava a
+        // tela dela no ar, com o botao ja apagado.
+        void pararDeCompartilhar();
+        if (screenWindowOpen) void closeScreenWindow().catch(() => { /* ja fechou */ });
+        if (cameraWindowOpen) void closeCameraWindow().catch(() => { /* idem */ });
         setStatus("fora da chamada", false); playLeave(); voiceRoomId = ""; resetMediaState(); refresh();
         // 2 e `DUPLICATE_IDENTITY`: a mesma conta entrou na chamada de outro
         // lugar e o servidor de voz deixou a conexao nova no lugar desta. Sem

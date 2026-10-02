@@ -28,6 +28,7 @@ mod chamadas;
 mod miniatura;
 mod previa;
 mod lembretes;
+mod livekit;
 mod registro;
 mod sala;
 
@@ -54,7 +55,7 @@ const MAX_PREF_CHAVE: usize = 80;
 const MAX_PREF_VALOR: usize = 8 * 1024;
 
 #[derive(Clone)]
-struct Config { auth_salt: String, owner_password: String, admin_username: String, livekit_key: String, livekit_secret: String, livekit_url: String, data_dir: PathBuf, upload_dir: PathBuf, upload_fallback_dir: PathBuf, upload_primary_cap: u64,
+struct Config { auth_salt: String, owner_password: String, admin_username: String, livekit_key: String, livekit_secret: String, livekit_url: String, livekit_api: String, data_dir: PathBuf, upload_dir: PathBuf, upload_fallback_dir: PathBuf, upload_primary_cap: u64,
     /// Chave da busca de GIF, e de qual provedor ela e. Sem chave o botao nao
     /// aparece no cliente.
     ///
@@ -106,6 +107,8 @@ struct AppState {
     //
     // Guardado por **socket**, e nao por nome: ver `Presenca`.
     voice: Arc<RwLock<HashMap<String, Vec<Presenca>>>>,
+    /// Tokens de chamada emitidos ha poucos segundos. Ver `livekit.rs`.
+    tokens_recentes: Arc<RwLock<HashMap<String, std::time::Instant>>>,
     files: Arc<RwLock<HashMap<String, StoredFile>>>,
     keys: Arc<RwLock<HashMap<String, IdentityKey>>>,
     // A identidade privada de cada conta, cifrada pelo proprio dono. O servidor
@@ -896,6 +899,9 @@ async fn main() {
         livekit_key: required("LIVEKIT_API_KEY"),
         livekit_secret: required("LIVEKIT_API_SECRET"),
         livekit_url: env::var("LIVEKIT_PUBLIC_URL").unwrap_or_else(|_| "ws://livekit:7880".into()),
+        // Por onde o servidor fala com o LiveKit para encerrar sessoes. Nao e o
+        // endereco publico: aquele e o que os aplicativos discam.
+        livekit_api: env::var("LIVEKIT_API_URL").unwrap_or_else(|_| "http://127.0.0.1:7880".into()),
         data_dir: PathBuf::from(env::var("DATA_DIR").unwrap_or_else(|_| "/app/data".into())),
         upload_dir: PathBuf::from(env::var("UPLOAD_DIR").unwrap_or_else(|_| "/app/uploads".into())),
         upload_fallback_dir: PathBuf::from(env::var("UPLOAD_FALLBACK_DIR").unwrap_or_else(|_| "/app/uploads-fallback".into())),
@@ -934,6 +940,7 @@ async fn main() {
         mestres: Default::default(),
         lembretes: Arc::new(RwLock::new(load_json(&config.data_dir, "lembretes.json").await)),
         voice: Default::default(),
+        tokens_recentes: Default::default(),
         files: Arc::new(RwLock::new(load_json(&config.data_dir, "files.json").await)),
         keys: Arc::new(RwLock::new(load_json(&config.data_dir, "keys.json").await)),
         cofres: Arc::new(RwLock::new(load_json(&config.data_dir, "cofres.json").await)),
@@ -1574,6 +1581,7 @@ async fn livekit_token(State(state): State<AppState>, headers: HeaderMap, Json(b
               else { s.username.clone() };
     let metadata = body.screen.then(|| format!(r#"{{"kind":"screen","owner":{}}}"#,
         serde_json::Value::String(s.username.clone())));
+    let identidade = sub.clone();
     let claims = LivekitClaims { iss: state.config.livekit_key.clone(), sub, name: s.username,
         nbf: issued.saturating_sub(10), exp: issued + 21600,
         video: VideoGrant {
@@ -1590,6 +1598,12 @@ async fn livekit_token(State(state): State<AppState>, headers: HeaderMap, Json(b
     match encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(state.config.livekit_secret.as_bytes())) {
         Ok(token) => {
             anotar(registro::Resultado::Ok);
+            livekit::anotar_token(&state, &livekit_room, &identidade).await;
+            // Em segundo plano: e limpeza, e nao pode atrasar a entrada.
+            if !body.screen && !body.viewer {
+                let (estado, sala) = (state.clone(), livekit_room.clone());
+                tokio::spawn(async move { livekit::limpar_auxiliares(&estado, &quem, &sala).await; });
+            }
             Json(LivekitOutput { token, url: state.config.livekit_url.clone(), room: livekit_room }).into_response()
         }
         Err(erro) => {
@@ -3687,7 +3701,16 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: Session,
                             None => None,
                         }
                     };
+                    let anterior = sala_de_voz.clone();
                     set_voice(&state, &session.username, socket_id, &mut sala_de_voz, destino).await;
+                    // Saiu do canal, ou trocou: a sessao de voz do canal antigo
+                    // acaba aqui, sem esperar o LiveKit dar pela falta. Em
+                    // segundo plano, porque este laco tambem entrega os eventos
+                    // do socket, e LiveKit lento os seguraria.
+                    if let Some(antiga) = anterior.filter(|antiga| Some(antiga) != sala_de_voz.as_ref()) {
+                        let (estado, quem) = (state.clone(), session.username.clone());
+                        tokio::spawn(async move { livekit::encerrar_saida(&estado, &quem, &antiga).await; });
+                    }
                     continue;
                 }
                 // O estado escolhido pela pessoa, ou a ausencia automatica que o

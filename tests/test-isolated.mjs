@@ -34,6 +34,9 @@ const ambiente = {
   LIVEKIT_API_KEY: "teste",
   LIVEKIT_API_SECRET: segredo(),
   LIVEKIT_PUBLIC_URL: "ws://127.0.0.1:7880",
+  // Para onde o servidor manda os pedidos de encerrar sessao. So a suite
+  // `test-encerrar` poe alguem escutando ai; nas outras ninguem responde.
+  LIVEKIT_API_URL: "http://127.0.0.1:7899",
   DATA_DIR: dataDir,
   UPLOAD_DIR: uploadDir,
   UPLOAD_FALLBACK_DIR: fallbackDir,
@@ -60,7 +63,7 @@ async function esperarSaude() {
 function rodar(suite) {
   return new Promise(resolve => {
     const filho = spawn(process.execPath, [path.join(aqui, suite)], {
-      env: { ...process.env, TEST_ENV: envFile, TEST_API: api, TEST_DATA_DIR: dataDir, TEST_ADMIN: ambiente.ADMIN_USERNAME },
+      env: { ...process.env, TEST_ENV: envFile, TEST_API: api, TEST_DATA_DIR: dataDir, TEST_ADMIN: ambiente.ADMIN_USERNAME, TEST_LIVEKIT_API_PORT: "7899" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let texto = "";
@@ -71,7 +74,7 @@ function rodar(suite) {
 }
 
 const suites = process.argv.slice(2).length ? process.argv.slice(2)
-  : ["test-invites.mjs", "test-account.mjs", "test-friends.mjs", "test-servers.mjs", "test-files.mjs", "test-messages.mjs", "test-cofre.mjs", "test-updates.mjs", "test-link-arquivo.mjs", "test-identidade.mjs", "test-gifs.mjs", "test-preferencias.mjs", "test-categorias.mjs", "test-previa.mjs", "test-chamadas.mjs", "test-voz-presenca.mjs", "test-emotes-skin.mjs", "test-presenca-estado.mjs", "test-grupos.mjs", "test-chamadas-privadas.mjs", "test-amigos-ordem.mjs", "test-comandos.mjs"];
+  : ["test-invites.mjs", "test-account.mjs", "test-friends.mjs", "test-servers.mjs", "test-files.mjs", "test-messages.mjs", "test-cofre.mjs", "test-updates.mjs", "test-link-arquivo.mjs", "test-identidade.mjs", "test-gifs.mjs", "test-preferencias.mjs", "test-categorias.mjs", "test-previa.mjs", "test-chamadas.mjs", "test-voz-presenca.mjs", "test-encerrar.mjs", "test-emotes-skin.mjs", "test-presenca-estado.mjs", "test-grupos.mjs", "test-chamadas-privadas.mjs", "test-amigos-ordem.mjs", "test-comandos.mjs"];
 
 if (!await esperarSaude()) {
   console.error("backend nao respondeu em /health\n" + saida);
