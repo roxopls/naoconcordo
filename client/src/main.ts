@@ -1104,6 +1104,94 @@ function announceVoice(roomId: string) {
   if (chat?.readyState !== WebSocket.OPEN) return;
   chat.send(JSON.stringify({ type: "voice", roomId }));
 }
+// ------------------------------------------------- voltar depois de cair
+//
+// Medido em producao (08/10/2026, 24 h de log do LiveKit): um dos usuarios
+// juntou 3 `PEER_CONNECTION_DISCONNECTED` contra 1 de cada um dos outros, e
+// relatou "a call trava e eu tenho que reentrar toda hora". O LiveKit tenta
+// retomar sozinho; quando ele desiste, o aplicativo desmontava a chamada e
+// deixava a pessoa clicando no canal de novo a cada piscada da rede dela.
+//
+// Agora o aplicativo tenta voltar por conta, com espera crescente, e desiste
+// quando a queda foi **decisao de alguem** — ai voltar sozinho brigaria com
+// quem decidiu.
+
+/// Quanto esperar antes de cada tentativa. Crescente: rede que caiu de vez nao
+/// melhora porque se pediu token quatro vezes em oito segundos.
+const ESPERAS_PARA_VOLTAR = [2_000, 5_000, 12_000, 30_000];
+/// Motivos do LiveKit em que nao se tenta voltar.
+///
+/// 1 `CLIENT_INITIATED`, 2 `DUPLICATE_IDENTITY`, 4 `PARTICIPANT_REMOVED`,
+/// 5 `ROOM_DELETED`, 12 `USER_REJECTED`.
+const QUEDAS_DEFINITIVAS = new Set([1, 2, 4, 5, 12]);
+/// Quanto tempo a chamada precisa durar para a sequencia de tentativas voltar
+/// ao começo.
+///
+/// Sem este prazo, uma rede que pisca a cada cinco segundos zeraria o contador
+/// a cada reconexao e o aplicativo tentaria voltar para sempre, de dois em dois
+/// segundos. Trinta segundos de pe e o que separa "voltou" de "nao parou de
+/// cair".
+const VOLTA_ESTAVEL_MS = 30_000;
+let tentativaDeVolta = 0;
+let voltaAgendada = 0;
+let zeraTentativas = 0;
+
+/// Esquece a volta agendada **sem** zerar o contador: a chamada subiu, mas
+/// ainda nao provou que ficou de pe.
+function esquecerVolta() {
+  window.clearTimeout(voltaAgendada);
+  voltaAgendada = 0;
+  window.clearTimeout(zeraTentativas);
+  zeraTentativas = window.setTimeout(() => { tentativaDeVolta = 0; }, VOLTA_ESTAVEL_MS);
+}
+
+/// Cancela a volta de vez.
+///
+/// Chamado por quem mexe na chamada na mao: a escolha da pessoa — entrar noutro
+/// canal, sair de vez — ganha da tentativa automatica, que senao a arrastaria
+/// de volta para a chamada que ela acabou de deixar.
+function cancelarVolta() {
+  window.clearTimeout(voltaAgendada);
+  voltaAgendada = 0;
+  window.clearTimeout(zeraTentativas);
+  zeraTentativas = 0;
+  tentativaDeVolta = 0;
+}
+
+function agendarVolta(canal: string, comCamera: boolean, motivo: number) {
+  if (!canal || QUEDAS_DEFINITIVAS.has(motivo)) return;
+  if (tentativaDeVolta >= ESPERAS_PARA_VOLTAR.length) {
+    tentativaDeVolta = 0;
+    setStatus("fora da chamada", false);
+    showToast("A chamada caiu e não foi possível voltar. Clique no canal para entrar de novo.");
+    return;
+  }
+  const espera = ESPERAS_PARA_VOLTAR[tentativaDeVolta];
+  tentativaDeVolta += 1;
+  setStatus("voltando para a chamada", false);
+  voltaAgendada = window.setTimeout(() => {
+    voltaAgendada = 0;
+    void (async () => {
+      // A pessoa pode ter entrado noutro canal enquanto esperavamos; ai a
+      // chamada que vale e a dela.
+      if (room || voiceRoomId) return;
+      try {
+        voiceRoomId = canal; announceVoice(canal); renderNavigation(); updateCallControls();
+        await connectVoice();
+        // A camera volta como estava: quem caiu com ela ligada nao pediu para
+        // desliga-la.
+        if (comCamera && room) {
+          camEnabled = true; camButton.classList.add("active");
+          await ligarCamera(room);
+        }
+      } catch {
+        voiceRoomId = ""; announceVoice("");
+        agendarVolta(canal, comCamera, 0);
+      }
+    })();
+  }, espera);
+}
+
 /// Sai da chamada e desliga tudo que dependia dela.
 ///
 /// Parar a transmissao aqui e obrigatorio: a captura em Rust tem conexao
@@ -1111,6 +1199,8 @@ function announceVoice(roomId: string) {
 /// da chamada deixava a tela sendo publicada na sala antiga com o botao ja
 /// apagado, e a interface passava a mentir sobre o que estava no ar.
 async function sairDaChamada() {
+  // Sair na mao cancela a volta automatica: ver `cancelarVolta`.
+  cancelarVolta();
   cadeiaAtual = null;
   pararPortao();
   portaoAberto = true;
@@ -3289,12 +3379,18 @@ async function connectVoice() {
       }, 60);
     };
     const quemE = (p?: { name?: string; identity: string }) => p ? (p.name || p.identity) : "?";
-    next.on(RoomEvent.Connected, () => { if (!atual()) return; logAudio("SALA conectada " + next.name); setStatus("online", true); playJoin(); silenciarAvisos(2000); announceDeafened(); refresh(); }).on(RoomEvent.Reconnecting, () => { if (!atual()) return; logAudio("SALA reconectando"); setStatus("reconectando", false); reconectandoDesde ||= Date.now(); })
+    next.on(RoomEvent.Connected, () => { if (!atual()) return; logAudio("SALA conectada " + next.name); esquecerVolta(); setStatus("online", true); playJoin(); silenciarAvisos(2000); announceDeafened(); refresh(); }).on(RoomEvent.Reconnecting, () => { if (!atual()) return; logAudio("SALA reconectando"); setStatus("reconectando", false); reconectandoDesde ||= Date.now(); })
       .on(RoomEvent.Reconnected, () => { if (!atual()) return; logAudio("SALA reconectada"); reconectandoDesde = 0; setStatus("online", true); silenciarAvisos(2000); })
       .on(RoomEvent.Disconnected, motivo => {
         if (!atual()) return;
         logAudio("SALA caiu motivo=" + motivo);
         reconectandoDesde = 0;
+        // Guardados antes da limpeza: e com eles que a volta automatica sabe
+        // para onde voltar e como. Sair na mao nao passa por aqui — aquele
+        // caminho zera `room` antes de desconectar, e `atual()` descarta o
+        // evento —, entao toda queda que chega aqui foi involuntaria.
+        const canalQueCaiu = voiceRoomId;
+        const comCamera = camEnabled;
         // A captura de tela em Rust e as janelas separadas tem conexao propria
         // com a sala e nao caem junto com esta. Sem encerrar aqui, entrar na
         // chamada por outro computador derrubava a pessoa deste e deixava a
@@ -3307,6 +3403,7 @@ async function connectVoice() {
         // lugar e o servidor de voz deixou a conexao nova no lugar desta. Sem
         // dizer isso, a chamada simplesmente cai do nada.
         if (motivo === 2) showToast("Sua conta entrou nesta chamada de outro aparelho.");
+        agendarVolta(canalQueCaiu, comCamera, motivo ?? 0);
       })
       .on(RoomEvent.ParticipantConnected, participant => {
         if (!atual()) return;
@@ -3437,8 +3534,30 @@ async function connectVoice() {
         detachTrack(track.sid);
         if (track.sid) removeCamera(track.sid);
       })
-      .on(RoomEvent.LocalTrackPublished, publication => { if (atual()) attachLocalPublication(publication); })
-      .on(RoomEvent.LocalTrackUnpublished, publication => { if (!atual()) return; const sid = publication.track?.sid; if (sid) { detachTrack(sid); removeCamera(sid); } });
+      .on(RoomEvent.LocalTrackPublished, publication => {
+        if (!atual()) return;
+        attachLocalPublication(publication);
+        // Guardar a faixa da camera para poder soltar o dispositivo depois.
+        // Ver `faixaDeCameraLocal`.
+        if (publication.source === Track.Source.Camera) {
+          faixaDeCameraLocal = publication.track?.mediaStreamTrack ?? null;
+          camEnabled = true; camButton.classList.add("active");
+        }
+      })
+      .on(RoomEvent.LocalTrackUnpublished, publication => {
+        if (!atual()) return;
+        const sid = publication.track?.sid;
+        if (sid) { detachTrack(sid); removeCamera(sid); }
+        // A faixa pode acabar sem passar pelo botao: dispositivo desconectado,
+        // driver reiniciado, LiveKit despublicando ao reconectar. Sem este
+        // ajuste `camEnabled` ficava preso em ligado, o botao aceso, e o
+        // proximo clique era gasto desligando o que ja estava desligado.
+        if (publication.source === Track.Source.Camera) {
+          if (faixaDeCameraLocal?.readyState === "live") faixaDeCameraLocal.stop();
+          faixaDeCameraLocal = null;
+          camEnabled = false; camButton.classList.remove("active");
+        }
+      });
     await next.connect(access.url, access.token, { autoSubscribe: true });
     // Entrar num canal de voz ja abre o microfone, como no Discord.
     try {
@@ -4232,6 +4351,34 @@ async function ligarCamera(sala: Room) {
     { resolution: { width: q.largura, height: q.altura, frameRate: q.fps } },
     { videoEncoding: { maxBitrate: q.bitrate, maxFramerate: q.fps } });
 }
+
+/// A ultima faixa de camera que este aplicativo abriu.
+///
+/// O SDK para o dispositivo sozinho quando muta a faixa de camera
+/// (`LocalVideoTrack.mute` chama `stop()` para apagar a luz), mas so faz isso
+/// pela sala que ele conhece. Depois de uma queda, `room` passa a apontar para
+/// outra sala, e a faixa da sala antiga fica **viva**: a luz da webcam continua
+/// acesa, o Windows segue dizendo "camera em uso", e nao ha mais ninguem para
+/// desligar aquilo. Guardar a referencia aqui e o que permite parar o
+/// dispositivo de verdade, venha o desligamento de onde vier.
+let faixaDeCameraLocal: MediaStreamTrack | null = null;
+
+/// Desliga a camera e **solta o dispositivo**.
+///
+/// `setCameraEnabled(false)` continua sendo o caminho normal — e ele que avisa
+/// os outros e muta a publicacao. O `stop()` depois e cinto e suspensorio para
+/// a faixa que o SDK nao alcanca mais.
+async function desligarCamera(sala: Room | null) {
+  const daSala = sala?.localParticipant.getTrackPublication(Track.Source.Camera)?.track?.mediaStreamTrack;
+  try {
+    await sala?.localParticipant.setCameraEnabled(false);
+  } finally {
+    for (const faixa of [daSala, faixaDeCameraLocal]) {
+      if (faixa && faixa.readyState === "live") faixa.stop();
+    }
+    faixaDeCameraLocal = null;
+  }
+}
 const seletorQualidadeCamera = byId<HTMLSelectElement>("qualidade-camera");
 seletorQualidadeCamera.value = qualidadeCamera();
 seletorQualidadeCamera.addEventListener("change", async () => {
@@ -4249,13 +4396,31 @@ seletorQualidadeCamera.addEventListener("change", async () => {
 });
 
 // Camera e compartilhamento sao independentes: dao para ficar ligados juntos.
+//
+// Abrir a camera leva um ou dois segundos. O botao acende no clique, e nao
+// quando a faixa fica pronta: apagado nesse intervalo ele pedia um segundo
+// clique, que entrava como "desligar" e derrubava a camera recem-aberta.
+// `camOcupada` descarta o clique que chega com o anterior ainda em curso.
+let camOcupada = false;
 camButton.onclick = async () => {
-  if (!await ensureInCall() || !room) return;
+  if (camOcupada) return;
+  camOcupada = true;
+  // Enquanto o Windows abre a camera o botao fica em espera. Sem isto o unico
+  // sinal eram um ou dois segundos de nada, que e indistinguivel de clique
+  // perdido — e o segundo clique chegava para desligar o que estava abrindo.
+  camButton.classList.add("pendente");
   try {
+    if (!await ensureInCall() || !room) return;
     camEnabled = !camEnabled;
-    if (camEnabled) await ligarCamera(room); else await room.localParticipant.setCameraEnabled(false);
     camButton.classList.toggle("active", camEnabled);
+    // Medido no log do modo desenvolvedor: "demora para ligar" precisa de
+    // numero antes de virar conserto. O que leva tempo aqui e o Windows abrir o
+    // dispositivo, e so o log diz se foram 800 ms ou 6 s.
+    const comecou = performance.now();
+    if (camEnabled) await ligarCamera(room); else await desligarCamera(room);
+    logAudio("CAMERA " + (camEnabled ? "ligou" : "desligou") + " em " + Math.round(performance.now() - comecou) + " ms");
   } catch { camEnabled = false; camButton.classList.remove("active"); showToast("O Windows não liberou a câmera."); }
+  finally { camOcupada = false; camButton.classList.remove("pendente"); }
 };
 // Ensurdecer arrasta o microfone junto, como no Discord: quem nao esta
 // ouvindo nao tem como saber que continua sendo ouvido, e falar sozinho para
@@ -11507,6 +11672,11 @@ function renderPeople() {
 }
 function resetMediaState() {
   sharingNow.clear();
+  // A luz da webcam nao pode sobreviver a chamada. O SDK para as faixas locais
+  // ao desconectar, mas isto cobre a faixa orfa: a que ficou numa sala que
+  // `room` nao aponta mais. Ver `faixaDeCameraLocal`.
+  if (faixaDeCameraLocal?.readyState === "live") faixaDeCameraLocal.stop();
+  faixaDeCameraLocal = null;
   micEnabled = false; screenEnabled = false; camEnabled = false;
   micButton.classList.remove("active"); screenButton.classList.remove("active"); camButton.classList.remove("active");
   setIcon(micButton, "mic-off"); setIcon(audioButton, "audio");

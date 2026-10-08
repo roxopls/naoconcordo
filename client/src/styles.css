@@ -390,6 +390,12 @@ button.primary.small { box-shadow: none; background: #f3f3f4; color: #17171b; bo
 .ic-sm { width: 15px; height: 15px; }
 .control .ic { width: 21px; height: 21px; }
 .control { display: grid; place-items: center; gap: 3px; }
+/* Botao esperando o sistema — abrir a camera leva um ou dois segundos. O clique
+   que chega nesse intervalo e descartado no JS; aqui o que muda e o sinal de
+   que algo esta em curso, porque "nada acontecendo" e indistinguivel de clique
+   perdido, e era isso que levava ao segundo clique que desligava a camera
+   recem-aberta. */
+.control.pendente { opacity: .55; cursor: progress; }
 .channel .ic.room-dot { width: 17px; height: 17px; color: #777783; }
 .channel:hover .ic.room-dot, .channel.active .ic.room-dot { color: #c9c9d2; }
 .add-room .ic { width: 15px; height: 15px; }
