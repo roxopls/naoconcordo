@@ -15,6 +15,9 @@
 
 import { RemoteParticipant, RemoteTrack, Room, RoomEvent, Track } from "livekit-client";
 import { grade } from "./gridlayout";
+import { instalarFiltroDeCaminho } from "./caminho";
+
+instalarFiltroDeCaminho();
 
 type Acesso = { token: string; url: string; room: string; alvo: string; expiraEm: number };
 

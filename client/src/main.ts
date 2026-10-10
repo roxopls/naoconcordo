@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { abrirExterno, abrirJanela, bloquearRecarregar, ehCelularNativo, ehDesktop, ehTauri } from "./ambiente";
 import { ZOOMS, mudarZoom, prepararEscala, vigiarAtalhosDeZoom, zoomEscolhido } from "./escala";
 import { baixarPreferencias, vigiarPreferencias } from "./preferencias";
+import { caminhoEmUso, caminhoEscolhido, guardarCaminho, instalarFiltroDeCaminho, type Caminho } from "./caminho";
 import {
   LocalTrackPublication, RemoteAudioTrack, RemoteParticipant, RemoteTrack, RemoteTrackPublication, Room, RoomEvent,
   Track, VideoPresets,
@@ -5978,6 +5979,44 @@ byId<HTMLSelectElement>("codec-tela")?.addEventListener("change", event => {
   guardarCodec(valor);
   showToast("Vale na próxima vez que você começar a compartilhar.");
 });
+instalarFiltroDeCaminho();
+/// O caminho so e decidido quando a conexao nasce: trocar no meio da chamada
+/// pede sair e entrar, e e melhor fazer isso aqui do que deixar a escolha
+/// valendo "na proxima" sem a pessoa saber qual esta em uso.
+byId<HTMLSelectElement>("caminho")?.addEventListener("change", event => {
+  const valor = (event.currentTarget as HTMLSelectElement).value as Caminho;
+  guardarCaminho(valor);
+  logAudio("CAMINHO escolhido " + valor);
+  if (!inCall()) { showToast("Vale na próxima chamada."); return; }
+  showToast("Reconectando a chamada pelo caminho escolhido.");
+  void reentrarNaChamadaDev().then(() => window.setTimeout(() => void pintarCaminhoEmUso(), 3000));
+});
+/// Por onde a midia da chamada passa agora, lido de uma faixa qualquer.
+async function lerCaminhoEmUso(): Promise<string | null> {
+  if (!room) return null;
+  for (const participante of room.remoteParticipants.values()) {
+    for (const pub of participante.trackPublications.values()) {
+      if (!pub.track) continue;
+      try {
+        const lido = await caminhoEmUso(await pub.track.getRTCStatsReport());
+        if (lido) return lido;
+      } catch { /* a faixa pode ter saido no meio da leitura */ }
+    }
+  }
+  for (const pub of room.localParticipant.trackPublications.values()) {
+    if (!pub.track) continue;
+    try {
+      const lido = await caminhoEmUso(await pub.track.getRTCStatsReport());
+      if (lido) return lido;
+    } catch { /* idem */ }
+  }
+  return null;
+}
+const NOTA_DO_CAMINHO = "A rápida tem o menor atraso em voz, câmera e tela. A compatível passa por redes que seguram a rápida.";
+async function pintarCaminhoEmUso() {
+  const emUso = inCall() ? await lerCaminhoEmUso() : null;
+  byId("caminho-nota").textContent = NOTA_DO_CAMINHO + (emUso ? " Em uso agora: " + emUso + "." : "");
+}
 byId<HTMLInputElement>("forcar-dxgi")?.addEventListener("change", event => {
   const marcado = (event.currentTarget as HTMLInputElement).checked;
   localStorage.setItem(DXGI_KEY, marcado ? "1" : "0");
@@ -6019,6 +6058,8 @@ async function openDevicesDialog() {
   aplicarAmbiente();
   byId<HTMLInputElement>("forcar-dxgi").checked = forcarDuplicacao();
   byId<HTMLSelectElement>("codec-tela").value = codecPreferido();
+  byId<HTMLSelectElement>("caminho").value = caminhoEscolhido();
+  void pintarCaminhoEmUso();
   relatarSuporteDeCodec();
   void mostrarDiagnosticoDaBorda();
   await fillDeviceLists();
@@ -6483,6 +6524,8 @@ async function atualizarDiagnostico() {
   // caso que so reentrar resolvia.
   if (vozesParadas.size) linhas.push("SEM PACOTE  " + [...vozesParadas].join(", "));
   const vozes = await diagnosticoDeVozes();
+  const emUso = await lerCaminhoEmUso();
+  if (emUso) vozes.unshift("CAMINHO " + emUso + "  escolha=" + caminhoEscolhido());
   linhas.push(...vozes);
   logAudio(...vozes);
   linhas.push(...await diagnosticoDeRecepcao());

@@ -14,6 +14,8 @@
 // assistir (ver `telaP2P`), porque em malha cada espectador custa uma copia
 // inteira da subida de quem transmite.
 
+import { semFiltroDeCaminho } from "./caminho";
+
 /// `tela` separa a conexao de tela da principal, e diz de que ponta veio:
 /// "t" de quem transmite, "e" de quem assiste. Sem o lado, duas pessoas
 /// transmitindo uma para a outra misturariam os candidatos das duas conexoes.
@@ -80,7 +82,7 @@ export class MalhaP2P {
   }
 
   private novaConexao() {
-    return new RTCPeerConnection({ iceServers: this.ice, bundlePolicy: "max-bundle" });
+    return semFiltroDeCaminho(new RTCPeerConnection({ iceServers: this.ice, bundlePolicy: "max-bundle" }));
   }
 
   private abrir(sessao: number, nome: string) {
@@ -314,7 +316,7 @@ export class TransmissorWeb implements TransmissorDeTela {
 
   async ofertar(sessao: number, ice: RTCIceServer[]) {
     this.remover(sessao);
-    const pc = new RTCPeerConnection({ iceServers: ice, bundlePolicy: "max-bundle" });
+    const pc = semFiltroDeCaminho(new RTCPeerConnection({ iceServers: ice, bundlePolicy: "max-bundle" }));
     this.conexoes.set(sessao, pc);
     pc.onicecandidate = e => { if (e.candidate) this.candidato_(sessao, e.candidate.toJSON()); };
     for (const faixa of this.stream.getTracks()) pc.addTransceiver(faixa, { direction: "sendonly", streams: [this.stream] });

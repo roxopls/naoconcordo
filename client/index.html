@@ -600,6 +600,14 @@
             </select></label>
             <label>Saída de áudio<select id="device-out"></select></label>
 
+            <p class="section-label">CONEXÃO DA CHAMADA</p>
+            <label>Caminho<select id="caminho">
+              <option value="auto">Automática</option>
+              <option value="udp">Rápida (UDP)</option>
+              <option value="tcp">Compatível (TCP)</option>
+            </select></label>
+            <p id="caminho-nota" class="muted small">A rápida tem o menor atraso em voz, câmera e tela. A compatível passa por redes que seguram a rápida.</p>
+
             <p class="section-label">TESTE DO MICROFONE</p>
             <div class="mic-meter"><span id="mic-meter-fill"></span><span id="mic-meter-limiar"></span></div>
             <p id="mic-meter-nota" class="muted small">Fale para ver o nível. A marca clara é o ponto em que o microfone abre.</p>

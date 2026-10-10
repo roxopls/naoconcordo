@@ -14,6 +14,9 @@ import "./styles.css";
 import { instalarBarra } from "./barra";
 
 import * as servidor from "./servidor";
+import { instalarFiltroDeCaminho } from "./caminho";
+
+instalarFiltroDeCaminho();
 
 // A janela separada precisa do mesmo servidor que a principal escolheu.
 const API = servidor.endereco();
