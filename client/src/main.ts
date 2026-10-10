@@ -4455,6 +4455,11 @@ function attachTrack(track: RemoteTrack, participant: RemoteParticipant) {
     // juntas soam como eco. O video continua voltando, que e a previa.
     if (isScreenParticipant(participant) && key(who) === key(session?.username || "")) return;
     const audio = anexar(track);
+    // O livekit reaproveita o `<audio>` de uma faixa que saiu. Se ela estava
+    // reforcada, o elemento volta com a marca e fica mudo para sempre na voz de
+    // outra pessoa, que nao passa pelo contexto. Se esta faixa for reforcada,
+    // `applyVolume` abaixo marca de novo.
+    delete audio.dataset.reforcado;
     audio.id = "audio-" + track.sid;
     audio.dataset.naoconcordoAudio = "true";
     audio.dataset.who = who;
